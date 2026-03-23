@@ -112,6 +112,23 @@ class ZipTiffProvider:
         self.use_zip = use_zip
         self._shape: tuple[int, int] | None = None
         self._num_timepoints: int | None = None
+        # Keep the last-opened ZIP handle open (like Java's ZipImage)
+        self._open_zip = None       # zipfile.ZipFile instance
+        self._open_zip_path = None  # Path the handle is for
+
+    def _get_zip_handle(self, zip_path: Path):
+        """Get (or reuse) an open ZipFile handle."""
+        if self._open_zip is not None and self._open_zip_path == zip_path:
+            return self._open_zip
+        # Close previous handle
+        if self._open_zip is not None:
+            try:
+                self._open_zip.close()
+            except Exception:
+                pass
+        self._open_zip = zipfile.ZipFile(zip_path, "r")
+        self._open_zip_path = zip_path
+        return self._open_zip
 
     def get_plane(self, time: int, plane: int, channel: int = 0) -> np.ndarray:
         """Load a single plane from a TIFF file (possibly inside a ZIP)."""
@@ -179,16 +196,16 @@ class ZipTiffProvider:
         return self.tif_directory / filename
 
     def _read_from_zip(self, zip_path: Path, tifffile) -> np.ndarray:
-        """Read a TIFF from inside a ZIP file."""
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            tif_entries = [n for n in zf.namelist() if n.lower().endswith((".tif", ".tiff"))]
-            if not tif_entries:
-                raise FileNotFoundError(f"No TIFF entries in {zip_path}")
-            entry = tif_entries[0]
-            data = zf.read(entry)
-            img = tifffile.imread(io.BytesIO(data))
-            self._update_shape(img)
-            return img
+        """Read a TIFF from inside a ZIP file, reusing the open handle."""
+        zf = self._get_zip_handle(zip_path)
+        tif_entries = [n for n in zf.namelist() if n.lower().endswith((".tif", ".tiff"))]
+        if not tif_entries:
+            raise FileNotFoundError(f"No TIFF entries in {zip_path}")
+        entry = tif_entries[0]
+        data = zf.read(entry)
+        img = tifffile.imread(io.BytesIO(data))
+        self._update_shape(img)
+        return img
 
     def _scan_timepoints(self) -> int:
         """Scan directory to count available timepoints."""
@@ -298,6 +315,10 @@ class StackTiffProvider:
 
     Each timepoint is a single TIFF file containing all z-planes as pages.
     File naming: {prefix}t{time:03d}.tif (configurable via pattern).
+
+    Like Java AceTree, keeps the current TiffFile handle open so that
+    switching z-planes within the same timepoint reads a single page
+    without re-parsing the entire file.
     """
 
     def __init__(
@@ -312,8 +333,22 @@ class StackTiffProvider:
         self._shape: tuple[int, int] | None = None
         self._num_planes_cached: int | None = None
         self._num_timepoints: int | None = None
+        # Open file handle cache (like Java's persistent ZipFile)
+        self._open_tif = None       # tifffile.TiffFile instance
+        self._open_tif_time = None  # timepoint the handle is for
 
-    def get_plane(self, time: int, plane: int, channel: int = 0) -> np.ndarray:
+    def _get_tiff_handle(self, time: int):
+        """Get (or reuse) an open TiffFile handle for the given timepoint."""
+        if self._open_tif is not None and self._open_tif_time == time:
+            return self._open_tif
+
+        # Close previous handle
+        if self._open_tif is not None:
+            try:
+                self._open_tif.close()
+            except Exception:
+                pass
+
         try:
             import tifffile
         except ImportError:
@@ -323,18 +358,49 @@ class StackTiffProvider:
         if not path.exists():
             raise FileNotFoundError(f"Stack not found: {path}")
 
-        img = tifffile.imread(str(path))
+        self._open_tif = tifffile.TiffFile(str(path))
+        self._open_tif_time = time
 
-        # Handle different dimensionalities
-        # Could be (Z, Y, X), (C, Z, Y, X), (Z, C, Y, X)
-        if img.ndim == 2:
-            # Single plane
-            if plane != 1:
-                raise IndexError(f"Only 1 plane available, requested {plane}")
-            self._update_shape(img)
-            return img
-        elif img.ndim == 3:
-            # (Z, Y, X) or (C, Y, X) depending on context
+        # Cache metadata from the open handle
+        n_pages = len(self._open_tif.pages)
+        if n_pages > 0 and self._shape is None:
+            page = self._open_tif.pages[0]
+            self._shape = (page.shape[-2], page.shape[-1])
+        if self._num_planes_cached is None:
+            self._num_planes_cached = n_pages
+
+        return self._open_tif
+
+    def get_plane(self, time: int, plane: int, channel: int = 0) -> np.ndarray:
+        tif = self._get_tiff_handle(time)
+        n_pages = len(tif.pages)
+
+        if n_pages == 0:
+            raise FileNotFoundError(f"Empty TIFF stack for time={time}")
+
+        if n_pages == 1:
+            # Single page — might be 2D or multi-dim
+            img = tif.pages[0].asarray()
+            if img.ndim == 2:
+                if plane != 1:
+                    raise IndexError(f"Only 1 plane available, requested {plane}")
+                self._update_shape(img)
+                return img
+            # Multi-dim single page (rare): fall through to full read
+            return self._extract_plane_from_array(img, plane, channel)
+
+        # Multi-page: read single page directly (the key optimisation)
+        plane_idx = plane - 1
+        if plane_idx >= n_pages:
+            raise IndexError(f"Plane {plane} out of range (max {n_pages})")
+
+        result = tif.pages[plane_idx].asarray()
+        self._update_shape(result)
+        return result
+
+    def _extract_plane_from_array(self, img, plane, channel):
+        """Extract a plane from a pre-loaded multi-dimensional array."""
+        if img.ndim == 3:
             plane_idx = plane - 1
             if plane_idx >= img.shape[0]:
                 raise IndexError(f"Plane {plane} out of range (max {img.shape[0]})")
@@ -343,8 +409,6 @@ class StackTiffProvider:
             self._num_planes_cached = img.shape[0]
             return result
         elif img.ndim == 4:
-            # (C, Z, Y, X) or (Z, C, Y, X)
-            # Assume (C, Z, Y, X) if num_channels > 1
             plane_idx = plane - 1
             if self._num_channels > 1:
                 result = img[channel, plane_idx]
@@ -356,33 +420,22 @@ class StackTiffProvider:
             raise ValueError(f"Unexpected image dimensions: {img.shape}")
 
     def get_stack(self, time: int, channel: int = 0) -> np.ndarray:
-        try:
-            import tifffile
-        except ImportError:
-            raise ImportError("tifffile is required: pip install tifffile")
+        tif = self._get_tiff_handle(time)
+        n_pages = len(tif.pages)
 
-        path = self._build_path(time)
-        if not path.exists():
-            raise FileNotFoundError(f"Stack not found: {path}")
+        if n_pages == 0:
+            raise FileNotFoundError(f"Empty TIFF stack for time={time}")
 
-        img = tifffile.imread(str(path))
+        # Read all pages into a stack
+        planes = []
+        for page in tif.pages:
+            planes.append(page.asarray())
+        img = np.stack(planes)
 
-        if img.ndim == 2:
-            self._update_shape(img)
-            return img[np.newaxis, ...]  # Add z dimension
-        elif img.ndim == 3:
-            self._num_planes_cached = img.shape[0]
-            if img.shape[0] > 0:
-                self._update_shape(img[0])
-            return img
-        elif img.ndim == 4 and self._num_channels > 1:
-            stack = img[channel]
-            self._num_planes_cached = stack.shape[0]
-            if stack.shape[0] > 0:
-                self._update_shape(stack[0])
-            return stack
-        else:
-            return img
+        self._num_planes_cached = img.shape[0]
+        if img.shape[0] > 0:
+            self._update_shape(img[0])
+        return img
 
     @property
     def num_timepoints(self) -> int:

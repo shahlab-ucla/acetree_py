@@ -52,6 +52,7 @@ class Cell:
     children: list[Cell] = field(default_factory=list, repr=False)
     nuclei: list[tuple[int, Nucleus]] = field(default_factory=list, repr=False)
     hash_key: str | None = None
+    _nuclei_by_time: dict[int, Nucleus] = field(default_factory=dict, repr=False)
 
     @property
     def lifetime(self) -> int:
@@ -82,6 +83,10 @@ class Cell:
         Returns:
             The Nucleus at that time, or None if not found.
         """
+        # Fast O(1) dict lookup; falls back to linear scan if dict is empty
+        # (for cells built without add_nucleus)
+        if self._nuclei_by_time:
+            return self._nuclei_by_time.get(time)
         for t, nuc in self.nuclei:
             if t == time:
                 return nuc
@@ -90,6 +95,7 @@ class Cell:
     def add_nucleus(self, time: int, nuc: Nucleus) -> None:
         """Add a Nucleus snapshot for a given timepoint."""
         self.nuclei.append((time, nuc))
+        self._nuclei_by_time[time] = nuc
 
     def iter_ancestors(self) -> Iterator[Cell]:
         """Iterate from parent up to root (not including self)."""

@@ -46,8 +46,11 @@ class ViewerIntegration:
     def __init__(self, app: AceTreeApp) -> None:
         self.app = app
         self._shapes_layer = None
-        # Set of cell names whose labels are hidden (toggled off by left-click)
-        self._hidden_labels: set[str] = set()
+        # Label visibility model:
+        #   _shown_labels: set of cell names whose labels are individually shown
+        #   _labels_global_visible: master toggle (True = shown labels are drawn)
+        self._shown_labels: set[str] = set()
+        self._labels_global_visible: bool = True
         # Division line layer (Feature 3)
         self._division_line_layer = None
 
@@ -86,6 +89,18 @@ class ViewerIntegration:
             opacity=0.8,
         )
         self._division_line_layer.data = []
+
+        # Set Nuclei as the active layer so clicks always reach it
+        self._ensure_nuclei_active()
+
+    def _ensure_nuclei_active(self) -> None:
+        """Keep the Nuclei shapes layer as the active layer."""
+        viewer = self.app.viewer
+        if viewer is not None and self._shapes_layer is not None:
+            try:
+                viewer.layers.selection.active = self._shapes_layer
+            except Exception:
+                pass
 
     def update_overlays(self) -> None:
         """Refresh the nucleus overlay for the current view state."""
@@ -148,16 +163,17 @@ class ViewerIntegration:
         if new_selected_idx >= 0:
             edge_widths[new_selected_idx] = 2.0
 
-        # Filter names to match polygons (skip tiny circles)
-        # Hide labels that have been toggled off via left-click
+        # Filter names to match polygons (skip tiny circles).
+        # Label model: only show labels for cells in _shown_labels,
+        # and only when _labels_global_visible is True.
         filtered_names = []
         for i in range(len(centers)):
             if radii[i] >= 0.5:
                 name = names[i]
-                if name in self._hidden_labels:
-                    filtered_names.append("")  # Hidden — show blank
-                else:
+                if self._labels_global_visible and name in self._shown_labels:
                     filtered_names.append(name)
+                else:
+                    filtered_names.append("")
 
         try:
             # Clear and re-add shapes
@@ -185,14 +201,16 @@ class ViewerIntegration:
         # ── Feature 3: division line for active cell's daughters ──
         self._update_division_line()
 
+        # Keep Nuclei layer active so mouse clicks always reach it
+        self._ensure_nuclei_active()
+
     def _update_division_line(self) -> None:
         """Draw a line connecting daughter cells for one frame after division.
 
-        Only drawn when:
-        - A cell is selected
-        - current_time == cell.end_time + 1 (the frame right after division)
-        - The cell has exactly 2 children (division, not death)
-        - Both daughter nuclei are visible at the current time
+        Checks both the selected cell and its parent, because tracking
+        auto-follows to a daughter when time advances past a division —
+        so by the time this runs, current_cell_name is typically the
+        daughter, not the parent that divided.
 
         The line disappears on any z-plane change, time change, or selection
         change (because update_overlays is called in all those cases and
@@ -211,16 +229,23 @@ class ViewerIntegration:
         if cell is None:
             return
 
-        # Only show on the frame immediately after division
-        if self.app.current_time != cell.end_time + 1:
+        cur_time = self.app.current_time
+
+        # Find the dividing cell: either the selected cell itself,
+        # or its parent (if tracking just followed into a daughter).
+        dividing = None
+        if cur_time == cell.end_time + 1 and len(cell.children) == 2:
+            dividing = cell
+        elif cell.parent is not None and cur_time == cell.parent.end_time + 1 \
+                and len(cell.parent.children) == 2:
+            dividing = cell.parent
+
+        if dividing is None:
             return
 
-        if len(cell.children) != 2:
-            return
-
-        child_a, child_b = cell.children
-        nuc_a = child_a.get_nucleus_at(self.app.current_time)
-        nuc_b = child_b.get_nucleus_at(self.app.current_time)
+        child_a, child_b = dividing.children
+        nuc_a = child_a.get_nucleus_at(cur_time)
+        nuc_b = child_b.get_nucleus_at(cur_time)
 
         if nuc_a is None or nuc_b is None:
             return
@@ -241,8 +266,8 @@ class ViewerIntegration:
     def _on_click(self, layer, event) -> None:
         """Handle mouse clicks on the shapes layer.
 
-        Left-click:  Toggle the clicked cell's label visibility on/off.
-        Right-click: Select the clicked cell and make it active.
+        Left-click:  Toggle the clicked cell's label on/off.
+        Right-click: Select the clicked cell and make it active (also shows label).
         """
         if event.type != "mouse_press":
             return
@@ -255,30 +280,47 @@ class ViewerIntegration:
         # napari coords are (row, col) = (y, x)
         y, x = coords[-2], coords[-1]
 
-        # Find the closest nucleus at this position
-        nuc = self.app.manager.find_closest_nucleus(
-            x, y, float(self.app.current_plane), self.app.current_time
-        )
-
-        if nuc is None:
+        # Check for relink pick mode first (consumes any click)
+        if self.app._relink_pick_mode:
+            self.app._handle_relink_pick(x, y)
             return
 
         button = event.button  # 1 = left, 2 = right
 
         if button == 2:
-            # Right-click: check if we're in relink pick mode first
-            if self.app._handle_relink_pick(x, y):
-                return  # Pick mode consumed the click
-            # Otherwise: select cell and make active (original behavior)
+            # Right-click: select cell and show its label
             self.app.select_cell_at_position(x, y)
+            if self.app.current_cell_name:
+                self._shown_labels.add(self.app.current_cell_name)
         else:
-            # Left-click: toggle label visibility for this cell
-            name = nuc.effective_name or f"Nuc{nuc.index}"
-            if name in self._hidden_labels:
-                self._hidden_labels.discard(name)
-            else:
-                self._hidden_labels.add(name)
-            self.update_overlays()
+            # Left-click: toggle label for nearest cell without selecting
+            nuc = self.app.manager.find_closest_nucleus(
+                x, y, float(self.app.current_plane), self.app.current_time
+            )
+            if nuc is not None:
+                name = nuc.effective_name or f"Nuc{nuc.index}"
+                if name in self._shown_labels:
+                    self._shown_labels.discard(name)
+                else:
+                    self._shown_labels.add(name)
+                self.update_overlays()
+
+    # ── Label visibility controls ─────────────────────────────────
+
+    def toggle_labels_global(self) -> None:
+        """Toggle global label visibility on/off."""
+        self._labels_global_visible = not self._labels_global_visible
+        self.update_overlays()
+
+    def clear_labels(self) -> None:
+        """Clear all individually shown labels."""
+        self._shown_labels.clear()
+        self.update_overlays()
+
+    @property
+    def labels_visible(self) -> bool:
+        """Whether labels are currently globally visible."""
+        return self._labels_global_visible
 
 
 def make_circle_polygon(cx: float, cy: float, radius: float,

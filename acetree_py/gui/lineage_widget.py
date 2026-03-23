@@ -124,6 +124,11 @@ class LineageWidget(QWidget):  # type: ignore[misc]
         self._layout: dict[str, LayoutNode] | None = None
         self._layout_params = LayoutParams()
 
+        # Incremental selection tracking
+        self._prev_selected_name: str = ""
+        self._cell_items: dict[str, list] = {}  # cell_name -> [QGraphicsItems]
+        self._time_indicator_item = None
+
         self._build_ui()
         self.rebuild_tree()
 
@@ -219,22 +224,57 @@ class LineageWidget(QWidget):  # type: ignore[misc]
         return best_root
 
     def refresh_selection(self) -> None:
-        """Update the selection highlight without rebuilding the whole tree."""
-        # For now, full redraw — could optimize to only update highlight
-        self._redraw()
+        """Update the selection highlight incrementally.
+
+        Instead of clearing and redrawing all 600+ cells, only redraws
+        the previously-selected and newly-selected cells, plus the
+        time indicator line.
+        """
+        if self._layout is None or not self._cell_items:
+            # No cached items — need a full redraw (first time or after rebuild)
+            self._redraw()
+            return
+
+        new_name = self.app.current_cell_name
+        old_name = self._prev_selected_name
+
+        if new_name == old_name:
+            # Selection unchanged — only update time indicator
+            self._update_time_indicator()
+            return
+
+        # Redraw only the two affected cells
+        if old_name and old_name in self._layout:
+            self._redraw_single_cell(old_name, is_selected=False)
+        if new_name and new_name in self._layout:
+            self._redraw_single_cell(new_name, is_selected=True)
+
+        self._prev_selected_name = new_name
+        self._update_time_indicator()
 
     def _redraw(self) -> None:
-        """Redraw the tree from the cached layout."""
+        """Full redraw of the tree from the cached layout."""
         if self._layout is None:
             return
 
         self._scene.clear()
+        self._cell_items.clear()
+        self._time_indicator_item = None
 
         for name, node in self._layout.items():
             self._draw_cell(node)
 
-        # Draw time indicator (horizontal line at current time)
-        if self.app.current_time > 0:
+        self._prev_selected_name = self.app.current_cell_name
+        self._update_time_indicator()
+
+    def _update_time_indicator(self) -> None:
+        """Update the time indicator line position without full redraw."""
+        # Remove old indicator
+        if self._time_indicator_item is not None:
+            self._scene.removeItem(self._time_indicator_item)
+            self._time_indicator_item = None
+
+        if self.app.current_time > 0 and self._layout:
             root_time = self._layout_params.root_time
             if root_time is None and self.app.manager.lineage_tree and self.app.manager.lineage_tree.root:
                 root_time = self.app.manager.lineage_tree.root.start_time
@@ -243,54 +283,79 @@ class LineageWidget(QWidget):  # type: ignore[misc]
                     (self.app.current_time - root_time) * self._layout_params.y_scale
                 bounds = compute_tree_bounds(self._layout)
                 pen = QPen(QColor(255, 255, 0, 80), 1, Qt.DashLine)
-                self._scene.addLine(bounds[0] - 20, y, bounds[2] + 20, y, pen)
+                self._time_indicator_item = self._scene.addLine(
+                    bounds[0] - 20, y, bounds[2] + 20, y, pen,
+                )
+
+    def _redraw_single_cell(self, cell_name: str, is_selected: bool) -> None:
+        """Redraw a single cell's graphics items (for selection changes)."""
+        # Remove old items for this cell
+        for item in self._cell_items.get(cell_name, []):
+            self._scene.removeItem(item)
+        self._cell_items[cell_name] = []
+
+        node = self._layout.get(cell_name)
+        if node is None:
+            return
+
+        self._draw_cell_with_state(node, is_selected)
 
     def _draw_cell(self, node: LayoutNode) -> None:
         """Draw a single cell's branch, label, and connectors."""
         is_selected = (node.cell_name == self.app.current_cell_name)
+        self._draw_cell_with_state(node, is_selected)
+
+    def _draw_cell_with_state(self, node: LayoutNode, is_selected: bool) -> None:
+        """Draw a single cell, tracking its items for incremental updates."""
+        items = []
 
         # Vertical branch line (with expression coloring)
         if node.y_end > node.y_start:
-            self._draw_branch(node, is_selected)
+            items.extend(self._draw_branch(node, is_selected))
 
         # Division connector (horizontal line to children)
         for child_name, child_x in node.children_x:
             child_node = self._layout.get(child_name)
             if child_node:
                 pen = QPen(COLOR_DIVISION, 1.5)
-                self._scene.addLine(
+                item = self._scene.addLine(
                     node.x, child_node.y_start,
                     child_x, child_node.y_start,
                     pen,
                 )
+                items.append(item)
 
         # Cell name label
-        self._draw_label(node, is_selected)
+        items.append(self._draw_label(node, is_selected))
 
         # Birth dot
         dot_size = 3
         color = COLOR_SELECTED if is_selected else QColor(150, 150, 255)
-        self._scene.addEllipse(
+        item = self._scene.addEllipse(
             node.x - dot_size / 2, node.y_start - dot_size / 2,
             dot_size, dot_size,
             QPen(Qt.NoPen), color,
         )
+        items.append(item)
 
-    def _draw_branch(self, node: LayoutNode, is_selected: bool) -> None:
-        """Draw a vertical branch with expression coloring."""
+        self._cell_items[node.cell_name] = items
+
+    def _draw_branch(self, node: LayoutNode, is_selected: bool) -> list:
+        """Draw a vertical branch with expression coloring. Returns items."""
         width = SELECTED_WIDTH if is_selected else BRANCH_WIDTH
+        items = []
 
         if not node.expression_values or all(v == 0 for v in node.expression_values):
             # Uniform color
             color = COLOR_SELECTED if is_selected else COLOR_BRANCH
             pen = QPen(color, width)
-            self._scene.addLine(node.x, node.y_start, node.x, node.y_end, pen)
-            return
+            items.append(self._scene.addLine(node.x, node.y_start, node.x, node.y_end, pen))
+            return items
 
         # Per-timepoint expression coloring
         n_segments = len(node.expression_values)
         if n_segments == 0:
-            return
+            return items
 
         seg_height = (node.y_end - node.y_start) / max(1, n_segments)
 
@@ -305,10 +370,11 @@ class LineageWidget(QWidget):  # type: ignore[misc]
                 color = QColor(int(r * 255), int(g * 255), int(b * 255))
 
             pen = QPen(color, width)
-            self._scene.addLine(node.x, y0, node.x, y1, pen)
+            items.append(self._scene.addLine(node.x, y0, node.x, y1, pen))
+        return items
 
-    def _draw_label(self, node: LayoutNode, is_selected: bool) -> None:
-        """Draw a cell name label."""
+    def _draw_label(self, node: LayoutNode, is_selected: bool):
+        """Draw a cell name label. Returns the text item."""
         font = QFont("Sans Serif", LABEL_FONT_SIZE)
         color = COLOR_SELECTED if is_selected else COLOR_LABEL
 
@@ -330,6 +396,7 @@ class LineageWidget(QWidget):  # type: ignore[misc]
         text_item.setData(0, node.cell_name)  # Store name for click lookup
 
         self._scene.addItem(text_item)
+        return text_item
 
     def _zoom(self, factor: float) -> None:
         """Zoom the view by a factor."""

@@ -165,6 +165,20 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         plane_row.addWidget(self._plane_label)
         plane_row.addStretch()
 
+        # Label visibility controls
+        self._btn_toggle_labels = QPushButton("Labels: ON")
+        self._btn_toggle_labels.setToolTip("Toggle cell name labels on/off")
+        self._btn_toggle_labels.setFixedWidth(80)
+        self._btn_toggle_labels.clicked.connect(self._on_toggle_labels)
+
+        self._btn_clear_labels = QPushButton("Clear Labels")
+        self._btn_clear_labels.setToolTip("Remove all shown cell name labels")
+        self._btn_clear_labels.setFixedWidth(90)
+        self._btn_clear_labels.clicked.connect(self._on_clear_labels)
+
+        plane_row.addWidget(self._btn_toggle_labels)
+        plane_row.addWidget(self._btn_clear_labels)
+
         layout.addLayout(plane_row)
 
     def refresh(self) -> None:
@@ -209,3 +223,18 @@ class PlayerControls(QWidget):  # type: ignore[misc]
             self._stop_play()
             return
         self.app.set_time(new_time)
+
+    def _on_toggle_labels(self) -> None:
+        """Toggle global label visibility."""
+        vi = self.app._viewer_integration
+        if vi is not None:
+            vi.toggle_labels_global()
+            self._btn_toggle_labels.setText(
+                "Labels: ON" if vi.labels_visible else "Labels: OFF"
+            )
+
+    def _on_clear_labels(self) -> None:
+        """Clear all individually shown labels."""
+        vi = self.app._viewer_integration
+        if vi is not None:
+            vi.clear_labels()
