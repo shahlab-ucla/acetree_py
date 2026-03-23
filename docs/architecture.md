@@ -152,7 +152,7 @@ Temporal and spatial bounds. Key property: `z_pix_res = z_res / xy_res` (anisotr
 Central orchestrator that owns `nuclei_record: list[list[Nucleus]]` (indexed `[timepoint_0based][nucleus_index]`).
 
 **Processing pipeline (`process()`):**
-1. `set_all_successors()` — compute forward links from predecessor fields
+1. `set_all_successors()` — compute forward links from predecessor fields (only alive nuclei — dead nuclei with stale predecessor links are excluded to prevent false division signals)
 2. `compute_red_weights()` — apply expression corrections
 3. `_run_naming()` → `IdentityAssigner.assign_identities()`
 4. `_build_tree()` → `build_lineage_tree()`
@@ -390,14 +390,15 @@ Pure computational layout engine (no Qt dependency):
 | `ContrastTools`     | Min/max contrast sliders with auto-contrast  |
 | `EditPanel`         | Edit buttons, interactive relink, undo/redo  |
 
-### 6.6 Interactive Relink (Feature 4)
+### 6.6 Interactive Relink
 
-Replaces index-based dialogs with a pick-mode workflow:
-1. Click "Relink" → enters pick mode (status shows instructions)
-2. Navigate in the viewer to the target cell
-3. Right-click the target → system detects the time gap
-4. Gap = 1: simple relink. Gap > 1: automatic interpolation (required by ZIP format)
-5. Confirmation dialog → execute command
+Replaces index-based dialogs with a unified pick-mode workflow (single "Relink" button):
+1. Select either cell in the pair you want to link (order doesn't matter).
+2. Click **Relink** → enters pick mode (status shows instructions).
+3. Navigate in the viewer to the other cell.
+4. **Right-click** the target → system sorts the two cells by time (earlier = predecessor, later = child).
+5. Gap = 1 frame: simple relink. Gap > 1: automatic interpolation with linearly interpolated intermediates.
+6. Confirmation dialog → execute command.
 
 ---
 

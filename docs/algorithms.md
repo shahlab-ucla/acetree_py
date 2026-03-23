@@ -77,7 +77,7 @@ Step 6:  Forward pass — apply canonical rules:
                  daughter2.identity ← d2
 
 Step 7:  Assign generic names to remaining unnamed nuclei
-         name = "Nuc_{time}_{z}_{x}_{y}"
+         name = "Nuc{time:03d}_{z}_{x}_{y}" (3-digit zero-padded, matching Java format)
 ```
 
 ### 2.2 Pre-assigned Name Handling
@@ -181,6 +181,8 @@ Once the 4 founders are identified, trace backward through predecessor links:
 2. At the AB division point: the predecessor is P0 dividing → name AB and P1 (the other successor).
 3. Trace P0 backward through continuation cells (predecessors with single successor).
 4. Trace EMS and P2 backward → confirm P1 (their shared predecessor).
+
+**Datasets starting at the 4-cell stage:** When the dataset begins at or near the 4-cell stage, AB and P1 may not exist as distinct cells. The back-trace handles this by checking whether the ABa trace actually confirmed an AB cell before treating a division signal as the AB/P0 split. If ABa's trace did not find AB (because the data starts too late), ABp's trace continues naming predecessors as "ABp" continuations rather than falsely identifying them as "AB". The same logic applies to the P2/P1 pair relative to EMS.
 
 ---
 
@@ -361,7 +363,8 @@ $$c \leftarrow R.\text{pop}(), \quad \text{execute}(c), \quad U \leftarrow U \| 
 After every `do`/`undo`/`redo`, the `on_edit` callback is invoked. In the GUI, this triggers:
 1. `set_all_successors()` — recompute forward links
 2. `process()` — rerun naming and tree building
-3. `update_display()` — refresh all visual components
+3. `rebuild_tree()` — full lineage tree layout recomputation (structural edits change the tree topology, so incremental refresh is insufficient)
+4. `update_display()` — refresh all visual components
 
 ---
 

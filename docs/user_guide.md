@@ -193,7 +193,7 @@ All edits are **undoable** (`Ctrl+Z`) and **redoable** (`Ctrl+Y`). Up to 1000 ed
 │ [Rename] [Kill] [Resurrect]│
 │                          │
 │ Link Operations          │
-│ [Relink] [Relink + Interp]│
+│ [Relink]                 │
 │                          │
 │ Status: Ready            │
 │                          │
@@ -233,14 +233,16 @@ The relink operation lets you change which cell a nucleus is linked to as its pr
 
 **How to relink:**
 
-1. Select the nucleus whose link you want to change.
-2. Click **Relink** (or **Relink + Interp** — they work the same way).
-3. The status bar shows **"PICK MODE"** — the system is waiting for you to choose a target.
+1. Select **either** cell in the pair you want to link (the order doesn't matter — the system automatically determines which is earlier/later).
+2. Click **Relink**.
+3. The status bar shows **"PICK MODE"** — the system is waiting for you to choose the other cell.
 4. Navigate through time and z-planes to find the cell you want to link to.
 5. **Right-click** on the target cell.
 6. A confirmation dialog appears showing source and target details.
 
-**Automatic interpolation:** If the target is more than 1 timepoint away from the source, the system automatically creates interpolated nuclei to fill the gap. This is required by the data format — every cell must have a continuous chain of nuclei across consecutive timepoints. The interpolated nuclei are placed at linearly interpolated positions and sizes between the source and target.
+**Bidirectional:** You can pick the earlier cell first and then the later cell, or vice versa. The system sorts the two cells by timepoint — the earlier one becomes the predecessor, the later one becomes the child.
+
+**Automatic interpolation:** If the two cells are more than 1 timepoint apart, the system automatically creates interpolated nuclei to fill the gap. This is required by the data format — every cell must have a continuous chain of nuclei across consecutive timepoints. The interpolated nuclei are placed at linearly interpolated positions and sizes between the two endpoints.
 
 **Adjacent links (gap = 1 frame):** A simple predecessor change is made, no interpolation needed.
 
@@ -312,7 +314,7 @@ When a dataset is loaded, the naming pipeline automatically identifies cells:
 
 ### 10.2 Unnamed Cells
 
-Cells that can't be automatically named receive placeholder names like `Nuc_42_15_200_300` (encoding timepoint, z, x, y). These are typically polar bodies or cells at the edges of the tracked lineage.
+Cells that can't be automatically named receive placeholder names like `Nuc042_15_200_300` (3-digit zero-padded timepoint, then z, x, y). These are typically polar bodies or cells at the edges of the tracked lineage.
 
 ### 10.3 Manual Overrides
 
@@ -347,10 +349,10 @@ The Sulston lineage tree at the bottom of the window shows the full cell lineage
 
 ### Correcting a tracking error
 1. Step through time until you see a cell jump or swap.
-2. Select the incorrectly tracked cell.
+2. Select either the incorrectly tracked cell or the cell it should be linked to.
 3. Click **Relink**.
-4. Navigate to the correct predecessor cell (usually 1 frame back).
-5. Right-click the correct cell → confirm.
+4. Navigate to the other cell (can be earlier or later in time).
+5. Right-click the other cell → confirm. The system automatically sorts by time and determines the predecessor/child relationship.
 
 ### Identifying unnamed cells
 1. Look for gray circles in the image (unnamed cells are gray, named ones are purple).
