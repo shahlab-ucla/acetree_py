@@ -623,6 +623,8 @@ class AceTreeApp:
         # so the tree widget needs a full rebuild, not just a selection refresh.
         if self._lineage_widget:
             self._lineage_widget.rebuild_tree()
+        if self._lineage_list:
+            self._lineage_list.rebuild()
 
         self.update_display()
 
