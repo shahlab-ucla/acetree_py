@@ -171,7 +171,6 @@ class TestEditPanel:
         assert panel._btn_kill is not None
         assert panel._btn_resurrect is not None
         assert panel._btn_relink is not None
-        assert panel._btn_relink_interp is not None
 
     def test_initial_undo_redo_disabled(self, qtbot):
         """Undo/redo buttons initially disabled when no edits."""
@@ -709,8 +708,8 @@ class TestEditPanelIntegration:
         panel._on_relink()
         assert "No nucleus selected" in panel._status_label.text()
 
-    def test_relink_interpolation_no_selection(self, qtbot):
-        """Relink+Interp shows status when no nucleus selected."""
+    def test_relink_no_selection(self, qtbot):
+        """Relink shows status when no nucleus selected."""
         from acetree_py.gui.edit_panel import EditPanel
 
         app = MockApp()
@@ -718,7 +717,7 @@ class TestEditPanelIntegration:
         panel = EditPanel(app)
         qtbot.addWidget(panel)
 
-        panel._on_relink_interpolation()
+        panel._on_relink()
         assert "No nucleus selected" in panel._status_label.text()
 
     def test_resurrect_no_selection(self, qtbot):

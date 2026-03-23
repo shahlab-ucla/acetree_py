@@ -56,6 +56,10 @@ class NucleiManager:
         self._naming_method: int = NEWCANONICAL
         self._expr_corr: str = "none"
         self.naming_warnings: list[NamingWarning] = []
+        # Frame-level cache for alive_nuclei_at() — avoids recomputing
+        # the same filter 3+ times per display update cycle.
+        self._alive_cache_time: int = -1
+        self._alive_cache_result: list[Nucleus] = []
 
     @classmethod
     def from_config(cls, config: AceTreeConfig) -> NucleiManager:
@@ -113,12 +117,17 @@ class NucleiManager:
         self.set_all_successors()
         self.compute_red_weights()
 
+    def invalidate_alive_cache(self) -> None:
+        """Invalidate the alive-nuclei cache (call after edits)."""
+        self._alive_cache_time = -1
+
     def process(self, do_identity: bool = True) -> None:
         """Run the full processing pipeline: naming + tree building.
 
         Args:
             do_identity: If True, run identity assignment (naming).
         """
+        self.invalidate_alive_cache()
         if not self.nuclei_record:
             logger.warning("No nuclei loaded; nothing to process")
             return
@@ -179,8 +188,17 @@ class NucleiManager:
         return []
 
     def alive_nuclei_at(self, time: int) -> list[Nucleus]:
-        """Get only alive nuclei at a timepoint (1-based)."""
-        return [n for n in self.nuclei_at(time) if n.is_alive]
+        """Get only alive nuclei at a timepoint (1-based).
+
+        Result is cached so that multiple calls within the same display
+        update cycle (overlay, cell info, find_closest) don't re-filter.
+        """
+        if time == self._alive_cache_time:
+            return self._alive_cache_result
+        result = [n for n in self.nuclei_at(time) if n.is_alive]
+        self._alive_cache_time = time
+        self._alive_cache_result = result
+        return result
 
     def find_closest_nucleus(
         self,
@@ -324,10 +342,12 @@ class NucleiManager:
         This is the inverse of the predecessor links that are stored in the
         nuclei files.
 
-        Important: alive nuclei (status >= 1) are processed first, so that
-        dead nuclei cannot steal successor slots from living cells. Dead
-        nuclei with predecessor links are still processed (for completeness)
-        but only if their parent still has available successor slots.
+        Important: Only alive nuclei (status >= 1) contribute successor
+        links. Dead nuclei's predecessor links are preserved in the data
+        (for undo/resurrect) but are NOT used to build successor links,
+        because stale predecessor links on dead nuclei create false
+        division signals (e.g., a dead nucleus pointing to the same parent
+        as an alive nucleus makes the parent appear to divide).
         """
         for t in range(len(self.nuclei_record) - 1):
             current = self.nuclei_record[t]
@@ -338,20 +358,16 @@ class NucleiManager:
                 nuc.successor1 = NILLI
                 nuc.successor2 = NILLI
 
-            # Process alive nuclei first, then dead ones.
-            # This ensures dead cells with stale predecessor links
-            # cannot steal successor slots from living daughters.
+            # Only process alive nuclei — dead nuclei's predecessor links
+            # are stale and create false division signals.
             alive_indices = []
-            dead_indices = []
             for j, next_nuc in enumerate(next_nuclei):
                 if next_nuc.predecessor == NILLI:
                     continue
                 if next_nuc.status >= 1:
                     alive_indices.append(j)
-                else:
-                    dead_indices.append(j)
 
-            for j in alive_indices + dead_indices:
+            for j in alive_indices:
                 next_nuc = next_nuclei[j]
                 pred_idx = next_nuc.predecessor - 1  # 1-based to 0-based
                 if not (0 <= pred_idx < len(current)):

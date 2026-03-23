@@ -317,7 +317,7 @@ class AceTreeApp:
         if plane == self.current_plane:
             return
         self.current_plane = plane
-        self.update_display()
+        self._update_display_plane_only()
 
     def next_time(self) -> None:
         """Advance to the next timepoint."""
@@ -357,6 +357,10 @@ class AceTreeApp:
         # Track to cell's z-plane
         if self.tracking:
             self._track_cell_at_time()
+
+        # Show label for the selected cell
+        if self._viewer_integration is not None:
+            self._viewer_integration._shown_labels.add(name)
 
         self.update_display()
 
@@ -438,6 +442,23 @@ class AceTreeApp:
 
         if self._lineage_list:
             self._lineage_list.refresh_selection()
+
+    def _update_display_plane_only(self) -> None:
+        """Refresh only z-plane-sensitive components (skip lineage tree).
+
+        When only the z-plane changes, the lineage tree and list are
+        unaffected — only the image and nucleus overlay need updating.
+        """
+        self._load_image()
+
+        if self._viewer_integration:
+            self._viewer_integration.update_overlays()
+
+        if self._cell_info_panel:
+            self._cell_info_panel.refresh()
+
+        if self._player_controls:
+            self._player_controls.refresh()
 
     def get_cell_info_text(self) -> str:
         """Build the cell info display text for the currently selected cell.
@@ -597,6 +618,12 @@ class AceTreeApp:
         """Callback after any edit command — rebuild tree and refresh display."""
         self.manager.set_all_successors()
         self.manager.process()
+
+        # Structural edits (relink, kill, add) change the lineage tree,
+        # so the tree widget needs a full rebuild, not just a selection refresh.
+        if self._lineage_widget:
+            self._lineage_widget.rebuild_tree()
+
         self.update_display()
 
     def _bind_keys(self) -> None:

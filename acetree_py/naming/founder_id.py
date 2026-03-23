@@ -727,14 +727,21 @@ def _back_trace_founders(
 
         pred = prev_nuclei[pred_idx]
         if pred.successor2 != NILLI:
-            # Should already be named "AB" by the ABa trace
+            if ab_nuc is not None and pred.identity == "AB":
+                # ABa trace already confirmed this as AB — stop here
+                break
+            # If ABa trace did NOT find AB, this "division" is a data artifact
+            # (e.g., multiple nuclei pointing to the same predecessor).
+            # Continue tracing backward and name as ABp continuation.
             if not pred.identity:
-                pred.identity = "AB"
-            break
+                pred.identity = current2.identity
+            current2 = pred
+            start_index = min(start_index, t2)
         else:
             if not pred.identity:
                 pred.identity = current2.identity
             current2 = pred
+            start_index = min(start_index, t2)
 
     # --- Trace AB back to find P0 ---
     if ab_nuc is not None:
@@ -783,6 +790,7 @@ def _back_trace_founders(
                 start_index = min(start_index, t)
 
     # --- Trace EMS back to name P1 ---
+    p1_nuc = None
     t3 = four_cells_time
     current3 = ems_nuc
     while t3 > 0 and current3.predecessor != NILLI:
@@ -796,11 +804,14 @@ def _back_trace_founders(
         if pred.successor2 != NILLI:
             if not pred.identity:
                 pred.identity = "P1"
+            p1_nuc = pred
+            start_index = min(start_index, t3)
             break
         else:
             if not pred.identity:
                 pred.identity = current3.identity
             current3 = pred
+            start_index = min(start_index, t3)
 
     # --- Trace P2 back (should reach same P1 division) ---
     t4 = four_cells_time
@@ -814,14 +825,20 @@ def _back_trace_founders(
 
         pred = prev_nuclei[pred_idx]
         if pred.successor2 != NILLI:
-            # Should already be named "P1" by the EMS trace
+            if p1_nuc is not None and pred.identity == "P1":
+                # EMS trace already confirmed this as P1 — stop here
+                break
+            # If EMS trace did NOT find P1, this "division" is a data artifact.
+            # Continue tracing backward and name as P2 continuation.
             if not pred.identity:
-                pred.identity = "P1"
-            break
+                pred.identity = current4.identity
+            current4 = pred
+            start_index = min(start_index, t4)
         else:
             if not pred.identity:
                 pred.identity = current4.identity
             current4 = pred
+            start_index = min(start_index, t4)
 
     return start_index
 

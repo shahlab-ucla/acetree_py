@@ -236,8 +236,13 @@ class TestSetAllSuccessorsAliveFirst:
         # The dead cell should NOT have taken a successor slot
         assert 3 not in (parent.successor1, parent.successor2)
 
-    def test_dead_cell_gets_slot_if_room(self):
-        """Dead cells should still get successor slots if parent has room."""
+    def test_dead_cell_excluded_from_successors(self):
+        """Dead cells should NOT get successor slots even if parent has room.
+
+        Dead nuclei's predecessor links are stale data artifacts. Including
+        them creates false division signals (a parent appears to divide when
+        only one alive daughter exists).
+        """
         mgr = NucleiManager()
         parent = _nuc(1, x=300, pred=NILLI)
         alive1 = _nuc(1, x=280, status=1, pred=1)
@@ -246,9 +251,9 @@ class TestSetAllSuccessorsAliveFirst:
         mgr.nuclei_record = [[parent], [alive1, dead]]
         mgr.set_all_successors()
 
-        # Parent should have alive as successor1, dead as successor2
-        assert parent.successor1 == 1  # alive first
-        assert parent.successor2 == 2  # dead second
+        # Parent should only have the alive cell as successor
+        assert parent.successor1 == 1  # alive
+        assert parent.successor2 == NILLI  # dead excluded
 
     def test_three_alive_drops_third(self):
         """If 3 alive cells claim same parent, third is dropped with warning."""

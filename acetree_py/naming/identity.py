@@ -316,7 +316,7 @@ class IdentityAssigner:
                         pname = parent.assigned_id
                     else:
                         z = round(parent.z)
-                        pname = f"{NUC}{i + 1:04d}_{z}_{parent.x}_{parent.y}"
+                        pname = f"{NUC}{i + 1:03d}_{z}_{parent.x}_{parent.y}"
                     parent.identity = pname
 
                 # Process successors in next timepoint
@@ -403,7 +403,7 @@ class IdentityAssigner:
                     nuc.identity = nuc.assigned_id
                 else:
                     z = round(nuc.z)
-                    nuc.identity = f"{NUC}{i + 1:04d}_{z}_{nuc.x}_{nuc.y}"
+                    nuc.identity = f"{NUC}{i + 1:03d}_{z}_{nuc.x}_{nuc.y}"
 
 
 def _use_preassigned_id(dau1: Nucleus, dau2: Nucleus) -> None:

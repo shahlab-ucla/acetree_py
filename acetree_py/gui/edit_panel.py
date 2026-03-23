@@ -59,7 +59,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
         ─────────────────────
         [Add]  [Remove]  [Move]        -- single-nucleus operations
         [Rename]  [Kill]  [Resurrect]  -- cell-level operations
-        [Relink]  [Relink+Interp]      -- linking operations
+        [Relink]                       -- linking (auto-interpolates gaps)
         ─────────────────────
         Status: last edit description
         ─────────────────────
@@ -162,17 +162,13 @@ class EditPanel(QWidget):  # type: ignore[misc]
         link_layout = QHBoxLayout(link_group)
 
         self._btn_relink = QPushButton("Relink")
-        self._btn_relink.setToolTip("Change a nucleus's predecessor link")
+        self._btn_relink.setToolTip(
+            "Link two cells: select source, click Relink, then click target.\n"
+            "Auto-interpolates if there is a time gap."
+        )
         self._btn_relink.clicked.connect(self._on_relink)
 
-        self._btn_relink_interp = QPushButton("Relink + Interp")
-        self._btn_relink_interp.setToolTip(
-            "Relink with interpolated nuclei between start and end"
-        )
-        self._btn_relink_interp.clicked.connect(self._on_relink_interpolation)
-
         link_layout.addWidget(self._btn_relink)
-        link_layout.addWidget(self._btn_relink_interp)
         layout.addWidget(link_group)
 
         # ── Status ──
@@ -451,10 +447,9 @@ class EditPanel(QWidget):  # type: ignore[misc]
     def _on_relink(self) -> None:
         """Start interactive relink: user picks a target cell in the viewer.
 
-        The user navigates to the desired predecessor cell and right-clicks
-        it. If the target is at the immediately preceding timepoint, a simple
-        relink is performed. If there is a time gap, interpolation is
-        automatically applied (required by the ZIP format specification).
+        Pick any two cells at different timepoints. The system determines
+        which is earlier/later, and auto-interpolates if there is a gap.
+        Works both forwards and backwards in time.
         """
         sel = self._get_selected_nucleus()
         if sel is None:
@@ -464,18 +459,16 @@ class EditPanel(QWidget):  # type: ignore[misc]
         nuc, time, index = sel
         self._relink_source = (nuc, time, index)
         self._status_label.setText(
-            f"PICK MODE: Navigate to the target cell and right-click it.\n"
+            f"PICK MODE: Navigate to the target cell and click it.\n"
             f"Relinking: '{nuc.effective_name or f'idx={index}'}' at t={time}"
         )
         self._btn_relink.setEnabled(False)
-        self._btn_relink_interp.setEnabled(False)
 
         self.app.enter_relink_pick_mode(self._on_relink_target_picked)
 
     def _on_relink_target_picked(self, target_time: int, target_nuc) -> None:
         """Callback when the user picks a relink target in the viewer."""
         self._btn_relink.setEnabled(True)
-        self._btn_relink_interp.setEnabled(True)
 
         if not hasattr(self, "_relink_source") or self._relink_source is None:
             self._status_label.setText("Relink cancelled — no source")
@@ -486,29 +479,39 @@ class EditPanel(QWidget):  # type: ignore[misc]
 
         target_index = target_nuc.index
 
-        # Confirm with user
+        # Both indices are already 1-based (from nucleus.index)
         src_name = src_nuc.effective_name or f"idx={src_index}"
         tgt_name = target_nuc.effective_name or f"idx={target_index}"
 
-        time_gap = src_time - target_time
-
-        if time_gap < 1:
+        if src_time == target_time:
             QMessageBox.warning(
                 self,
                 "Invalid Target",
-                f"Target must be at an earlier timepoint than the source.\n"
-                f"Source: t={src_time}, Target: t={target_time}",
+                "Source and target must be at different timepoints.",
             )
-            self._status_label.setText("Relink cancelled — target not earlier")
+            self._status_label.setText("Relink cancelled — same timepoint")
             return
+
+        # Sort so early_* is earlier in time, late_* is later.
+        # The "late" cell's predecessor will point to the "early" cell.
+        if src_time < target_time:
+            early_time, early_index, early_name = src_time, src_index, src_name
+            late_time, late_index, late_name = target_time, target_index, tgt_name
+            early_nuc, late_nuc = src_nuc, target_nuc
+        else:
+            early_time, early_index, early_name = target_time, target_index, tgt_name
+            late_time, late_index, late_name = src_time, src_index, src_name
+            early_nuc, late_nuc = target_nuc, src_nuc
+
+        time_gap = late_time - early_time
 
         if time_gap == 1:
             # Adjacent timepoints — simple relink
             reply = QMessageBox.question(
                 self,
                 "Confirm Relink",
-                f"Relink '{src_name}' at t={src_time}\n"
-                f"to '{tgt_name}' at t={target_time} (idx={target_index + 1})?",
+                f"Link '{late_name}' at t={late_time}\n"
+                f"to '{early_name}' at t={early_time} (predecessor)?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
             )
@@ -518,11 +521,9 @@ class EditPanel(QWidget):  # type: ignore[misc]
 
             from ..editing.validators import validate_relink
 
-            # predecessor is 1-based index
-            new_pred = target_index + 1
             errors = validate_relink(
                 self.app.edit_history.nuclei_record,
-                src_time, src_index, new_pred,
+                late_time, late_index, early_index,
             )
             if errors:
                 self._show_validation_errors(errors)
@@ -531,18 +532,18 @@ class EditPanel(QWidget):  # type: ignore[misc]
             from ..editing.commands import RelinkNucleus
 
             cmd = RelinkNucleus(
-                time=src_time, index=src_index, new_predecessor=new_pred,
+                time=late_time, index=late_index, new_predecessor=early_index,
             )
             self.app.edit_history.do(cmd)
             self._status_label.setText(f"Done: {cmd.description}")
             self.refresh()
         else:
-            # Time gap > 1 — must interpolate (ZIP format requirement)
+            # Time gap > 1 — auto-interpolate
             reply = QMessageBox.question(
                 self,
                 "Confirm Relink with Interpolation",
-                f"Relink '{src_name}' at t={src_time}\n"
-                f"to '{tgt_name}' at t={target_time} (idx={target_index + 1})\n\n"
+                f"Link '{late_name}' at t={late_time}\n"
+                f"to '{early_name}' at t={early_time}\n\n"
                 f"Time gap = {time_gap} frames.\n"
                 f"Interpolated nuclei will be created for the gap.",
                 QMessageBox.Yes | QMessageBox.No,
@@ -556,8 +557,8 @@ class EditPanel(QWidget):  # type: ignore[misc]
 
             errors = validate_relink_interpolation(
                 self.app.edit_history.nuclei_record,
-                target_time, target_index + 1,
-                src_time, src_index + 1,
+                early_time, early_index,
+                late_time, late_index,
             )
             if errors:
                 self._show_validation_errors(errors)
@@ -566,23 +567,14 @@ class EditPanel(QWidget):  # type: ignore[misc]
             from ..editing.commands import RelinkWithInterpolation
 
             cmd = RelinkWithInterpolation(
-                start_time=target_time,
-                start_index=target_index + 1,
-                end_time=src_time,
-                end_index=src_index + 1,
+                start_time=early_time,
+                start_index=early_index,
+                end_time=late_time,
+                end_index=late_index,
             )
             self.app.edit_history.do(cmd)
             self._status_label.setText(f"Done: {cmd.description}")
             self.refresh()
-
-    def _on_relink_interpolation(self) -> None:
-        """Start interactive relink with interpolation.
-
-        Same as Relink — the system auto-detects whether interpolation is
-        needed based on the time gap.
-        """
-        # Delegate to the unified relink flow
-        self._on_relink()
 
 
 # ── Dialog classes ───────────────────────────────────────────────
