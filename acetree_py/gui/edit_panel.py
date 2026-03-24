@@ -218,8 +218,8 @@ class EditPanel(QWidget):  # type: ignore[misc]
         btn_l5.setFixedWidth(48)
         btn_l1.clicked.connect(lambda: self._nudge(dx=-1))
         btn_l5.clicked.connect(lambda: self._nudge(dx=-5))
-        col_left.addWidget(btn_l1)
         col_left.addWidget(btn_l5)
+        col_left.addWidget(btn_l1)
 
         # Up/Down center column
         col_center = QVBoxLayout()
@@ -233,8 +233,8 @@ class EditPanel(QWidget):  # type: ignore[misc]
         btn_u5.clicked.connect(lambda: self._nudge(dy=-5))
         btn_d1.clicked.connect(lambda: self._nudge(dy=1))
         btn_d5.clicked.connect(lambda: self._nudge(dy=5))
-        col_center.addWidget(btn_u1)
         col_center.addWidget(btn_u5)
+        col_center.addWidget(btn_u1)
         col_center.addWidget(btn_d1)
         col_center.addWidget(btn_d5)
 
@@ -246,8 +246,8 @@ class EditPanel(QWidget):  # type: ignore[misc]
         btn_r5.setFixedWidth(48)
         btn_r1.clicked.connect(lambda: self._nudge(dx=1))
         btn_r5.clicked.connect(lambda: self._nudge(dx=5))
-        col_right.addWidget(btn_r1)
         col_right.addWidget(btn_r5)
+        col_right.addWidget(btn_r1)
 
         xy_grid.addLayout(col_left)
         xy_grid.addLayout(col_center)
