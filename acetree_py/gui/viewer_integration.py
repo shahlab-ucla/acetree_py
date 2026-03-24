@@ -287,6 +287,16 @@ class ViewerIntegration:
 
         button = event.button  # 1 = left, 2 = right
 
+        # Check for add mode (consumes left-click)
+        if self.app._add_mode and button == 1:
+            self.app._handle_add_click(x, y)
+            return
+
+        # Check for placement mode (consumes right-click)
+        if self.app._placement_mode and button == 2:
+            self.app._handle_placement_click(x, y)
+            return
+
         if button == 2:
             # Right-click: select cell and show its label
             self.app.select_cell_at_position(x, y)

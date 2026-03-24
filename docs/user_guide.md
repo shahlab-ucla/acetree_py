@@ -124,6 +124,7 @@ When you launch the GUI, you'll see:
 | `Ctrl+Shift+S`   | Save As                   |
 | `Ctrl+Z`         | Undo                      |
 | `Ctrl+Y`         | Redo                      |
+| `Escape`         | Exit active mode (Add, Track, Relink pick) |
 
 ### 4.2 Player Controls
 
@@ -132,13 +133,14 @@ The bottom panel provides full playback controls:
 ```
 [⏮] [◀] [◀◀] [⏸] [▶▶] [▶] [⏭]  t= [___] / 350
 [═══════════════ time slider ═══════════════════]
-[▲] [▼]  z= [___] / 30
+[▲] [▼]  z= [___] / 30                      [3D]
 ```
 
 - **⏮ / ⏭**: Jump to first / last timepoint
 - **◀ / ▶**: Step one timepoint back / forward
 - **◀◀ / ▶▶**: Play backward / forward (animated)
 - **⏸**: Pause playback
+- **3D**: Toggle between 2D slice view and 3D volume rendering (see Section 6.6)
 - Type directly into the spinboxes for precise navigation
 
 ### 4.3 Cell Tracking
@@ -156,6 +158,9 @@ When a cell is selected and **tracking** is enabled (the default), the viewer au
 
 - **Right-click** on a nucleus circle or its label → **select that cell** (makes it the active cell; viewer centers on it, cell info updates)
 - **Left-click** on a nucleus circle or its label → **toggle the label on/off** (useful for decluttering the display)
+- **Left-click** (in **Add mode**) → **place a new nucleus** at the click position (see Section 6.2)
+- **Right-click** (in **Track mode**) → **place a tracking nucleus** at the click position (see Section 6.5)
+- **Right-click** (in **Relink pick mode**) → **select relink target** (see Section 6.4)
 
 ### 5.2 In the Lineage Tree
 
@@ -184,41 +189,68 @@ All edits are **undoable** (`Ctrl+Z`) and **redoable** (`Ctrl+Y`). Up to 1000 ed
 ### 6.1 Edit Panel Layout
 
 ```
-┌─ Edit Tools ─────────────┐
-│ [Save] [Save As...]      │
-│ [Undo] [Redo]            │
-│                          │
-│ Nucleus Operations       │
-│ [Add] [Remove] [Move]    │
-│                          │
-│ Cell Operations          │
-│ [Rename] [Kill] [Resurrect]│
-│                          │
-│ Link Operations          │
-│ [Relink]                 │
-│                          │
-│ Status: Ready            │
-│                          │
-│ Edit History             │
-│ ┌──────────────────────┐ │
-│ │ 1. Renamed ABa → X  │ │
-│ │ 2. Moved idx=3 ...   │ │
-│ └──────────────────────┘ │
-└──────────────────────────┘
+┌─ Edit Tools ─────────────────┐
+│ [Save] [Save As...]          │
+│ [Undo] [Redo]                │
+│                              │
+│ Nucleus Operations           │
+│ [Add] [Remove]               │
+│                              │
+│ Move / Resize                │
+│ [← 1][← 5] [↑1][↑5] [→ 1][→ 5] │
+│             [↓1][↓5]         │
+│ Z:   [-5][-1]  [+1][+5]     │
+│ Size:[-5][-1]  [+1][+5]     │
+│                              │
+│ Cell Operations              │
+│ [Rename] [Kill] [Resurrect]  │
+│                              │
+│ Link Operations              │
+│ [Relink] [Track]             │
+│                              │
+│ Status: Ready                │
+│                              │
+│ Edit History                 │
+│ ┌──────────────────────────┐ │
+│ │ 1. Renamed ABa → X      │ │
+│ │ 2. Moved: x+5, y-1      │ │
+│ └──────────────────────────┘ │
+└──────────────────────────────┘
 ```
 
 ### 6.2 Nucleus Operations
 
-#### Add Nucleus
-Click **Add** → fill in position (x, y, z), size, optional name, and optional predecessor → **OK**. A new nucleus is created at the specified timepoint.
+#### Add Nucleus (Interactive Click-to-Add)
+
+The **Add** button is a toggle that activates click-to-add mode:
+
+1. (Optional) Select an existing cell to use as the predecessor.
+2. Click **Add** — the button stays pressed and the status bar shows instructions.
+3. **Left-click** anywhere in the image viewer to place a nucleus at that position, at the current z-plane and timepoint.
+4. Press **Esc** or click **Add** again to exit add mode.
+
+**Predecessor linking:**
+- If a cell is selected when you click, the new nucleus inherits the selected cell's identity and is linked as its successor.
+- If the selected cell's last timepoint is adjacent (gap = 1), a direct predecessor link is made.
+- If there is a gap > 1 timepoint, the system automatically interpolates intermediate nuclei to fill the gap.
+- If no cell is selected, a new independent root nucleus is created.
+
+**Inherited properties:** When adding from an existing cell, the new nucleus inherits the parent cell's diameter (size). Root nuclei use the default diameter (20 pixels).
 
 #### Remove Nucleus
 Select a cell, then click **Remove**. The selected nucleus is killed (marked dead). It remains in the data but is no longer displayed or tracked.
 
-#### Move Nucleus
-Select a cell, then click **Move**. A dialog shows the current position and lets you enter new coordinates and/or size. Only changed fields are updated.
+### 6.3 Move / Resize (D-Pad Controls)
 
-### 6.3 Cell Operations
+The Move / Resize group provides instant nudge buttons for adjusting the selected nucleus's position and size without opening a dialog:
+
+- **XY arrows** (`← → ↑ ↓`): Move the nucleus by 1 or 5 pixels in each direction.
+- **Z** (`-5`, `-1`, `+1`, `+5`): Shift the nucleus up or down in z-planes.
+- **Size** (`-5`, `-1`, `+1`, `+5`): Increase or decrease the nucleus diameter.
+
+Each button press executes immediately and is individually undoable with `Ctrl+Z`. The cell remains selected between presses, so you can rapidly adjust position by clicking multiple times. The status bar shows the delta applied (e.g. "Moved: x+5, y-1").
+
+### 6.4 Cell Operations
 
 #### Rename
 Select a cell, then click **Rename**. Enter a new name. This sets the `assigned_id` field, which is a manual override that persists through automatic re-naming.
@@ -229,7 +261,9 @@ Select a cell, then click **Kill**. Choose a time range. All nuclei of that cell
 #### Resurrect
 Select a dead nucleus, then click **Resurrect**. The nucleus is restored to alive status.
 
-### 6.4 Link Operations (Interactive Relink)
+### 6.5 Link Operations
+
+#### Interactive Relink
 
 The relink operation lets you change which cell a nucleus is linked to as its predecessor. This is the primary tool for correcting tracking errors.
 
@@ -247,6 +281,39 @@ The relink operation lets you change which cell a nucleus is linked to as its pr
 **Automatic interpolation:** If the two cells are more than 1 timepoint apart, the system automatically creates interpolated nuclei to fill the gap. This is required by the data format — every cell must have a continuous chain of nuclei across consecutive timepoints. The interpolated nuclei are placed at linearly interpolated positions and sizes between the two endpoints.
 
 **Adjacent links (gap = 1 frame):** A simple predecessor change is made, no interpolation needed.
+
+#### Track Mode
+
+The **Track** button enables continuous click-to-place tracking across timepoints:
+
+1. Select a cell to track from (the parent).
+2. Click **Track** — the button stays pressed.
+3. Navigate to a later timepoint.
+4. **Right-click** in the viewer to place a nucleus. It is automatically linked to the parent cell with the correct identity and predecessor.
+5. If there is a time gap > 1, intermediate nuclei are interpolated.
+6. The mode stays active so you can advance to the next timepoint and place again.
+7. Press **Esc** or click **Track** again to exit.
+
+If no cell is selected, Track enters root mode: a single right-click places one independent nucleus and exits.
+
+### 6.6 3D Volume View
+
+Toggle the **3D** button in the player controls (or use napari's built-in 3D toggle) to switch between 2D slice view and 3D volume rendering.
+
+In 3D mode, all nuclei at the current timepoint are displayed as colored spheres with correct anisotropic scaling (z-spacing accounts for the physical z-resolution). The color scheme is:
+
+| Color    | Meaning                                      |
+|----------|----------------------------------------------|
+| White    | Currently selected cell                      |
+| Purple   | Named cell (Sulston name assigned)           |
+| Orange   | Unnamed cell (auto-generated `Nuc*` name)    |
+| Gray     | No name / placeholder                        |
+
+This color scheme is consistent across both 2D overlay circles and 3D spheres.
+
+**Known limitation:** Text labels do not render on 3D points (napari/vispy limitation). However, selecting a cell from the lineage list panel does display its label in 3D.
+
+Clicking on a sphere in 3D mode selects the corresponding cell, just like clicking in 2D.
 
 ---
 
@@ -373,7 +440,7 @@ All open panels update synchronously when edits are committed (relink, kill, ren
 5. Right-click the other cell → confirm. The system automatically sorts by time and determines the predecessor/child relationship.
 
 ### Identifying unnamed cells
-1. Look for gray circles in the image (unnamed cells are gray, named ones are purple).
+1. Look for **orange** circles in the image (unnamed `Nuc*` cells are orange, named ones are purple, gray indicates no name at all).
 2. Right-click to select, then check the Cell Info panel.
 3. Use **Rename** to assign a name if you know the identity.
 
@@ -395,3 +462,138 @@ acetree-py export config.xml -f cell_csv -o my_cells.csv
 # Get per-nucleus data for custom analysis:
 acetree-py export config.xml -f nucleus_csv -o my_nuclei.csv
 ```
+
+---
+
+## 13. Manual Tracking & Dataset Creation
+
+AceTree-Py can create new datasets from raw TIFF images and provides interactive tools for manually placing, tracking, and linking nuclei. This is useful when:
+
+- You have image data that hasn't been processed by StarryNite or another detection pipeline.
+- You want to manually annotate nuclei positions in a single frame (detection-only, no tracking).
+- You want to manually track a subset of cells across time.
+
+### 13.1 Creating a New Dataset
+
+#### Interactive Wizard (GUI)
+
+```bash
+acetree-py create
+```
+
+This opens a 4-page wizard dialog:
+
+1. **Image directory** — select the folder containing your TIFF files. The wizard auto-detects the naming pattern and image dimensions.
+2. **Channel layout** — choose how channels are arranged: single channel, side-by-side (split), separate directories, or multichannel stack. Set flip if needed.
+3. **Voxel parameters** — set XY resolution (µm/pixel), Z resolution (µm/plane), number of timepoints and planes (auto-filled from detection).
+4. **Output** — choose where to save the dataset config XML and nuclei ZIP.
+
+#### CLI (Non-Interactive)
+
+```bash
+acetree-py create <image_directory> [OPTIONS]
+```
+
+Options:
+
+| Option         | Default | Description                              |
+|----------------|---------|------------------------------------------|
+| `--output`     | auto    | Output directory for config + nuclei ZIP |
+| `--xy-res`     | 0.09    | XY pixel resolution in µm               |
+| `--z-res`      | 1.0     | Z plane spacing in µm                   |
+| `--split`      | off     | Split side-by-side dual-channel images   |
+| `--flip`       | off     | Flip images left/right                   |
+
+**Examples:**
+
+```bash
+# Create dataset from a folder of TIFFs with default resolution:
+acetree-py create /data/embryo/images/
+
+# With specific resolution and split channels:
+acetree-py create /data/embryo/SPIMA/ --output /data/embryo/manual_output/ --xy-res 0.1625 --z-res 0.65 --split
+
+# Single-frame annotation (one TIFF file in the directory):
+acetree-py create /data/single_frame/
+```
+
+The `create` command:
+1. Scans the image directory for TIFF files and probes the first image for z-plane count.
+2. Generates an `AceTreeConfig` with the correct image paths and resolution.
+3. Creates an empty nuclei ZIP (no detections).
+4. Writes the XML config file to the output directory.
+5. Launches the GUI for interactive annotation.
+
+### 13.2 Placing Nuclei (Add Mode)
+
+Once the GUI is open on a new (empty) dataset:
+
+1. Navigate to the desired timepoint and z-plane.
+2. Click **Add** in the Edit Tools panel to enter add mode.
+3. **Left-click** anywhere in the image to place a nucleus at that position.
+4. The nucleus is created at the current z-plane with a default diameter of 20 pixels.
+5. Press **Esc** to exit add mode.
+
+**Adding onto an existing cell:**
+1. Right-click an existing nucleus to select its cell.
+2. Navigate to a later timepoint.
+3. Click **Add**, then left-click to place. The new nucleus inherits the selected cell's identity, predecessor link, and diameter.
+4. If there is a gap > 1 timepoint, intermediate nuclei are automatically interpolated.
+
+### 13.3 Adjusting Nuclei (D-Pad Controls)
+
+After placing a nucleus, use the **Move / Resize** D-pad buttons to fine-tune:
+
+- **XY arrows**: nudge position by 1 or 5 pixels.
+- **Z buttons**: shift the z-plane by 1 or 5.
+- **Size buttons**: grow or shrink the diameter by 1 or 5 pixels.
+
+Each press is individually undoable. The cell stays selected between presses for rapid adjustment.
+
+### 13.4 Tracking Across Time
+
+For continuous tracking across many timepoints, use the **Track** button:
+
+1. Select the cell you want to extend.
+2. Click **Track** to enter tracking mode.
+3. Advance to the next timepoint (right arrow).
+4. **Right-click** to place the next position. The nucleus is automatically linked.
+5. Repeat steps 3–4 for as many timepoints as needed.
+6. Press **Esc** to exit tracking mode.
+
+Track mode automatically handles:
+- **Identity inheritance**: each placed nucleus gets the parent cell's name.
+- **Predecessor linking**: direct link if adjacent, interpolation if there's a gap.
+- **Size inheritance**: the placed nucleus inherits the parent's diameter.
+
+### 13.5 Workflow for Single-Frame Annotation
+
+For annotating nuclei in a single image (no tracking):
+
+```bash
+# Create a dataset with the single image:
+acetree-py create /data/single_frame/
+```
+
+1. Use **Add** mode to left-click on each nucleus.
+2. Use the D-pad controls to adjust positions and sizes.
+3. Use **Rename** to assign cell identities.
+4. **Save** (`Ctrl+S`) to persist annotations.
+
+Each placed nucleus becomes an independent root cell. The Track button is not useful in single-frame mode (there are no future timepoints to track to).
+
+### 13.6 Saving and Reloading
+
+After annotation:
+
+- **Save** (`Ctrl+S`) writes the nuclei to the ZIP file and the config XML.
+- To reopen later: `acetree-py gui path/to/output/config.xml`
+- The automatic naming pipeline runs on load. If enough cells have been placed for the 4→8 cell transition to be detected, Sulston names will be assigned automatically.
+
+### 13.7 Tips for Manual Tracking
+
+- **Use the 3D view** (Section 6.6) to verify nucleus positions in three dimensions.
+- **Place nuclei on the z-plane where the nucleus is brightest** for the most accurate position.
+- **Use Track mode** for long cell tracks — it's much faster than individual Add operations.
+- **Use Relink** to correct mistakes after the fact rather than undoing many steps.
+- **Save frequently** (`Ctrl+S`) — there is no autosave.

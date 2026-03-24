@@ -2,7 +2,7 @@
 
 Python reimplementation of [AceTree](https://github.com/zhirongbaolab/AceTree) for *C. elegans* embryogenesis visualization and lineage annotation.
 
-Built on [napari](https://napari.org) with full undo/redo, topology-based cell naming, interactive relink, and multi-panel lineage tree display.
+Built on [napari](https://napari.org) with full undo/redo, topology-based cell naming, interactive relink, 3D volume view, manual tracking, and multi-panel lineage tree display.
 
 ## Installation
 
@@ -39,11 +39,23 @@ pip install -e ".[all]"
 
 ## Usage
 
-### GUI
+### GUI — open an existing dataset
 
 ```bash
 acetree-py gui path/to/config.xml
 ```
+
+### GUI — create a new dataset from raw images
+
+```bash
+# Interactive wizard:
+acetree-py create
+
+# From the command line with explicit parameters:
+acetree-py create path/to/images/ --output path/to/output/ --xy-res 0.1625 --z-res 0.65 --split
+```
+
+See [Manual Tracking & Dataset Creation](docs/user_guide.md#13-manual-tracking--dataset-creation) in the User Guide for a full walkthrough.
 
 ### CLI
 
@@ -77,6 +89,8 @@ acetree-py info config.xml --cell ABala
 ## Features
 
 - **Napari-based viewer** with nucleus overlay, z-plane navigation, and cell tracking
+- **3D volume view** — toggle between 2D slice and 3D rendering with color-coded nucleus spheres
+- **Manual tracking** — click-to-add nuclei, D-pad nudge controls, create datasets from raw images
 - **Topology-based naming** — automatic Sulston name assignment from lineage structure
 - **Interactive relink** — click-based predecessor editing with automatic interpolation
 - **Full undo/redo** — up to 1000 edit commands with `Ctrl+Z` / `Ctrl+Y`
@@ -86,7 +100,7 @@ acetree-py info config.xml --cell ABala
 
 ## Documentation
 
-- [User Guide](docs/user_guide.md) — navigation, editing, saving, lineage tree panels
+- [User Guide](docs/user_guide.md) — navigation, editing, saving, manual tracking, 3D view
 - [Architecture Reference](docs/architecture.md) — package structure, data model, GUI system
 - [Algorithm Reference](docs/algorithms.md) — naming pipeline, coordinate transforms, edit commands
 

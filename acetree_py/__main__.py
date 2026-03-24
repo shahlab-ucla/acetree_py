@@ -199,5 +199,83 @@ def info(
     typer.echo(f"  Leaves:      {num_leaves}")
 
 
+@app.command()
+def create(
+    directory: Optional[str] = typer.Argument(
+        None, help="Path to image directory (omit for interactive dialog)",
+    ),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o",
+        help="Output directory for nuclei ZIP + config XML",
+    ),
+    xy_res: float = typer.Option(0.09, "--xy-res", help="XY pixel resolution (µm)"),
+    z_res: float = typer.Option(1.0, "--z-res", help="Z pixel resolution (µm)"),
+    split: bool = typer.Option(False, "--split", help="Split side-by-side channels"),
+    flip: bool = typer.Option(False, "--flip", help="Flip image left/right"),
+):
+    """Create a new dataset from raw images and launch the GUI for manual annotation."""
+    from acetree_py.gui.app import AceTreeApp
+
+    if directory is None:
+        # Interactive mode: show dataset creation dialog
+        ace = AceTreeApp.from_dialog()
+        if ace is None:
+            typer.echo("Dataset creation cancelled.")
+            raise typer.Exit(0)
+        ace.run()
+    else:
+        # CLI mode: build config from arguments
+        from acetree_py.io.config import AceTreeConfig, NamingMethod, _derive_image_params
+
+        img_dir = Path(directory).resolve()
+        if not img_dir.is_dir():
+            typer.echo(f"Error: '{directory}' is not a directory.", err=True)
+            raise typer.Exit(1)
+
+        out_dir = Path(output).resolve() if output else img_dir / "acetree_output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Auto-detect image count and planes
+        tiffs = sorted(img_dir.glob("*.tif")) + sorted(img_dir.glob("*.tiff"))
+        if not tiffs:
+            typer.echo(f"Error: No TIFF files found in '{directory}'.", err=True)
+            raise typer.Exit(1)
+
+        # Probe first image for plane count
+        num_planes = 1
+        try:
+            import tifffile
+            with tifffile.TiffFile(tiffs[0]) as tf:
+                num_planes = len(tf.pages)
+        except Exception:
+            pass
+
+        num_timepoints = len(tiffs)
+        dataset_name = img_dir.name
+
+        # Use first TIFF as the typical image_file so _derive_image_params
+        # can extract tif_directory and tif_prefix automatically.
+        config = AceTreeConfig(
+            config_file=out_dir / f"{dataset_name}.xml",
+            image_file=tiffs[0],
+            zip_file=out_dir / f"{dataset_name}_nuclei.zip",
+            xy_res=xy_res,
+            z_res=z_res,
+            plane_end=num_planes,
+            starting_index=1,
+            ending_index=num_timepoints,
+            naming_method=NamingMethod.NEWCANONICAL,
+            expr_corr="none",
+            use_zip=0,
+            use_stack=1 if num_planes > 1 else 0,
+            split=1 if split else 0,
+            flip=1 if flip else 0,
+        )
+        _derive_image_params(config)
+
+        ace = AceTreeApp.from_new_dataset(config, num_timepoints, out_dir)
+        ace.run()
+
+
 if __name__ == "__main__":
     app()

@@ -62,6 +62,29 @@ class NucleiManager:
         self._alive_cache_result: list[Nucleus] = []
 
     @classmethod
+    def new_empty(cls, config: AceTreeConfig, num_timepoints: int) -> NucleiManager:
+        """Create an empty NucleiManager for a new dataset (no nuclei yet).
+
+        Args:
+            config: The dataset configuration (resolution, planes, etc.).
+            num_timepoints: Number of timepoints to pre-allocate.
+
+        Returns:
+            A NucleiManager with empty nuclei_record, ready for manual annotation.
+        """
+        mgr = cls()
+        mgr.config = config
+        mgr.movie = Movie(
+            xy_res=config.xy_res,
+            z_res=config.z_res,
+            num_planes=config.plane_end,
+        )
+        mgr._naming_method = config.naming_method.value
+        mgr._expr_corr = config.expr_corr
+        mgr.nuclei_record = [[] for _ in range(num_timepoints)]
+        return mgr
+
+    @classmethod
     def from_config(cls, config: AceTreeConfig) -> NucleiManager:
         """Create a NucleiManager from an AceTreeConfig and load data.
 

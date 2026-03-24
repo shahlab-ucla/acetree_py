@@ -130,6 +130,8 @@ class MockApp:
         self._contrast_tools = None
         self._edit_panel = None
         self.tracking = True
+        self._placement_mode = False
+        self._add_mode = False
 
     def update_display(self):
         pass
@@ -166,7 +168,7 @@ class TestEditPanel:
         assert panel._btn_redo is not None
         assert panel._btn_add is not None
         assert panel._btn_remove is not None
-        assert panel._btn_move is not None
+        assert panel._btn_track is not None
         assert panel._btn_rename is not None
         assert panel._btn_kill is not None
         assert panel._btn_resurrect is not None
@@ -324,15 +326,15 @@ class TestEditPanel:
         panel._on_remove_nucleus()
         assert "No nucleus selected" in panel._status_label.text()
 
-    def test_move_no_selection_updates_status(self, qtbot):
-        """Clicking move with no selection shows status message."""
+    def test_nudge_no_selection_updates_status(self, qtbot):
+        """Nudge with no selection shows status message."""
         from acetree_py.gui.edit_panel import EditPanel
         app = MockApp()
         app.current_cell_name = ""
         panel = EditPanel(app)
         qtbot.addWidget(panel)
 
-        panel._on_move_nucleus()
+        panel._nudge(dx=1)
         assert "No nucleus selected" in panel._status_label.text()
 
     def test_rename_no_selection_updates_status(self, qtbot):

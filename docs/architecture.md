@@ -34,6 +34,7 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     validators.py              # Pre-edit validation functions
   io/                          # File I/O — no GUI dependencies
     config.py                  # AceTreeConfig, load_config()
+    config_writer.py           # write_config_xml() (round-trip XML serialization)
     nuclei_reader.py           # read_nuclei_zip()
     nuclei_writer.py           # write_nuclei_zip()
     image_provider.py          # ImageProvider protocol + 7 providers
@@ -47,7 +48,8 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     player_controls.py         # PlayerControls (time/plane navigation)
     cell_info_panel.py         # CellInfoPanel (info display)
     contrast_tools.py          # ContrastTools (brightness/contrast)
-    edit_panel.py              # EditPanel + 7 dialog classes
+    edit_panel.py              # EditPanel + dialog classes
+    dataset_dialog.py          # DatasetCreationDialog (4-page wizard)
   analysis/                    # Post-hoc analysis — no GUI dependencies
     expression.py              # Expression time series analysis
     export.py                  # CSV, Newick export functions
@@ -151,6 +153,10 @@ Temporal and spatial bounds. Key property: `z_pix_res = z_res / xy_res` (anisotr
 
 Central orchestrator that owns `nuclei_record: list[list[Nucleus]]` (indexed `[timepoint_0based][nucleus_index]`).
 
+**Construction:**
+- `NucleiManager.from_config(config)` — load nuclei from ZIP file
+- `NucleiManager.new_empty(config, num_timepoints)` — create empty manager for manual annotation (no nuclei loaded, all timepoints initialized to empty lists)
+
 **Processing pipeline (`process()`):**
 1. `set_all_successors()` — compute forward links from predecessor fields (only alive nuclei — dead nuclei with stale predecessor links are excluded to prevent false division signals)
 2. `compute_red_weights()` — apply expression corrections
@@ -168,7 +174,7 @@ Central orchestrator that owns `nuclei_record: list[list[Nucleus]]` (indexed `[t
 
 ### 3.1 Config (`io/config.py`)
 
-`AceTreeConfig` holds ~20 fields parsed from XML:
+`AceTreeConfig` holds ~20 fields parsed from XML. Round-trip serialization is supported via `write_config_xml()` in `io/config_writer.py`, which produces XML using the exact same element and attribute names as the parser (case-sensitive: `SplitMode`, `FlipMode`, `xyRes`, `zRes`, `planeEnd`).
 
 ```xml
 <embryo>
@@ -290,7 +296,9 @@ Each `Rule` contains: `parent`, `sulston_letter`, `daughter1`, `daughter2`, `axi
 
 ### 5.1 Command Pattern (`editing/commands.py`)
 
-Abstract base: `EditCommand` with `execute()`, `undo()`, `description`.
+Abstract base: `EditCommand` with `execute()`, `undo()`, `description`, `structural`.
+
+The `structural` property (default `True`) indicates whether the edit changes lineage structure (links, identity, etc.). Non-structural edits like `MoveNucleus` (`structural = False`) skip the expensive naming + tree rebuild in the edit callback and only refresh the display. This prevents cell deselection when nudging positions.
 
 | Command                    | Operation                                 | State Captured                        |
 |---------------------------|-------------------------------------------|---------------------------------------|
@@ -353,10 +361,12 @@ Main coordinator. Owns the napari `Viewer`, `NucleiManager`, `EditHistory`, and 
 
 Draws nucleus circles as a napari Shapes layer (polygon approximation with 32 vertices for aspect-ratio-independent circles).
 
-**Mouse interaction:**
-- **Left-click** on nucleus: toggle label visibility on/off
-- **Right-click** on nucleus: select cell (make active)
+**Mouse interaction (priority order):**
+- In **add mode**: left-click places a nucleus at the click position
 - In **relink pick mode**: right-click selects the relink target
+- In **track/placement mode**: right-click places a tracking nucleus
+- **Right-click** on nucleus: select cell (make active)
+- **Left-click** on nucleus: toggle label visibility on/off
 
 **Division line overlay:** When the selected cell has just divided (current_time == cell.end_time + 1), a yellow line connects the two daughter cell positions. Disappears on any navigation or selection change.
 
@@ -400,17 +410,42 @@ Pure computational layout engine (no Qt dependency):
 | `PlayerControls`    | Time/plane navigation, play/pause animation  |
 | `CellInfoPanel`     | Read-only cell details display               |
 | `ContrastTools`     | Min/max contrast sliders with auto-contrast  |
-| `EditPanel`         | Edit buttons, interactive relink, undo/redo  |
+| `EditPanel`         | Edit buttons, D-pad move, relink, add/track modes |
 
-### 6.6 Interactive Relink
+### 6.6 Interactive Modes
 
-Replaces index-based dialogs with a unified pick-mode workflow (single "Relink" button):
+**Relink pick mode** — Replaces index-based dialogs with a unified pick-mode workflow:
 1. Select either cell in the pair you want to link (order doesn't matter).
-2. Click **Relink** → enters pick mode (status shows instructions).
-3. Navigate in the viewer to the other cell.
-4. **Right-click** the target → system sorts the two cells by time (earlier = predecessor, later = child).
-5. Gap = 1 frame: simple relink. Gap > 1: automatic interpolation with linearly interpolated intermediates.
-6. Confirmation dialog → execute command.
+2. Click **Relink** → enters pick mode.
+3. Navigate to the other cell, **right-click** to select target.
+4. Gap = 1: simple relink. Gap > 1: automatic interpolation.
+
+**Add mode** — Click-to-place nucleus with automatic predecessor linking:
+1. (Optional) Select an existing cell. Click **Add** (toggle).
+2. **Left-click** in viewer to place. Inherits identity, diameter, and predecessor from selected cell.
+3. Gap > 1 triggers automatic interpolation.
+
+**Track mode** — Continuous click-to-place across timepoints:
+1. Select parent cell. Click **Track** (toggle).
+2. Navigate to later timepoints, **right-click** to place.
+3. Mode stays active until Esc or re-click Track.
+
+All modes are mutually exclusive and can be cancelled with **Escape**.
+
+### 6.7 3D Volume View
+
+Toggled via the **3D** button in player controls. Switches napari to `ndisplay=3` and creates a `Points` layer with:
+- Sphere size proportional to nucleus diameter.
+- Anisotropic z-scaling via `scale=(z_pix_res, 1.0, 1.0)`.
+- Color coding: white=selected, purple=named, orange=unnamed (Nuc*), gray=no name.
+
+Click-to-select works in 3D mode. Text labels are a known napari/vispy limitation in 3D but display when a cell is selected from the lineage list.
+
+### 6.8 Dataset Creation
+
+`AceTreeApp.from_new_dataset(config, num_timepoints, output_dir)` creates an app with an empty `NucleiManager` for manual annotation. `AceTreeApp.from_dialog()` shows the `DatasetCreationDialog` wizard first.
+
+The `create` CLI command (`__main__.py`) provides both interactive (wizard dialog) and non-interactive (CLI flags) paths to dataset creation.
 
 ---
 
@@ -440,6 +475,7 @@ Entry point: `acetree_py/__main__.py` (typer app)
 ```
 acetree-py load <config.xml>                    # Print dataset summary
 acetree-py gui <config.xml>                     # Launch napari GUI
+acetree-py create [<image_dir>] [OPTIONS]       # Create new dataset from raw images
 acetree-py export <config.xml> -f cell_csv      # Export data
 acetree-py rename <config.xml> -o renamed.zip   # Run naming + save
 acetree-py info <config.xml> -c ABala           # Query cell details

@@ -97,6 +97,14 @@ class AceTreeApp:
         self._relink_pick_mode: bool = False
         self._relink_pick_callback = None  # callable(time, nuc) when target picked
 
+        # Click-to-place nucleus mode (Track button)
+        self._placement_mode: bool = False
+        self._placement_parent_name: str | None = None  # None = root mode
+        self._placement_default_size: int = 20
+
+        # Click-to-add nucleus mode (Add button)
+        self._add_mode: bool = False
+
     @classmethod
     def from_config(
         cls,
@@ -135,6 +143,89 @@ class AceTreeApp:
         else:
             app.current_plane = max(1, (manager.movie.num_planes or 30) // 2)
         return app
+
+    @classmethod
+    def from_new_dataset(
+        cls,
+        config: AceTreeConfig,
+        num_timepoints: int,
+        output_dir: Path,
+    ) -> AceTreeApp:
+        """Create an AceTreeApp for a brand-new dataset (empty nuclei).
+
+        Writes an empty nuclei ZIP and config XML to *output_dir*,
+        then opens the GUI for manual annotation.
+
+        Args:
+            config: Configuration built from DatasetCreationDialog.
+            num_timepoints: Number of timepoints detected from images.
+            output_dir: Where to save the nuclei ZIP and config XML.
+
+        Returns:
+            A fully initialized AceTreeApp ready for manual annotation.
+        """
+        from ..io.config_writer import write_config_xml
+        from ..io.nuclei_writer import write_nuclei_zip
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        manager = NucleiManager.new_empty(config, num_timepoints)
+
+        # Write initial empty ZIP
+        dataset_name = config.zip_file.stem if str(config.zip_file) not in ("", ".") else "nuclei"
+        zip_path = output_dir / f"{dataset_name}.zip"
+        write_nuclei_zip(manager.nuclei_record, zip_path)
+        config.zip_file = zip_path
+
+        # Write config XML
+        xml_path = output_dir / f"{dataset_name}.xml"
+        config.config_file = xml_path
+        write_config_xml(config, xml_path)
+
+        # Create image provider
+        image_provider = create_image_provider_from_config(config)
+        if image_provider is not None:
+            logger.info("Image provider created: %s (planes=%d)",
+                        type(image_provider).__name__,
+                        image_provider.num_planes)
+
+        app = cls(manager, image_provider)
+        app.current_time = 1
+        if image_provider is not None and image_provider.num_planes > 0:
+            app.current_plane = max(1, image_provider.num_planes // 2)
+        else:
+            app.current_plane = max(1, (manager.movie.num_planes or 30) // 2)
+        return app
+
+    @classmethod
+    def from_dialog(cls) -> AceTreeApp | None:
+        """Show the dataset creation dialog and create an app if accepted.
+
+        Returns:
+            An AceTreeApp if the user completes the dialog, None if cancelled.
+        """
+        from .dataset_dialog import DatasetCreationDialog
+
+        # Need a QApplication for the dialog
+        from qtpy.QtWidgets import QApplication
+        qt_app = QApplication.instance()
+        if qt_app is None:
+            qt_app = QApplication([])
+
+        dlg = DatasetCreationDialog()
+        if dlg.exec_() != dlg.Accepted:
+            return None
+
+        config = dlg.get_config()
+        output_dir = dlg.get_output_directory()
+        dataset_name = dlg.get_dataset_name()
+        num_timepoints = dlg.get_num_timepoints()
+
+        # Set zip_file name from dataset name
+        config.zip_file = output_dir / f"{dataset_name}.zip"
+
+        return cls.from_new_dataset(config, num_timepoints, output_dir)
 
     def launch(self) -> None:
         """Create the napari viewer and add all dock widgets.
@@ -419,6 +510,184 @@ class AceTreeApp:
             cb = self._relink_pick_callback
             self.exit_relink_pick_mode()
             cb(self.current_time, nuc)
+        return True
+
+    # ── Click-to-add nucleus mode (Add button) ────────────────────
+
+    def enter_add_mode(self) -> None:
+        """Enter click-to-add mode. Left-click places a nucleus."""
+        self._add_mode = True
+
+    def exit_add_mode(self) -> None:
+        """Exit click-to-add mode."""
+        self._add_mode = False
+
+    def _handle_add_click(self, x: float, y: float) -> bool:
+        """Handle a left-click in add mode — place a nucleus at (x, y).
+
+        Uses the currently selected cell as predecessor if one is active.
+        For gap == 1, sets predecessor directly. For gap > 1, creates the
+        nucleus then auto-interpolates to fill the gap. Inherits diameter
+        from the parent cell's last nucleus when available.
+        """
+        if not self._add_mode:
+            return False
+
+        from ..editing.commands import AddNucleus, RelinkWithInterpolation
+
+        ix, iy = round(x), round(y)
+        iz = float(self.current_plane)
+        time = self.current_time
+        size = self._placement_default_size  # fallback
+
+        identity = ""
+        predecessor = -1  # NILLI
+        parent_end_time = None
+        parent_end_index = None
+
+        # If a cell is selected, link to it
+        parent_name = self.current_cell_name
+        if parent_name:
+            cell = self.manager.get_cell(parent_name)
+            if cell is not None:
+                parent_end_time = cell.end_time
+                gap = time - parent_end_time
+                if gap <= 0:
+                    # Same or earlier timepoint — treat as root
+                    parent_name = None
+                else:
+                    identity = parent_name
+                    parent_nuc = cell.get_nucleus_at(parent_end_time)
+                    if parent_nuc is not None:
+                        parent_end_index = parent_nuc.index
+                        size = parent_nuc.size  # inherit diameter
+                        if gap == 1:
+                            predecessor = parent_end_index
+
+        cmd = AddNucleus(
+            time=time,
+            x=ix,
+            y=iy,
+            z=iz,
+            size=size,
+            identity=identity,
+            predecessor=predecessor,
+        )
+        self.edit_history.do(cmd)
+        new_index = cmd._added_index
+
+        # Fill gap > 1 with interpolation
+        if (parent_name and parent_end_time is not None
+                and parent_end_index is not None):
+            gap = time - parent_end_time
+            if gap > 1:
+                interp_cmd = RelinkWithInterpolation(
+                    start_time=parent_end_time,
+                    start_index=parent_end_index,
+                    end_time=time,
+                    end_index=new_index,
+                )
+                self.edit_history.do(interp_cmd)
+
+        return True
+
+    # ── Click-to-place nucleus mode (Track button) ──────────────
+
+    def enter_placement_mode(
+        self,
+        parent_name: str | None = None,
+        default_size: int = 20,
+    ) -> None:
+        """Enter click-to-place mode for adding nuclei.
+
+        Args:
+            parent_name: Name of parent cell to extend, or None for root mode.
+            default_size: Default nucleus diameter for placed nuclei.
+        """
+        self._placement_mode = True
+        self._placement_parent_name = parent_name
+        self._placement_default_size = default_size
+
+    def exit_placement_mode(self) -> None:
+        """Exit click-to-place mode."""
+        self._placement_mode = False
+        self._placement_parent_name = None
+
+    def _handle_placement_click(self, x: float, y: float) -> bool:
+        """Handle a click in placement mode — create a nucleus at (x, y).
+
+        Returns True if the click was consumed.
+        """
+        if not self._placement_mode:
+            return False
+
+        from ..editing.commands import AddNucleus, RelinkWithInterpolation
+
+        ix, iy = round(x), round(y)
+        iz = float(self.current_plane)
+        time = self.current_time
+        parent_name = self._placement_parent_name
+        size = self._placement_default_size
+
+        identity = ""
+        predecessor = NILLI = -1
+
+        # Determine linking if we have a parent
+        parent_end_time = None
+        parent_end_index = None
+        if parent_name:
+            cell = self.manager.get_cell(parent_name)
+            if cell is not None:
+                parent_end_time = cell.end_time
+                gap = time - parent_end_time
+                if gap <= 0:
+                    # Same or earlier timepoint as parent — can't link;
+                    # treat as independent root placement (e.g. single-frame
+                    # annotation where multiple nuclei exist at t=1).
+                    parent_name = None
+                else:
+                    identity = parent_name
+                    parent_nuc = cell.get_nucleus_at(parent_end_time)
+                    if parent_nuc is not None:
+                        parent_end_index = parent_nuc.index
+                        size = parent_nuc.size  # inherit diameter
+                        if gap == 1:
+                            # Adjacent: set predecessor directly
+                            predecessor = parent_end_index
+                        # gap > 1 handled after AddNucleus via interpolation
+
+        # Create the nucleus
+        cmd = AddNucleus(
+            time=time,
+            x=ix,
+            y=iy,
+            z=iz,
+            size=size,
+            identity=identity,
+            predecessor=predecessor,
+        )
+        self.edit_history.do(cmd)
+        new_index = cmd._added_index
+
+        # Handle gap > 1 with interpolation
+        if (parent_name and parent_end_time is not None
+                and parent_end_index is not None):
+            gap = time - parent_end_time
+            if gap > 1:
+                interp_cmd = RelinkWithInterpolation(
+                    start_time=parent_end_time,
+                    start_index=parent_end_index,
+                    end_time=time,
+                    end_index=new_index,
+                )
+                self.edit_history.do(interp_cmd)
+
+        # Mode continuation
+        if parent_name is None:
+            # Root mode: exit after single placement
+            self.exit_placement_mode()
+        # else: stay in placement mode for continued tracking
+
         return True
 
     # ── 3D view toggle ─────────────────────────────────────────────
@@ -802,15 +1071,19 @@ class AceTreeApp:
 
     def _on_edit(self) -> None:
         """Callback after any edit command — rebuild tree and refresh display."""
-        self.manager.set_all_successors()
-        self.manager.process()
+        cmd = self.edit_history.last_command
+        is_structural = cmd is None or cmd.structural
 
-        # Structural edits (relink, kill, add) change the lineage tree,
-        # so all lineage tree panels need a full rebuild.
-        for lw in self._lineage_widgets:
-            lw.rebuild_tree()
-        if self._lineage_list:
-            self._lineage_list.rebuild()
+        if is_structural:
+            self.manager.set_all_successors()
+            self.manager.process()
+
+            # Structural edits (relink, kill, add) change the lineage tree,
+            # so all lineage tree panels need a full rebuild.
+            for lw in self._lineage_widgets:
+                lw.rebuild_tree()
+            if self._lineage_list:
+                self._lineage_list.rebuild()
 
         self.update_display()
 
@@ -970,3 +1243,18 @@ class AceTreeApp:
         @self.viewer.bind_key("3")
         def _toggle_3d(viewer):
             self.toggle_3d()
+
+        @self.viewer.bind_key("Escape")
+        def _exit_modes(viewer):
+            if self._add_mode:
+                self.exit_add_mode()
+                if self._edit_panel:
+                    self._edit_panel._btn_add.setChecked(False)
+                    self._edit_panel._status_label.setText("Exited add mode")
+            elif self._placement_mode:
+                self.exit_placement_mode()
+                if self._edit_panel:
+                    self._edit_panel._btn_track.setChecked(False)
+                    self._edit_panel._status_label.setText("Exited tracking mode")
+            elif self._relink_pick_mode:
+                self.exit_relink_pick_mode()

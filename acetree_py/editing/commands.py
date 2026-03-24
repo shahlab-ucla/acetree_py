@@ -62,6 +62,15 @@ class EditCommand(ABC):
         """Human-readable description of this edit."""
         ...
 
+    @property
+    def structural(self) -> bool:
+        """Whether this edit changes lineage structure (links, identity, etc.).
+
+        Non-structural edits (e.g. move/resize) skip the expensive
+        naming + tree rebuild in _on_edit and just refresh the display.
+        """
+        return True
+
 
 @dataclass
 class AddNucleus(EditCommand):
@@ -218,6 +227,10 @@ class MoveNucleus(EditCommand):
         if self.new_size is not None:
             parts.append(f"size={self.new_size}")
         return f"Move nucleus at t={self.time} idx={self.index}: {', '.join(parts)}"
+
+    @property
+    def structural(self) -> bool:
+        return False
 
 
 @dataclass

@@ -120,21 +120,28 @@ class EditPanel(QWidget):  # type: ignore[misc]
         nuc_layout = QHBoxLayout(nuc_group)
 
         self._btn_add = QPushButton("Add")
-        self._btn_add.setToolTip("Add a new nucleus at current timepoint")
-        self._btn_add.clicked.connect(self._on_add_nucleus)
+        self._btn_add.setToolTip(
+            "Click-to-add mode: left-click in the viewer to place a nucleus.\n"
+            "If a cell is selected, new nucleus inherits its identity.\n"
+            "Press Esc or click Add again to exit."
+        )
+        self._btn_add.setCheckable(True)
+        self._btn_add.clicked.connect(self._on_add_toggle)
 
         self._btn_remove = QPushButton("Remove")
         self._btn_remove.setToolTip("Remove (kill) the selected nucleus")
         self._btn_remove.clicked.connect(self._on_remove_nucleus)
 
-        self._btn_move = QPushButton("Move")
-        self._btn_move.setToolTip("Move the selected nucleus to a new position")
-        self._btn_move.clicked.connect(self._on_move_nucleus)
-
         nuc_layout.addWidget(self._btn_add)
         nuc_layout.addWidget(self._btn_remove)
-        nuc_layout.addWidget(self._btn_move)
         layout.addWidget(nuc_group)
+
+        # ── Move / nudge controls ──
+        move_group = QGroupBox("Move / Resize")
+        move_layout = QVBoxLayout(move_group)
+
+        self._build_move_controls(move_layout)
+        layout.addWidget(move_group)
 
         # ── Cell-level operations ──
         cell_group = QGroupBox("Cell Operations")
@@ -168,7 +175,18 @@ class EditPanel(QWidget):  # type: ignore[misc]
         )
         self._btn_relink.clicked.connect(self._on_relink)
 
+        self._btn_track = QPushButton("Track")
+        self._btn_track.setToolTip(
+            "Click-to-place mode: select a parent cell first, then click Track.\n"
+            "Right-click in the viewer to place nuclei along the track.\n"
+            "With no cell selected, places a single root nucleus.\n"
+            "Press Esc or click Track again to exit."
+        )
+        self._btn_track.setCheckable(True)
+        self._btn_track.clicked.connect(self._on_track)
+
         link_layout.addWidget(self._btn_relink)
+        link_layout.addWidget(self._btn_track)
         layout.addWidget(link_group)
 
         # ── Status ──
@@ -186,6 +204,97 @@ class EditPanel(QWidget):  # type: ignore[misc]
         layout.addWidget(self._history_list)
 
         layout.addStretch()
+
+    def _build_move_controls(self, parent_layout: QVBoxLayout) -> None:
+        """Build D-pad style move/resize controls."""
+        # ── XY row (left / right / up / down) ──
+        xy_grid = QHBoxLayout()
+
+        # Left
+        col_left = QVBoxLayout()
+        btn_l1 = QPushButton("\u2190 1")
+        btn_l5 = QPushButton("\u2190 5")
+        btn_l1.setFixedWidth(48)
+        btn_l5.setFixedWidth(48)
+        btn_l1.clicked.connect(lambda: self._nudge(dx=-1))
+        btn_l5.clicked.connect(lambda: self._nudge(dx=-5))
+        col_left.addWidget(btn_l1)
+        col_left.addWidget(btn_l5)
+
+        # Up/Down center column
+        col_center = QVBoxLayout()
+        btn_u1 = QPushButton("\u2191 1")
+        btn_u5 = QPushButton("\u2191 5")
+        btn_d1 = QPushButton("\u2193 1")
+        btn_d5 = QPushButton("\u2193 5")
+        for b in (btn_u1, btn_u5, btn_d1, btn_d5):
+            b.setFixedWidth(48)
+        btn_u1.clicked.connect(lambda: self._nudge(dy=-1))
+        btn_u5.clicked.connect(lambda: self._nudge(dy=-5))
+        btn_d1.clicked.connect(lambda: self._nudge(dy=1))
+        btn_d5.clicked.connect(lambda: self._nudge(dy=5))
+        col_center.addWidget(btn_u1)
+        col_center.addWidget(btn_u5)
+        col_center.addWidget(btn_d1)
+        col_center.addWidget(btn_d5)
+
+        # Right
+        col_right = QVBoxLayout()
+        btn_r1 = QPushButton("\u2192 1")
+        btn_r5 = QPushButton("\u2192 5")
+        btn_r1.setFixedWidth(48)
+        btn_r5.setFixedWidth(48)
+        btn_r1.clicked.connect(lambda: self._nudge(dx=1))
+        btn_r5.clicked.connect(lambda: self._nudge(dx=5))
+        col_right.addWidget(btn_r1)
+        col_right.addWidget(btn_r5)
+
+        xy_grid.addLayout(col_left)
+        xy_grid.addLayout(col_center)
+        xy_grid.addLayout(col_right)
+        parent_layout.addLayout(xy_grid)
+
+        # ── Z and Size row ──
+        zs_row = QHBoxLayout()
+
+        z_label = QLabel("Z:")
+        btn_zd1 = QPushButton("-1")
+        btn_zd5 = QPushButton("-5")
+        btn_zu1 = QPushButton("+1")
+        btn_zu5 = QPushButton("+5")
+        for b in (btn_zd1, btn_zd5, btn_zu1, btn_zu5):
+            b.setFixedWidth(36)
+        btn_zd5.clicked.connect(lambda: self._nudge(dz=-5.0))
+        btn_zd1.clicked.connect(lambda: self._nudge(dz=-1.0))
+        btn_zu1.clicked.connect(lambda: self._nudge(dz=1.0))
+        btn_zu5.clicked.connect(lambda: self._nudge(dz=5.0))
+
+        zs_row.addWidget(z_label)
+        zs_row.addWidget(btn_zd5)
+        zs_row.addWidget(btn_zd1)
+        zs_row.addWidget(btn_zu1)
+        zs_row.addWidget(btn_zu5)
+        parent_layout.addLayout(zs_row)
+
+        size_row = QHBoxLayout()
+        s_label = QLabel("Size:")
+        btn_sd1 = QPushButton("-1")
+        btn_sd5 = QPushButton("-5")
+        btn_su1 = QPushButton("+1")
+        btn_su5 = QPushButton("+5")
+        for b in (btn_sd1, btn_sd5, btn_su1, btn_su5):
+            b.setFixedWidth(36)
+        btn_sd5.clicked.connect(lambda: self._nudge(dsize=-5))
+        btn_sd1.clicked.connect(lambda: self._nudge(dsize=-1))
+        btn_su1.clicked.connect(lambda: self._nudge(dsize=1))
+        btn_su5.clicked.connect(lambda: self._nudge(dsize=5))
+
+        size_row.addWidget(s_label)
+        size_row.addWidget(btn_sd5)
+        size_row.addWidget(btn_sd1)
+        size_row.addWidget(btn_su1)
+        size_row.addWidget(btn_su5)
+        parent_layout.addLayout(size_row)
 
     def refresh(self) -> None:
         """Update button states and history display."""
@@ -207,6 +316,10 @@ class EditPanel(QWidget):  # type: ignore[misc]
         # Scroll to latest
         if self._history_list.count() > 0:
             self._history_list.scrollToBottom()
+
+        # Sync toggle button states
+        self._btn_track.setChecked(self.app._placement_mode)
+        self._btn_add.setChecked(self.app._add_mode)
 
     # ── Save handlers ────────────────────────────────────────────
 
@@ -271,40 +384,30 @@ class EditPanel(QWidget):  # type: ignore[misc]
             "\n".join(errors),
         )
 
-    def _on_add_nucleus(self) -> None:
-        """Open the Add Nucleus dialog."""
-        dialog = AddNucleusDialog(
-            self.app.current_time,
-            self.app.current_plane,
-            parent=self,
-        )
-        if dialog.exec_() == QDialog.Accepted:
-            values = dialog.get_values()
-            from ..editing.validators import validate_add_nucleus
+    def _on_add_toggle(self, checked: bool) -> None:
+        """Toggle click-to-add mode."""
+        if checked:
+            # Exit other modes first
+            if self.app._placement_mode:
+                self.app.exit_placement_mode()
+                self._btn_track.setChecked(False)
 
-            errors = validate_add_nucleus(
-                self.app.edit_history.nuclei_record,
-                values["time"],
-                values["predecessor"],
-            )
-            if errors:
-                self._show_validation_errors(errors)
-                return
-
-            from ..editing.commands import AddNucleus
-
-            cmd = AddNucleus(
-                time=values["time"],
-                x=values["x"],
-                y=values["y"],
-                z=values["z"],
-                size=values["size"],
-                identity=values["identity"],
-                predecessor=values["predecessor"],
-            )
-            self.app.edit_history.do(cmd)
-            self._status_label.setText(f"Done: {cmd.description}")
-            self.refresh()
+            self.app.enter_add_mode()
+            parent = self.app.current_cell_name
+            if parent:
+                self._status_label.setText(
+                    f"ADD MODE: Left-click in viewer to place nucleus.\n"
+                    f"Predecessor: {parent}\n"
+                    f"Press Esc or click Add to exit."
+                )
+            else:
+                self._status_label.setText(
+                    "ADD MODE: Left-click in viewer to place a new root nucleus.\n"
+                    "Press Esc or click Add to exit."
+                )
+        else:
+            self.app.exit_add_mode()
+            self._status_label.setText("Exited add mode")
 
     def _on_remove_nucleus(self) -> None:
         """Remove the currently selected nucleus."""
@@ -342,30 +445,43 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._status_label.setText(f"Done: {cmd.description}")
         self.refresh()
 
-    def _on_move_nucleus(self) -> None:
-        """Open the Move Nucleus dialog."""
+    def _nudge(
+        self, dx: int = 0, dy: int = 0, dz: float = 0.0, dsize: int = 0
+    ) -> None:
+        """Nudge the selected nucleus by the given deltas."""
         sel = self._get_selected_nucleus()
         if sel is None:
             self._status_label.setText("No nucleus selected")
             return
 
         nuc, time, index = sel
-        dialog = MoveNucleusDialog(nuc, parent=self)
-        if dialog.exec_() == QDialog.Accepted:
-            values = dialog.get_values()
-            from ..editing.commands import MoveNucleus
+        new_x = nuc.x + dx
+        new_y = nuc.y + dy
+        new_z = max(0.0, nuc.z + dz)
+        new_size = max(1, nuc.size + dsize)
 
-            cmd = MoveNucleus(
-                time=time,
-                index=index,
-                new_x=values["x"],
-                new_y=values["y"],
-                new_z=values["z"],
-                new_size=values["size"],
-            )
-            self.app.edit_history.do(cmd)
-            self._status_label.setText(f"Done: {cmd.description}")
-            self.refresh()
+        from ..editing.commands import MoveNucleus
+
+        cmd = MoveNucleus(
+            time=time,
+            index=index,
+            new_x=new_x,
+            new_y=new_y,
+            new_z=new_z,
+            new_size=new_size,
+        )
+        self.app.edit_history.do(cmd)
+        parts = []
+        if dx:
+            parts.append(f"x{dx:+d}")
+        if dy:
+            parts.append(f"y{dy:+d}")
+        if dz:
+            parts.append(f"z{dz:+.0f}")
+        if dsize:
+            parts.append(f"size{dsize:+d}")
+        self._status_label.setText(f"Moved: {', '.join(parts)}")
+        self.refresh()
 
     def _on_rename_cell(self) -> None:
         """Open the Rename Cell dialog."""
@@ -575,6 +691,42 @@ class EditPanel(QWidget):  # type: ignore[misc]
             self.app.edit_history.do(cmd)
             self._status_label.setText(f"Done: {cmd.description}")
             self.refresh()
+
+    # ── Track mode ────────────────────────────────────────────────
+
+    def _on_track(self, checked: bool) -> None:
+        """Toggle click-to-place tracking mode."""
+        if checked:
+            parent_name = self.app.current_cell_name or None
+
+            if parent_name:
+                cell = self.app.manager.get_cell(parent_name)
+                if cell is None:
+                    self._status_label.setText(
+                        f"Cell '{parent_name}' not in lineage tree — entering root mode"
+                    )
+                    parent_name = None
+
+            if parent_name:
+                self._status_label.setText(
+                    f"TRACK MODE: Right-click in viewer to place nuclei.\n"
+                    f"Tracking from: {parent_name}\n"
+                    f"Navigate to the desired timepoint, then right-click.\n"
+                    f"Press Esc or click Track to exit."
+                )
+            else:
+                self._status_label.setText(
+                    "TRACK MODE (root): Right-click to place a single root nucleus.\n"
+                    "Press Esc or click Track to exit."
+                )
+
+            self.app.enter_placement_mode(
+                parent_name=parent_name,
+                default_size=20,
+            )
+        else:
+            self.app.exit_placement_mode()
+            self._status_label.setText("Exited tracking mode")
 
 
 # ── Dialog classes ───────────────────────────────────────────────

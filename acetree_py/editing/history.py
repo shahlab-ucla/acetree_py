@@ -51,6 +51,7 @@ class EditHistory:
         self._undo_stack: list[EditCommand] = []
         self._redo_stack: list[EditCommand] = []
         self.modified: bool = False
+        self.last_command: EditCommand | None = None
 
     def do(self, command: EditCommand) -> None:
         """Execute a command and push it onto the undo stack.
@@ -70,6 +71,7 @@ class EditHistory:
             self._undo_stack.pop(0)
 
         logger.info("Executed: %s", command.description)
+        self.last_command = command
         if self.on_edit:
             self.on_edit()
 
@@ -88,6 +90,7 @@ class EditHistory:
         self._redo_stack.append(command)
 
         logger.info("Undid: %s", command.description)
+        self.last_command = command
         if self.on_edit:
             self.on_edit()
         return command
@@ -108,6 +111,7 @@ class EditHistory:
         self.modified = True
 
         logger.info("Redid: %s", command.description)
+        self.last_command = command
         if self.on_edit:
             self.on_edit()
         return command
