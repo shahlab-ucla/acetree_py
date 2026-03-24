@@ -27,6 +27,11 @@ try:
     from qtpy.QtCore import QPointF, QRectF, Qt, Signal
     from qtpy.QtGui import QColor, QFont, QPainter, QPen, QTransform
     from qtpy.QtWidgets import (
+        QComboBox,
+        QDialog,
+        QDialogButtonBox,
+        QDoubleSpinBox,
+        QFormLayout,
         QGraphicsItem,
         QGraphicsLineItem,
         QGraphicsScene,
@@ -34,8 +39,10 @@ try:
         QGraphicsView,
         QHBoxLayout,
         QLabel,
+        QLineEdit,
         QPushButton,
         QSlider,
+        QSpinBox,
         QVBoxLayout,
         QWidget,
     )
@@ -104,21 +111,39 @@ class LineageWidget(QWidget):  # type: ignore[misc]
     Can be added as a napari dock widget. Shows the full lineage tree
     with expression-colored branches and supports click-to-select.
 
+    Supports configurable root cell, time range, expression range, and
+    matplotlib colormap for multi-panel usage.
+
     Layout:
-        [Toolbar: zoom controls, expression range, export]
+        [Toolbar: zoom controls, settings, export]
         [QGraphicsView showing the tree]
     """
 
-    def __init__(self, app: AceTreeApp, parent=None) -> None:
+    def __init__(
+        self,
+        app: AceTreeApp,
+        parent=None,
+        *,
+        root_cell_name: str | None = None,
+        time_start: int | None = None,
+        time_end: int | None = None,
+        expr_min: float = -500.0,
+        expr_max: float = 5000.0,
+        cmap_name: str | None = None,
+    ) -> None:
         if not _QT_AVAILABLE:
             raise ImportError("Qt is required: pip install 'acetree-py[gui]'")
 
         super().__init__(parent)
         self.app = app
 
-        # Expression color range
-        self._expr_min = -500.0
-        self._expr_max = 5000.0
+        # Panel configuration
+        self.root_cell_name: str | None = root_cell_name
+        self.time_start: int | None = time_start
+        self.time_end: int | None = time_end
+        self._expr_min = expr_min
+        self._expr_max = expr_max
+        self.cmap_name: str | None = cmap_name  # None = legacy green-to-red
 
         # Layout cache
         self._layout: dict[str, LayoutNode] | None = None
@@ -159,11 +184,16 @@ class LineageWidget(QWidget):  # type: ignore[misc]
         self._btn_export.setToolTip("Export tree as image")
         self._btn_export.clicked.connect(self._export)
 
+        self._btn_settings = QPushButton("Settings")
+        self._btn_settings.setToolTip("Configure this lineage panel")
+        self._btn_settings.clicked.connect(self._open_settings)
+
         toolbar.addWidget(QLabel("Zoom:"))
         toolbar.addWidget(self._btn_zoom_in)
         toolbar.addWidget(self._btn_zoom_out)
         toolbar.addWidget(self._btn_fit)
         toolbar.addStretch()
+        toolbar.addWidget(self._btn_settings)
         toolbar.addWidget(self._btn_export)
 
         layout.addLayout(toolbar)
@@ -181,7 +211,7 @@ class LineageWidget(QWidget):  # type: ignore[misc]
     def rebuild_tree(self) -> None:
         """Recompute layout and redraw the entire tree.
 
-        Picks the best root cell to display:
+        Uses the configured root cell if set, otherwise picks the best root:
         1. P0 (the canonical C. elegans founder cell) if it exists
         2. Otherwise the root with the largest subtree
         """
@@ -190,11 +220,22 @@ class LineageWidget(QWidget):  # type: ignore[misc]
             self._scene.clear()
             return
 
-        # Find the best root to display
-        display_root = self._find_best_root(tree)
+        # Use configured root or auto-detect
+        if self.root_cell_name:
+            display_root = tree.get_cell(self.root_cell_name)
+            if display_root is None:
+                # Configured root no longer exists — fall back
+                display_root = self._find_best_root(tree)
+        else:
+            display_root = self._find_best_root(tree)
+
         if display_root is None:
             self._scene.clear()
             return
+
+        # Apply time range configuration
+        self._layout_params.root_time = self.time_start
+        self._layout_params.late_time = self.time_end
 
         self._layout = compute_layout(display_root, self._layout_params)
         self._redraw()
@@ -366,7 +407,9 @@ class LineageWidget(QWidget):  # type: ignore[misc]
             if is_selected:
                 color = COLOR_SELECTED
             else:
-                r, g, b = expression_to_color(val, self._expr_min, self._expr_max)
+                r, g, b = expression_to_color(
+                    val, self._expr_min, self._expr_max, self.cmap_name,
+                )
                 color = QColor(int(r * 255), int(g * 255), int(b * 255))
 
             pen = QPen(color, width)
@@ -468,6 +511,19 @@ class LineageWidget(QWidget):  # type: ignore[misc]
 
         logger.info("Exported tree SVG to %s", path)
 
+    def _open_settings(self) -> None:
+        """Open the panel configuration dialog."""
+        dlg = LineagePanelConfigDialog(self, parent=self)
+        if dlg.exec_():
+            config = dlg.get_config()
+            self.root_cell_name = config["root_cell_name"]
+            self.time_start = config["time_start"]
+            self.time_end = config["time_end"]
+            self._expr_min = config["expr_min"]
+            self._expr_max = config["expr_max"]
+            self.cmap_name = config["cmap_name"]
+            self.rebuild_tree()
+
     # ── Mouse interaction ─────────────────────────────────────────
 
     def _handle_tree_click(self, scene_pos, button) -> None:
@@ -541,3 +597,140 @@ class LineageWidget(QWidget):  # type: ignore[misc]
             self._zoom(1.15)
         elif delta < 0:
             self._zoom(0.87)
+
+    def panel_title(self) -> str:
+        """Human-readable title for this panel."""
+        root = self.root_cell_name or "Full"
+        return f"Lineage: {root}"
+
+
+# ── Available matplotlib colormaps for the dialog ─────────────────
+
+AVAILABLE_CMAPS = [
+    "(legacy green-to-red)",
+    "viridis",
+    "plasma",
+    "inferno",
+    "magma",
+    "cividis",
+    "hot",
+    "cool",
+    "coolwarm",
+    "Spectral",
+    "RdYlGn",
+    "RdYlBu",
+    "RdBu",
+    "PiYG",
+    "PRGn",
+    "turbo",
+    "jet",
+    "Greys",
+    "Reds",
+    "Greens",
+    "Blues",
+    "YlOrRd",
+    "YlGnBu",
+]
+
+
+class LineagePanelConfigDialog(QDialog):  # type: ignore[misc]
+    """Dialog for configuring a lineage tree panel.
+
+    Allows setting:
+    - Root cell name (combobox with all named cells + auto-detect)
+    - Time range (start / end spinboxes)
+    - Expression color range (min / max)
+    - Colormap (matplotlib cmap dropdown)
+    """
+
+    def __init__(self, widget: LineageWidget, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Lineage Panel Settings")
+        self._widget = widget
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        # Root cell selector
+        self._root_combo = QComboBox()
+        self._root_combo.setEditable(True)
+        self._root_combo.addItem("(auto-detect)")
+        tree = widget.app.manager.lineage_tree
+        if tree:
+            names = sorted(tree.cells_by_name.keys())
+            self._root_combo.addItems(names)
+        if widget.root_cell_name:
+            idx = self._root_combo.findText(widget.root_cell_name)
+            if idx >= 0:
+                self._root_combo.setCurrentIndex(idx)
+            else:
+                self._root_combo.setEditText(widget.root_cell_name)
+        form.addRow("Root cell:", self._root_combo)
+
+        # Time range
+        max_time = widget.app.manager.num_timepoints
+        self._time_start = QSpinBox()
+        self._time_start.setRange(0, max_time)
+        self._time_start.setSpecialValueText("(auto)")
+        self._time_start.setValue(widget.time_start if widget.time_start is not None else 0)
+        form.addRow("Time start:", self._time_start)
+
+        self._time_end = QSpinBox()
+        self._time_end.setRange(0, max_time)
+        self._time_end.setSpecialValueText("(auto)")
+        self._time_end.setValue(widget.time_end if widget.time_end is not None else 0)
+        form.addRow("Time end:", self._time_end)
+
+        # Expression range
+        self._expr_min = QDoubleSpinBox()
+        self._expr_min.setRange(-100000, 100000)
+        self._expr_min.setDecimals(1)
+        self._expr_min.setValue(widget._expr_min)
+        form.addRow("Expr min:", self._expr_min)
+
+        self._expr_max = QDoubleSpinBox()
+        self._expr_max.setRange(-100000, 100000)
+        self._expr_max.setDecimals(1)
+        self._expr_max.setValue(widget._expr_max)
+        form.addRow("Expr max:", self._expr_max)
+
+        # Colormap selector
+        self._cmap_combo = QComboBox()
+        self._cmap_combo.addItems(AVAILABLE_CMAPS)
+        if widget.cmap_name is None:
+            self._cmap_combo.setCurrentIndex(0)  # legacy
+        else:
+            idx = self._cmap_combo.findText(widget.cmap_name)
+            if idx >= 0:
+                self._cmap_combo.setCurrentIndex(idx)
+        form.addRow("Colormap:", self._cmap_combo)
+
+        layout.addLayout(form)
+
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_config(self) -> dict:
+        """Return the configuration as a dictionary."""
+        root_text = self._root_combo.currentText().strip()
+        root_cell_name = None if root_text in ("(auto-detect)", "") else root_text
+
+        time_start = self._time_start.value()
+        time_end = self._time_end.value()
+
+        cmap_text = self._cmap_combo.currentText()
+        cmap_name = None if cmap_text == "(legacy green-to-red)" else cmap_text
+
+        return {
+            "root_cell_name": root_cell_name,
+            "time_start": time_start if time_start > 0 else None,
+            "time_end": time_end if time_end > 0 else None,
+            "expr_min": self._expr_min.value(),
+            "expr_max": self._expr_max.value(),
+            "cmap_name": cmap_name,
+        }

@@ -83,7 +83,7 @@ class AceTreeApp:
         self._cell_info_panel = None
         self._contrast_tools = None
         self._edit_panel = None
-        self._lineage_widget = None
+        self._lineage_widgets: list = []  # Multiple lineage tree panels
         self._lineage_list = None
 
         # Cached image layer
@@ -191,13 +191,8 @@ class AceTreeApp:
             area="right",
         )
 
-        # Lineage tree view (graphical Sulston tree)
-        self._lineage_widget = LineageWidget(self)
-        self.viewer.window.add_dock_widget(
-            self._lineage_widget,
-            name="Lineage Tree",
-            area="bottom",
-        )
+        # Lineage tree view (graphical Sulston tree) — first default panel
+        self.add_lineage_panel()
 
         # Lineage list view (hierarchical JTree-style list)
         self._lineage_list = LineageListWidget(self)
@@ -206,6 +201,9 @@ class AceTreeApp:
             name="Lineage List",
             area="left",
         )
+
+        # Add toggle actions to Window menu so closed panels can be reopened
+        self._add_panel_menu_actions()
 
         # Keyboard shortcuts
         self._bind_keys()
@@ -437,8 +435,8 @@ class AceTreeApp:
         if self._edit_panel:
             self._edit_panel.refresh()
 
-        if self._lineage_widget:
-            self._lineage_widget.refresh_selection()
+        for lw in self._lineage_widgets:
+            lw.refresh_selection()
 
         if self._lineage_list:
             self._lineage_list.refresh_selection()
@@ -620,13 +618,129 @@ class AceTreeApp:
         self.manager.process()
 
         # Structural edits (relink, kill, add) change the lineage tree,
-        # so the tree widget needs a full rebuild, not just a selection refresh.
-        if self._lineage_widget:
-            self._lineage_widget.rebuild_tree()
+        # so all lineage tree panels need a full rebuild.
+        for lw in self._lineage_widgets:
+            lw.rebuild_tree()
         if self._lineage_list:
             self._lineage_list.rebuild()
 
         self.update_display()
+
+    # ── Multi-panel lineage management ──────────────────────────
+
+    def add_lineage_panel(
+        self,
+        *,
+        root_cell_name: str | None = None,
+        time_start: int | None = None,
+        time_end: int | None = None,
+        expr_min: float = -500.0,
+        expr_max: float = 5000.0,
+        cmap_name: str | None = None,
+    ) -> None:
+        """Create and dock a new lineage tree panel.
+
+        Args:
+            root_cell_name: Root cell to display (None = auto-detect best root).
+            time_start: First timepoint to display (None = from root cell).
+            time_end: Last timepoint to display (None = full range).
+            expr_min: Expression color range minimum.
+            expr_max: Expression color range maximum.
+            cmap_name: Matplotlib colormap name (None = legacy green-to-red).
+        """
+        from .lineage_widget import LineageWidget
+
+        widget = LineageWidget(
+            self,
+            root_cell_name=root_cell_name,
+            time_start=time_start,
+            time_end=time_end,
+            expr_min=expr_min,
+            expr_max=expr_max,
+            cmap_name=cmap_name,
+        )
+        self._lineage_widgets.append(widget)
+
+        # Determine panel title
+        panel_num = len(self._lineage_widgets)
+        title = widget.panel_title()
+        if panel_num > 1:
+            title = f"{title} ({panel_num})"
+        else:
+            title = "Lineage Tree"
+
+        if self.viewer is not None:
+            self.viewer.window.add_dock_widget(
+                widget,
+                name=title,
+                area="bottom",
+            )
+
+    def remove_lineage_panel(self, widget) -> None:
+        """Remove a lineage panel from the app."""
+        if widget in self._lineage_widgets:
+            self._lineage_widgets.remove(widget)
+        if self.viewer is not None:
+            self.viewer.window.remove_dock_widget(widget)
+
+    def _add_panel_menu_actions(self) -> None:
+        """Add show/hide toggle actions and panel management to the Window menu."""
+        qt_window = self.viewer.window._qt_window
+        menu_bar = qt_window.menuBar()
+        # Find the Window menu (napari creates it via app-model as "&Window")
+        window_menu = None
+        for action in menu_bar.actions():
+            if action.menu() and "window" in action.text().lower().replace("&", ""):
+                window_menu = action.menu()
+                break
+        if window_menu is None:
+            return
+
+        window_menu.addSeparator()
+        # Add toggle actions for each of our dock widgets.
+        # We need the QDockWidget wrappers (not inner widgets) for
+        # toggleViewAction(), so use the private dict with warning suppressed.
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            dock_wrappers = self.viewer.window._dock_widgets
+        for dock_widget in dock_wrappers.values():
+            toggle = dock_widget.toggleViewAction()
+            toggle.setText(dock_widget.name)
+            window_menu.addAction(toggle)
+
+        # Add "New Lineage Panel" action
+        window_menu.addSeparator()
+        from qtpy.QtWidgets import QAction
+        add_panel_action = QAction("New Lineage Panel...", qt_window)
+        add_panel_action.triggered.connect(self._on_new_lineage_panel)
+        window_menu.addAction(add_panel_action)
+
+    def _on_new_lineage_panel(self) -> None:
+        """Show config dialog and create a new lineage panel."""
+        from .lineage_widget import LineagePanelConfigDialog, LineageWidget
+
+        # Create a temporary widget to host the dialog with defaults
+        temp = LineageWidget.__new__(LineageWidget)
+        temp.app = self
+        temp.root_cell_name = None
+        temp.time_start = None
+        temp.time_end = None
+        temp._expr_min = -500.0
+        temp._expr_max = 5000.0
+        temp.cmap_name = None
+
+        dlg = LineagePanelConfigDialog(temp)
+        if dlg.exec_():
+            config = dlg.get_config()
+            self.add_lineage_panel(
+                root_cell_name=config["root_cell_name"],
+                time_start=config["time_start"],
+                time_end=config["time_end"],
+                expr_min=config["expr_min"],
+                expr_max=config["expr_max"],
+                cmap_name=config["cmap_name"],
+            )
 
     def _bind_keys(self) -> None:
         """Bind keyboard shortcuts to the napari viewer."""

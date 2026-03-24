@@ -330,18 +330,16 @@ def expression_to_color(
     value: float,
     vmin: float = 0.0,
     vmax: float = 5000.0,
+    cmap_name: str | None = None,
 ) -> tuple[float, float, float]:
     """Map an expression value to an RGB color.
 
-    Uses a green-to-red gradient matching Java's CMAP2:
-    - Below vmin: gray (0.5, 0.5, 0.5)
-    - vmin to midpoint: green gradient (dark to bright)
-    - midpoint to vmax: red gradient (dark to bright)
-
     Args:
         value: The expression value.
-        vmin: Minimum value (maps to dark green).
-        vmax: Maximum value (maps to bright red).
+        vmin: Minimum value.
+        vmax: Maximum value.
+        cmap_name: Matplotlib colormap name (e.g. "viridis", "inferno").
+            If None, uses the legacy green-to-red gradient matching Java's CMAP2.
 
     Returns:
         (r, g, b) tuple with values in [0, 1].
@@ -355,6 +353,10 @@ def expression_to_color(
     # Normalize to 0-1
     t = min(1.0, (value - vmin) / (vmax - vmin))
 
+    if cmap_name is not None:
+        return _matplotlib_color(t, cmap_name)
+
+    # Legacy green-to-red gradient (Java CMAP2)
     if t < 0.5:
         # Green gradient: dark green -> bright green
         g = 0.3 + 0.7 * (t / 0.5)
@@ -363,6 +365,22 @@ def expression_to_color(
         # Red gradient: dark red -> bright red
         r = 0.3 + 0.7 * ((t - 0.5) / 0.5)
         return (r, 0.0, 0.0)
+
+
+# Cache for matplotlib colormaps (avoid repeated lookups)
+_cmap_cache: dict[str, object] = {}
+
+
+def _matplotlib_color(t: float, cmap_name: str) -> tuple[float, float, float]:
+    """Map a normalized value [0,1] to RGB using a matplotlib colormap."""
+    import matplotlib.cm as cm
+
+    cmap = _cmap_cache.get(cmap_name)
+    if cmap is None:
+        cmap = cm.get_cmap(cmap_name)
+        _cmap_cache[cmap_name] = cmap
+    rgba = cmap(t)
+    return (rgba[0], rgba[1], rgba[2])
 
 
 def compute_tree_bounds(nodes: dict[str, LayoutNode]) -> tuple[float, float, float, float]:
