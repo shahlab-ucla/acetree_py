@@ -89,6 +89,10 @@ class AceTreeApp:
         # Cached image layer
         self._image_layer = None
 
+        # 3D view state
+        self._3d_mode: bool = False
+        self._points_layer = None  # napari Points layer for 3D nuclei
+
         # Relink pick mode state (Feature 4)
         self._relink_pick_mode: bool = False
         self._relink_pick_callback = None  # callable(time, nuc) when target picked
@@ -417,13 +421,180 @@ class AceTreeApp:
             cb(self.current_time, nuc)
         return True
 
+    # ── 3D view toggle ─────────────────────────────────────────────
+
+    def toggle_3d(self) -> None:
+        """Toggle between 2D slice view and 3D volume view."""
+        if self.viewer is None:
+            return
+        self._3d_mode = not self._3d_mode
+        if self._3d_mode:
+            self._enter_3d()
+        else:
+            self._exit_3d()
+
+    def _enter_3d(self) -> None:
+        """Switch to 3D volume rendering with nucleus spheres."""
+        if self.viewer is None or self.image_provider is None:
+            self._3d_mode = False
+            return
+
+        z_scale = self.manager.z_pix_res
+
+        # Load full z-stack and replace 2D image layer data
+        try:
+            stack = self.image_provider.get_stack(self.current_time)
+        except (FileNotFoundError, IndexError) as e:
+            logger.warning("Could not load 3D stack: %s", e)
+            self._3d_mode = False
+            return
+
+        if self._image_layer is not None:
+            self._image_layer.data = stack
+            self._image_layer.scale = (z_scale, 1.0, 1.0)
+
+        # Hide 2D shapes overlay
+        if self._viewer_integration and self._viewer_integration._shapes_layer:
+            self._viewer_integration._shapes_layer.visible = False
+        if self._viewer_integration and self._viewer_integration._division_line_layer:
+            self._viewer_integration._division_line_layer.visible = False
+
+        # Build 3D Points layer for nuclei
+        self._update_3d_points()
+
+        # Switch viewer to 3D
+        self.viewer.dims.ndisplay = 3
+
+    def _exit_3d(self) -> None:
+        """Switch back to 2D slice view."""
+        if self.viewer is None:
+            return
+
+        # Switch to 2D first
+        self.viewer.dims.ndisplay = 2
+
+        # Remove 3D points layer
+        if self._points_layer is not None:
+            try:
+                self.viewer.layers.remove(self._points_layer)
+            except ValueError:
+                pass
+            self._points_layer = None
+
+        # Restore 2D image layer
+        if self._image_layer is not None:
+            self._image_layer.scale = (1.0, 1.0)
+
+        # Show 2D shapes overlay
+        if self._viewer_integration and self._viewer_integration._shapes_layer:
+            self._viewer_integration._shapes_layer.visible = True
+        if self._viewer_integration and self._viewer_integration._division_line_layer:
+            self._viewer_integration._division_line_layer.visible = True
+
+        # Reload 2D plane
+        self.update_display()
+
+    def _update_3d_points(self) -> None:
+        """Create or update the 3D Points layer for nucleus positions."""
+        if self.viewer is None:
+            return
+
+        nuclei = self.manager.alive_nuclei_at(self.current_time)
+        z_scale = self.manager.z_pix_res
+
+        coords = []
+        sizes = []
+        colors = []
+        names_list = []
+
+        for nuc in nuclei:
+            # Points coords in (z, y, x) — z in pixel units, scaled by layer
+            coords.append([nuc.z, nuc.y, nuc.x])
+            sizes.append(nuc.size)
+            names_list.append(nuc.effective_name or f"Nuc{nuc.index}")
+
+            name = nuc.effective_name or ""
+            if name == self.current_cell_name and name:
+                colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
+            elif name.startswith("Nuc"):
+                colors.append([1.0, 0.6, 0.15, 0.8])  # Orange — unnamed (Nuc*)
+            elif name:
+                colors.append([0.55, 0.27, 1.0, 0.8])  # Purple — named
+            else:
+                colors.append([0.5, 0.5, 0.5, 0.5])  # Gray — no name at all
+
+        if not coords:
+            if self._points_layer is not None:
+                self._points_layer.data = np.empty((0, 3))
+            return
+
+        coords_arr = np.array(coords)
+        sizes_arr = np.array(sizes)
+        colors_arr = np.array(colors)
+
+        # Determine which labels to show
+        shown = self._viewer_integration._shown_labels if self._viewer_integration else set()
+        display_names = []
+        for n in names_list:
+            if self._viewer_integration and self._viewer_integration._labels_global_visible and n in shown:
+                display_names.append(n)
+            else:
+                display_names.append("")
+
+        if self._points_layer is None:
+            self._points_layer = self.viewer.add_points(
+                coords_arr,
+                size=sizes_arr,
+                face_color=colors_arr,
+                border_color="transparent",
+                name="Nuclei 3D",
+                scale=(z_scale, 1.0, 1.0),
+                opacity=0.7,
+            )
+            self._points_layer.features = {"name": display_names}
+            self._points_layer.text = {
+                "string": "{name}",
+                "color": "white",
+                "size": 10,
+            }
+            # Click callback for 3D selection
+            self._points_layer.mouse_drag_callbacks.append(self._on_3d_click)
+        else:
+            self._points_layer.data = coords_arr
+            self._points_layer.size = sizes_arr
+            self._points_layer.face_color = colors_arr
+            self._points_layer.features = {"name": display_names}
+
+    def _on_3d_click(self, layer, event) -> None:
+        """Handle click on 3D Points layer to select a cell."""
+        if event.type != "mouse_press" or event.button != 2:
+            return
+        # Get the index of the clicked point
+        idx = layer.get_value(event.position, world=True)
+        if idx is not None and isinstance(idx, (int, np.integer)):
+            nuclei = self.manager.alive_nuclei_at(self.current_time)
+            if 0 <= idx < len(nuclei):
+                nuc = nuclei[idx]
+                name = nuc.effective_name
+                if name:
+                    self.current_cell_name = name
+                    if self._viewer_integration:
+                        self._viewer_integration._shown_labels.add(name)
+                    self._update_3d_points()
+                    if self._cell_info_panel:
+                        self._cell_info_panel.refresh()
+                    for lw in self._lineage_widgets:
+                        lw.refresh_selection()
+                    if self._lineage_list:
+                        self._lineage_list.refresh_selection()
+
     # ── Display ───────────────────────────────────────────────────
 
     def update_display(self) -> None:
         """Refresh all visual components for the current state."""
         self._load_image()
 
-        if self._viewer_integration:
+        if self._viewer_integration and not self._3d_mode:
             self._viewer_integration.update_overlays()
 
         if self._cell_info_panel:
@@ -447,6 +618,8 @@ class AceTreeApp:
         When only the z-plane changes, the lineage tree and list are
         unaffected — only the image and nucleus overlay need updating.
         """
+        if self._3d_mode:
+            return  # z-plane changes don't apply in 3D mode
         self._load_image()
 
         if self._viewer_integration:
@@ -543,14 +716,17 @@ class AceTreeApp:
             radii.append(diam / 2.0)
             names.append(nuc.effective_name or f"Nuc{nuc.index}")
 
-            # Color: selected = white, named = blue/purple, unnamed = gray
-            if nuc.effective_name == self.current_cell_name:
+            # Color: selected=white, named=purple, Nuc*=orange, none=gray
+            ename = nuc.effective_name or ""
+            if ename == self.current_cell_name and ename:
                 selected_idx = len(centers) - 1
-                colors.append([1.0, 1.0, 1.0, 1.0])  # White
-            elif nuc.effective_name:
-                colors.append([0.55, 0.27, 1.0, 0.8])  # Purple (matches Java blue)
+                colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
+            elif ename.startswith("Nuc"):
+                colors.append([1.0, 0.6, 0.15, 0.8])  # Orange — unnamed
+            elif ename:
+                colors.append([0.55, 0.27, 1.0, 0.8])  # Purple — named
             else:
-                colors.append([0.5, 0.5, 0.5, 0.5])  # Gray
+                colors.append([0.5, 0.5, 0.5, 0.5])  # Gray — no name
 
         return {
             "centers": np.array(centers) if centers else np.empty((0, 2)),
@@ -563,8 +739,20 @@ class AceTreeApp:
     # ── Internal methods ──────────────────────────────────────────
 
     def _load_image(self) -> None:
-        """Load the current image plane into the napari viewer."""
+        """Load the current image plane (or stack in 3D mode) into the viewer."""
         if self.viewer is None or self.image_provider is None:
+            return
+
+        if self._3d_mode:
+            # In 3D mode, load full stack and update points
+            try:
+                stack = self.image_provider.get_stack(self.current_time)
+            except (FileNotFoundError, IndexError) as e:
+                logger.warning("Could not load 3D stack: %s", e)
+                return
+            if self._image_layer is not None:
+                self._image_layer.data = stack
+            self._update_3d_points()
             return
 
         try:
@@ -778,3 +966,7 @@ class AceTreeApp:
         @self.viewer.bind_key("Control-y")
         def _redo(viewer):
             self.edit_history.redo()
+
+        @self.viewer.bind_key("3")
+        def _toggle_3d(viewer):
+            self.toggle_3d()

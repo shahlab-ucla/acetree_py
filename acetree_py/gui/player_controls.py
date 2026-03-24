@@ -179,6 +179,13 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         plane_row.addWidget(self._btn_toggle_labels)
         plane_row.addWidget(self._btn_clear_labels)
 
+        self._btn_3d = QPushButton("3D")
+        self._btn_3d.setToolTip("Toggle 3D volume view (key: 3)")
+        self._btn_3d.setFixedWidth(40)
+        self._btn_3d.setCheckable(True)
+        self._btn_3d.clicked.connect(self._on_toggle_3d)
+        plane_row.addWidget(self._btn_3d)
+
         layout.addLayout(plane_row)
 
     def refresh(self) -> None:
@@ -197,6 +204,8 @@ class PlayerControls(QWidget):  # type: ignore[misc]
 
         max_p = self.app.image_provider.num_planes if self.app.image_provider else 30
         self._plane_label.setText(f"/ {max_p}")
+
+        self._btn_3d.setChecked(self.app._3d_mode)
 
         self._time_spin.blockSignals(False)
         self._time_slider.blockSignals(False)
@@ -238,3 +247,8 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         vi = self.app._viewer_integration
         if vi is not None:
             vi.clear_labels()
+
+    def _on_toggle_3d(self) -> None:
+        """Toggle 3D volume view."""
+        self.app.toggle_3d()
+        self._btn_3d.setChecked(self.app._3d_mode)
