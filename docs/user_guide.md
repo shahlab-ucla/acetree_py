@@ -17,7 +17,9 @@ pip install -e ".[gui]"
 pip install -e ".[all]"
 ```
 
-**Requirements:** Python 3.10+, numpy, scipy, tifffile, typer. GUI additionally requires napari and qtpy.
+**Requirements:** Python 3.10+, numpy, scipy, tifffile, typer, matplotlib. GUI additionally requires napari (0.5–0.6.x) and qtpy.
+
+**Tested versions:** napari 0.6.6, numpy 2.3, scipy 1.16, matplotlib 3.10, qtpy 2.4, Python 3.12.
 
 ---
 
@@ -102,7 +104,7 @@ When you launch the GUI, you'll see:
 | **Cell Info**        | Left       | Displays details of the selected cell           |
 | **Lineage List**     | Left       | Searchable hierarchical cell tree               |
 | **Player Controls**  | Bottom     | Time/plane navigation with play/pause           |
-| **Lineage Tree**     | Bottom     | Visual Sulston tree with expression coloring    |
+| **Lineage Tree**     | Bottom     | Visual Sulston tree (multiple panels supported) |
 | **Contrast**         | Right      | Image brightness/contrast adjustment            |
 | **Edit Tools**       | Right      | Editing operations, undo/redo, save             |
 
@@ -330,7 +332,7 @@ The Sulston lineage tree at the bottom of the window shows the full cell lineage
 - **Horizontal connectors** = cell divisions (mother splits into two daughters)
 - **Yellow dashed line** = current timepoint indicator
 - **Yellow highlighting** = currently selected cell
-- **Expression coloring** = branches colored by GFP expression intensity (blue = low, warm colors = high)
+- **Expression coloring** = branches colored by GFP expression intensity (configurable colormap)
 
 ### Controls
 
@@ -340,8 +342,24 @@ The Sulston lineage tree at the bottom of the window shows the full cell lineage
 | Mouse wheel         | Zoom in/out                              |
 | Click + drag        | Pan                                      |
 | **+** / **−**       | Zoom in / out (toolbar)                  |
+| **Settings**        | Configure panel display settings         |
 | **Fit**             | Fit entire tree to view                  |
 | **Export**           | Save tree as PNG or SVG image            |
+
+### Multiple Lineage Panels
+
+You can open multiple lineage tree panels, each showing a different subtree or using different display settings:
+
+1. **Window > New Lineage Panel...** — opens a configuration dialog to create a new panel.
+2. Each panel's **Settings** button lets you reconfigure it at any time.
+
+**Panel settings:**
+- **Root cell** — choose which cell to use as the tree root (e.g. "ABa" to see only ABa's descendants). Set to "(auto-detect)" for the full tree.
+- **Time range** — restrict the display to a window of timepoints.
+- **Expression range** — set min/max values for expression color mapping.
+- **Colormap** — choose from matplotlib colormaps (viridis, plasma, inferno, hot, coolwarm, etc.) or the legacy green-to-red gradient.
+
+All open panels update synchronously when edits are committed (relink, kill, rename, etc.).
 
 ---
 

@@ -362,14 +362,26 @@ Draws nucleus circles as a napari Shapes layer (polygon approximation with 32 ve
 
 ### 6.3 LineageWidget (`gui/lineage_widget.py`)
 
-Sulston tree rendered in a `QGraphicsView` with expression-colored branch segments.
+Sulston tree rendered in a `QGraphicsView` with expression-colored branch segments. Multiple panels can be open simultaneously, each with independent configuration.
 
 Uses `_ClickableGraphicsView` subclass to handle single-click despite `ScrollHandDrag` mode (detects clicks on mouseRelease when mouse movement < 5px).
+
+**Per-panel configuration** (via Settings button or `LineagePanelConfigDialog`):
+- **Root cell**: display any subtree (e.g. "ABa" for only ABa descendants), or auto-detect
+- **Time range**: restrict display to a timepoint window
+- **Expression range**: min/max values for color mapping
+- **Colormap**: matplotlib colormap (viridis, plasma, inferno, etc.) or legacy green-to-red
 
 **Mouse interaction:**
 - **Left-click** on cell: select cell, jump to clicked y-position timepoint
 - **Right-click** on cell: select cell, jump to cell's end time
 - **Mouse wheel**: zoom in/out
+
+**Multi-panel management** (`app.py`):
+- `_lineage_widgets: list[LineageWidget]` tracks all open panels
+- `add_lineage_panel()` creates a new panel with configurable parameters
+- All panels rebuild synchronously after edit operations
+- **Window > New Lineage Panel...** menu action opens a config dialog
 
 ### 6.4 LineageLayout (`gui/lineage_layout.py`)
 
@@ -377,7 +389,7 @@ Pure computational layout engine (no Qt dependency):
 - `compute_layout(root_cell, params)` → `dict[str, LayoutNode]`
 - Recursive leaf-counting for x-position assignment
 - Y-axis = time (start_time → end_time scaled by `y_scale`)
-- Expression coloring via `expression_to_color()` (heatmap)
+- Expression coloring via `expression_to_color()` — supports matplotlib colormaps (passed as `cmap_name`) or legacy green-to-red gradient
 - Daughter ordering follows Java AncesTree convention
 
 ### 6.5 Other Widgets
@@ -449,10 +461,13 @@ acetree-py info <config.xml> -c ABala           # Query cell details
 name = "acetree-py"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "scipy>=1.10", "tifffile>=2023.1", "typer>=0.9"]
+dependencies = [
+    "numpy>=1.24", "scipy>=1.10", "tifffile>=2023.1",
+    "typer>=0.9", "matplotlib>=3.7",
+]
 
 [project.optional-dependencies]
-gui = ["napari[all]>=0.4.18", "qtpy>=2.0"]
+gui = ["napari[all]>=0.5,<0.7", "qtpy>=2.3"]
 dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.1"]
 
 [project.scripts]
@@ -460,3 +475,5 @@ acetree-py = "acetree_py.__main__:app"
 ```
 
 Install: `pip install -e .` (core) or `pip install -e ".[gui]"` (with GUI) or `pip install -e ".[all]"` (everything).
+
+**napari version note:** The GUI uses napari's `Window.add_dock_widget()` and `Window._dock_widgets` APIs for panel management. These were tested against napari 0.5.x–0.6.x. The upper bound (`<0.7`) guards against breaking changes to these internal APIs.
