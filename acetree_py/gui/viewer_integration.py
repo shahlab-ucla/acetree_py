@@ -285,9 +285,21 @@ class ViewerIntegration:
         # napari coords are (row, col) = (y, x)
         y, x = coords[-2], coords[-1]
 
-        # Check for relink pick mode first (consumes any click)
+        # Check for relink pick mode first (consumes any click).
+        # Defer the callback via QTimer so the yield happens first —
+        # the callback opens a modal dialog which would block napari's
+        # drag cycle finalisation and leave the canvas stuck in pan mode.
         if self.app._relink_pick_mode:
-            self.app._handle_relink_pick(x, y)
+            nuc = self.app.manager.find_closest_nucleus(
+                x, y, float(self.app.current_plane), self.app.current_time,
+                require_hit=True, image_plane=self.app.current_plane,
+            )
+            if nuc is not None and self.app._relink_pick_callback is not None:
+                cb = self.app._relink_pick_callback
+                t = self.app.current_time
+                self.app.exit_relink_pick_mode()
+                from qtpy.QtCore import QTimer
+                QTimer.singleShot(0, lambda: cb(t, nuc))
             yield  # release drag cycle
             return
 

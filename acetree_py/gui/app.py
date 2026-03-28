@@ -857,11 +857,15 @@ class AceTreeApp:
                 nuc = nuclei[idx]
 
         # --- Relink pick mode (right-click selects relink target) ---
+        # Defer callback via QTimer so napari finalises the click event
+        # before the modal confirmation dialog opens.
         if self._relink_pick_mode and self._relink_pick_callback is not None:
             if event.button == 2 and nuc is not None:
                 cb = self._relink_pick_callback
+                t = self.current_time
                 self.exit_relink_pick_mode()
-                cb(self.current_time, nuc)
+                from qtpy.QtCore import QTimer
+                QTimer.singleShot(0, lambda: cb(t, nuc))
             return  # consume all clicks while in pick mode
 
         # --- Placement / track mode (right-click places a nucleus) ---
