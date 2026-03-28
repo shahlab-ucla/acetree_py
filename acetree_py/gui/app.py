@@ -1233,6 +1233,32 @@ class AceTreeApp:
                 cmap_name=config["cmap_name"],
             )
 
+    def _delete_active_nucleus(self) -> None:
+        """Delete the active cell's nucleus at the current timepoint only."""
+        if not self.current_cell_name:
+            return
+
+        cell = self.manager.get_cell(self.current_cell_name)
+        if cell is None:
+            return
+
+        nuc = cell.get_nucleus_at(self.current_time)
+        if nuc is None:
+            return
+
+        from ..editing.validators import validate_remove_nucleus
+
+        errors = validate_remove_nucleus(
+            self.edit_history.nuclei_record, self.current_time, nuc.index
+        )
+        if errors:
+            return
+
+        from ..editing.commands import RemoveNucleus
+
+        cmd = RemoveNucleus(time=self.current_time, index=nuc.index)
+        self.edit_history.do(cmd)
+
     def _bind_keys(self) -> None:
         """Bind keyboard shortcuts to the napari viewer."""
         if self.viewer is None:
@@ -1288,3 +1314,7 @@ class AceTreeApp:
                     self._edit_panel._status_label.setText("Exited tracking mode")
             elif self._relink_pick_mode:
                 self.exit_relink_pick_mode()
+
+        @self.viewer.bind_key("Delete")
+        def _delete_nucleus(viewer):
+            self._delete_active_nucleus()
