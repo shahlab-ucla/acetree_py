@@ -94,7 +94,7 @@ If automatic naming would produce a name collision with an existing `assigned_id
 
 A **four-cell window** is a contiguous range of timepoints $[t_\text{first}, t_\text{last}]$ where exactly 4 alive, non-polar-body nuclei exist:
 
-$$\forall t \in [t_\text{first}, t_\text{last}]: \quad |\{n \in \text{nuclei}(t) : n.\text{status} \geq 1 \wedge n.\text{size} < \text{polar\_size}\}| = 4$$
+$$\forall t \in [t_\text{first}, t_\text{last}]: \quad |\{n \in \text{nuclei}(t) : n.\text{status} \geq 1 \wedge n.\text{size} < \text{polar}\_\text{size}\}| = 4$$
 
 The midpoint is: $t_\text{mid} = \lfloor (t_\text{first} + t_\text{last}) / 2 \rfloor$
 
@@ -162,8 +162,8 @@ $$C_\text{timing} = \begin{cases}
 **Forward pairing confidence** (when backward trace yields gap = 0):
 
 $$C_\text{timing}^\text{fwd} = \begin{cases}
-\min(1.0,\ 0.5 + \text{fwd\_gap} \times 0.1) & \text{if fwd\_gap} \geq 1 \\
-0.5 & \text{if fwd\_gap} = 0
+\min(1.0,\ 0.5 + \text{fwd}\_\text{gap} \times 0.1) & \text{if fwd}\_\text{gap} \geq 1 \\
+0.5 & \text{if fwd}\_\text{gap} = 0
 \end{cases}$$
 
 **Size confidence:**
@@ -313,7 +313,7 @@ The negation of AP maps to the canonical AP direction $(-1, 0, 0)$.
 Given parent nucleus $P$ dividing into daughters $D_1, D_2$, and division rule $(s, \vec{a})$ where $s$ is the Sulston letter and $\vec{a}$ is the rule's axis unit vector:
 
 1. **Raw division vector:**
-$$\vec{\delta} = (D_2.x - D_1.x,\ D_2.y - D_1.y,\ (D_2.z - D_1.z) \times z_\text{pix\_res})$$
+$$\vec{\delta} = (D_2.x - D_1.x,\ D_2.y - D_1.y,\ (D_2.z - D_1.z) \times z_{\text{pix}\_\text{res}})$$
 
 2. **Rotate to canonical frame:** $\vec{\delta}_c = T(\vec{\delta})$ where $T$ is the active transform (v2, v1, lineage centroid, or static founder).
 
@@ -369,7 +369,7 @@ For parent name $P$:
 
 ### 6.2 Axis Vector Convention
 
-$$\text{LETTER\_TO\_AXIS}: \quad \begin{cases}
+$$\text{LETTER}\_\text{TO}\_\text{AXIS}: \quad \begin{cases}
 a, p \to (1, 0, 0) & \text{AP axis} \\
 d, v \to (0, 1, 0) & \text{DV axis} \\
 l, r \to (0, 0, 1) & \text{LR axis}
@@ -435,7 +435,7 @@ After every `do`/`undo`/`redo`, the `on_edit` callback is invoked. In the GUI, t
 
 ### 8.4 RenameCell
 
-**Execute:** Save `(identity_0, \text{assigned\_id}_0)`. Set both to `new_name`.
+**Execute:** Save `(identity_0, assigned_id_0)`. Set both to `new_name`.
 
 **Undo:** Restore both.
 
@@ -468,9 +468,9 @@ Inverse of RemoveNucleus. Sets `status ← 1` and optionally applies a new ident
 ### 8.8 RelinkWithInterpolation
 
 **Execute:**
-1. Let $n = \text{end\_time} - \text{start\_time}$.
+1. Let $n = \text{end}\_\text{time} - \text{start}\_\text{time}$.
 2. Get start nucleus $S$ at `(start_time, start_index)` and end nucleus $E$ at `(end_time, end_index)`.
-3. For each intermediate timepoint $t = \text{start\_time} + k$ ($k = 1, \ldots, n-1$):
+3. For each intermediate timepoint $t = \text{start}\_\text{time} + k$ ($k = 1, \ldots, n-1$):
 
 $$x_k = S.x + (E.x - S.x) \cdot \frac{k}{n}$$
 $$y_k = S.y + (E.y - S.y) \cdot \frac{k}{n}$$

@@ -124,6 +124,7 @@ When you launch the GUI, you'll see:
 | `Ctrl+Shift+S`   | Save As                   |
 | `Ctrl+Z`         | Undo                      |
 | `Ctrl+Y`         | Redo                      |
+| `Delete`         | Remove active cell's nucleus at the current timepoint |
 | `Escape`         | Exit active mode (Add, Track, Relink pick) |
 
 ### 4.2 Player Controls
@@ -156,8 +157,8 @@ When a cell is selected and **tracking** is enabled (the default), the viewer au
 
 ### 5.1 In the Image Viewer
 
-- **Right-click** on a nucleus circle or its label → **select that cell** (makes it the active cell; viewer centers on it, cell info updates)
-- **Left-click** on a nucleus circle or its label → **toggle the label on/off** (useful for decluttering the display)
+- **Right-click** on a nucleus circle → **select that cell** (makes it the active cell; viewer centers on it, cell info updates). The click must land within the drawn circle — clicking on empty space does nothing.
+- **Left-click** on a nucleus circle → **toggle the label on/off** (useful for decluttering the display). Also requires clicking within the drawn circle.
 - **Left-click** (in **Add mode**) → **place a new nucleus** at the click position (see Section 6.2)
 - **Right-click** (in **Track mode**) → **place a tracking nucleus** at the click position (see Section 6.5)
 - **Right-click** (in **Relink pick mode**) → **select relink target** (see Section 6.4)
@@ -238,7 +239,7 @@ The **Add** button is a toggle that activates click-to-add mode:
 **Inherited properties:** When adding from an existing cell, the new nucleus inherits the parent cell's diameter (size). Root nuclei use the default diameter (20 pixels).
 
 #### Remove Nucleus
-Select a cell, then click **Remove**. The selected nucleus is killed (marked dead). It remains in the data but is no longer displayed or tracked.
+Select a cell, then click **Remove** (or press **Delete**). The selected nucleus at the current timepoint is killed (marked dead). It remains in the data but is no longer displayed or tracked. The **Delete** key acts immediately without a confirmation dialog; the **Remove** button shows a confirmation prompt first.
 
 ### 6.3 Move / Resize (D-Pad Controls)
 
@@ -313,7 +314,7 @@ This color scheme is consistent across both 2D overlay circles and 3D spheres.
 
 **Known limitation:** Text labels do not render on 3D points (napari/vispy limitation). However, selecting a cell from the lineage list panel does display its label in 3D.
 
-Clicking on a sphere in 3D mode selects the corresponding cell, just like clicking in 2D.
+Clicking on a sphere in 3D mode selects the corresponding cell, just like clicking in 2D. Relink pick mode also works in 3D — right-click a sphere to select it as the relink target.
 
 ---
 

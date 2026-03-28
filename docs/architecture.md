@@ -358,6 +358,7 @@ Main coordinator. Owns the napari `Viewer`, `NucleiManager`, `EditHistory`, and 
 | `Ctrl+Shift+S` | Save As                  |
 | `Ctrl+Z`       | Undo                     |
 | `Ctrl+Y`       | Redo                     |
+| `Delete`       | Remove nucleus at current timepoint |
 
 ### 6.2 ViewerIntegration (`gui/viewer_integration.py`)
 
@@ -365,10 +366,10 @@ Draws nucleus circles as a napari Shapes layer (polygon approximation with 32 ve
 
 **Mouse interaction (priority order):**
 - In **add mode**: left-click places a nucleus at the click position
-- In **relink pick mode**: right-click selects the relink target
+- In **relink pick mode**: right-click selects the relink target (works in both 2D and 3D views)
 - In **track/placement mode**: right-click places a tracking nucleus
-- **Right-click** on nucleus: select cell (make active)
-- **Left-click** on nucleus: toggle label visibility on/off
+- **Right-click** on nucleus: select cell (make active) — requires click within the drawn circle
+- **Left-click** on nucleus: toggle label visibility on/off — requires click within the drawn circle
 
 **Division line overlay:** When the selected cell has just divided (current_time == cell.end_time + 1), a yellow line connects the two daughter cell positions. Disappears on any navigation or selection change.
 
