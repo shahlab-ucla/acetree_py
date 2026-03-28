@@ -258,6 +258,9 @@ def _align_diamond(
     dv = 1 if positions[east_idx][1] > positions[west_idx][1] else -1
     lr = 1 if positions[east_idx][2] > positions[west_idx][2] else -1
 
+    # Build a map from cell object to its rotated (canonical) position
+    canonical_positions = {id(cells[i]): positions[i] for i in range(4)}
+
     return {
         "north": cells[north_idx],
         "south": cells[south_idx],
@@ -266,6 +269,7 @@ def _align_diamond(
         "ap": ap,
         "dv": dv,
         "lr": lr,
+        "canonical_positions": canonical_positions,
     }
 
 
@@ -333,21 +337,27 @@ def _four_cell_id_assignment(
         ab_pair = (north, south)
         p1_pair = (east, west)
 
-    # Within AB pair: more anterior (smaller x in canonical) = ABa
+    # Within AB pair: more anterior (smaller x in CANONICAL frame) = ABa
     # Within P1 pair: more anterior = EMS
-    # For simplicity, use the North cell as ABa and EMS
     a_cell, b_cell = ab_pair
     c_cell, d_cell = p1_pair
 
-    # Assign: the more anterior cell in each pair gets ABa/EMS
-    if a_cell.x <= b_cell.x:
+    # Use the canonical (rotated) positions for anterior/posterior comparison
+    # — raw cell.x is unreliable when the embryo is rotated.
+    canon = positions["canonical_positions"]
+    a_canon_x = canon[id(a_cell)][0]
+    b_canon_x = canon[id(b_cell)][0]
+    c_canon_x = canon[id(c_cell)][0]
+    d_canon_x = canon[id(d_cell)][0]
+
+    if a_canon_x <= b_canon_x:
         a_cell.identity = "ABa"
         b_cell.identity = "ABp"
     else:
         b_cell.identity = "ABa"
         a_cell.identity = "ABp"
 
-    if c_cell.x <= d_cell.x:
+    if c_canon_x <= d_canon_x:
         c_cell.identity = "EMS"
         d_cell.identity = "P2"
     else:

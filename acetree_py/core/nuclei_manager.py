@@ -110,10 +110,17 @@ class NucleiManager:
         # Load nuclei from ZIP
         mgr.load(config.zip_file)
 
-        # Load AuxInfo
-        if config.zip_file.exists():
-            base = config.zip_file.with_suffix("")
-            mgr.auxinfo = load_auxinfo(base)
+        # Load AuxInfo — try alongside the zip file first, then alongside
+        # the config file (handles cases where the zip has been copied to a
+        # different location than what the config originally referenced).
+        for candidate in (
+            config.zip_file.with_suffix(""),
+            config.config_file.parent / config.zip_file.with_suffix("").name,
+        ):
+            ai = load_auxinfo(candidate)
+            if ai.axis or ai.is_v2:
+                mgr.auxinfo = ai
+                break
 
         return mgr
 

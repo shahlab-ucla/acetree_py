@@ -25,6 +25,7 @@ import numpy as np
 
 from ..core.nucleus import NILLI, Nucleus
 from .canonical_transform import CanonicalTransform, build_v1_sign_matrix
+from .lineage_axes import axes_to_canonical, compute_local_axes
 from .rules import Rule, RuleManager
 
 logger = logging.getLogger(__name__)
@@ -64,10 +65,11 @@ class DivisionClassification:
 class DivisionCaller:
     """Assigns Sulston names to daughter cells upon division.
 
-    Supports three modes:
+    Supports four modes:
         - v2 mode: Uses CanonicalTransform (from AuxInfo v2 orientation vectors)
         - v1 mode: Uses axis string + angle rotation (from AuxInfo v1)
-        - founder mode: Uses axes derived from founder cell positions
+        - lineage mode: Per-timepoint axes from lineage centroids (rotation-invariant)
+        - founder mode: Uses static axes derived from founder cell positions (legacy)
     """
 
     def __init__(
@@ -80,6 +82,8 @@ class DivisionCaller:
         founder_ap: np.ndarray | None = None,
         founder_lr: np.ndarray | None = None,
         founder_dv: np.ndarray | None = None,
+        lineage_map: list[list[str]] | None = None,
+        nuclei_record: list[list] | None = None,
     ) -> None:
         """Initialize the DivisionCaller.
 
@@ -92,6 +96,10 @@ class DivisionCaller:
             founder_ap: AP axis from founder identification (unit vector).
             founder_lr: LR axis from founder identification (unit vector).
             founder_dv: DV axis from founder identification (unit vector).
+            lineage_map: For lineage mode — per-nucleus lineage labels
+                (output of build_lineage_map).
+            nuclei_record: For lineage mode — full nuclei record (needed
+                to compute per-timepoint axes).
         """
         self.rule_manager = rule_manager
         self.z_pix_res = z_pix_res
@@ -99,10 +107,17 @@ class DivisionCaller:
         self.axis_string = axis_string
         self.angle = angle
 
-        # Founder-derived axes
+        # Founder-derived axes (static, legacy)
         self.founder_ap = founder_ap
         self.founder_lr = founder_lr
         self.founder_dv = founder_dv
+
+        # Lineage mode data
+        self._lineage_map = lineage_map
+        self._nuclei_record = nuclei_record
+
+        # Cache for per-timepoint axes in lineage mode
+        self._axes_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
         # Precompute v1 sign matrix if needed
         self._v1_sign_matrix: np.ndarray | None = None
@@ -118,13 +133,24 @@ class DivisionCaller:
         return self.canonical_transform is not None and self.canonical_transform.active
 
     @property
+    def is_lineage_mode(self) -> bool:
+        """True if using per-timepoint lineage centroid axes."""
+        return (
+            self._lineage_map is not None
+            and self._nuclei_record is not None
+            and not self.is_v2
+            and not self.axis_string
+        )
+
+    @property
     def is_founder_mode(self) -> bool:
-        """True if using founder-derived axes."""
+        """True if using static founder-derived axes."""
         return (
             self.founder_ap is not None
             and self.founder_lr is not None
             and not self.is_v2
             and not self.axis_string
+            and not self.is_lineage_mode
         )
 
     @property
@@ -137,6 +163,7 @@ class DivisionCaller:
         parent: Nucleus,
         daughter1: Nucleus,
         daughter2: Nucleus,
+        timepoint: int = -1,
     ) -> tuple[str, str]:
         """Assign Sulston names to the two daughters of a dividing cell.
 
@@ -144,6 +171,7 @@ class DivisionCaller:
             parent: The dividing parent nucleus.
             daughter1: First daughter nucleus (successor1).
             daughter2: Second daughter nucleus (successor2).
+            timepoint: 0-based timepoint of the daughters (for lineage mode).
 
         Returns:
             (name1, name2) — the names to assign to daughter1 and daughter2.
@@ -153,7 +181,9 @@ class DivisionCaller:
             return "", ""
 
         rule = self.rule_manager.get_rule(parent_name)
-        classification = self._classify_division(parent, daughter1, daughter2, rule)
+        classification = self._classify_division(
+            parent, daughter1, daughter2, rule, timepoint=timepoint,
+        )
         self._classifications.append(classification)
 
         return classification.daughter1_name, classification.daughter2_name
@@ -196,7 +226,7 @@ class DivisionCaller:
 
         if avg_diff is None:
             # Fallback to single-frame
-            return self.assign_names(parent, daughter1, daughter2)
+            return self.assign_names(parent, daughter1, daughter2, timepoint=division_time)
 
         # Dot with rule axis
         dot = float(np.dot(avg_diff, rule.axis_vector))
@@ -238,16 +268,34 @@ class DivisionCaller:
 
         return name1, name2
 
+    def _get_local_axes(self, t: int) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Get body axes at timepoint t (lineage mode only).
+
+        Caches results to avoid recomputation within the same timepoint.
+        """
+        if t in self._axes_cache:
+            return self._axes_cache[t]
+
+        axes = compute_local_axes(
+            self._nuclei_record, self._lineage_map, t, self.z_pix_res,
+        )
+        if axes[0] is None or axes[1] is None or axes[2] is None:
+            return None
+
+        self._axes_cache[t] = axes  # type: ignore[assignment]
+        return axes  # type: ignore[return-value]
+
     def _classify_division(
         self,
         parent: Nucleus,
         daughter1: Nucleus,
         daughter2: Nucleus,
         rule: Rule,
+        timepoint: int = -1,
     ) -> DivisionClassification:
         """Classify a division with confidence scoring."""
         parent_name = parent.effective_name
-        diff = self._diffs_corrected(daughter1, daughter2)
+        diff = self._diffs_corrected(daughter1, daughter2, timepoint=timepoint)
 
         # Dot product with rule axis
         dot = float(np.dot(diff, rule.axis_vector))
@@ -303,7 +351,7 @@ class DivisionCaller:
         vectors = []
 
         # First frame: use the provided nuclei directly
-        diff0 = self._diffs_corrected(daughter1, daughter2)
+        diff0 = self._diffs_corrected(daughter1, daughter2, timepoint=division_time)
         diff0_norm = np.linalg.norm(diff0)
         if diff0_norm > 1e-6:
             vectors.append(diff0 / diff0_norm)
@@ -326,7 +374,7 @@ class DivisionCaller:
             if d1_next is None or d2_next is None:
                 break  # One of the daughters divided or died
 
-            diff = self._diffs_corrected(d1_next, d2_next)
+            diff = self._diffs_corrected(d1_next, d2_next, timepoint=t)
             diff_norm = np.linalg.norm(diff)
             if diff_norm > 1e-6:
                 vectors.append(diff / diff_norm)
@@ -373,6 +421,7 @@ class DivisionCaller:
         self,
         daughter1: Nucleus,
         daughter2: Nucleus,
+        timepoint: int = -1,
     ) -> np.ndarray:
         """Compute the corrected division vector (d2 - d1).
 
@@ -381,6 +430,11 @@ class DivisionCaller:
             2. Z-scaling: multiply z component by z_pix_res
             3. Measurement correction (rotation to canonical frame)
             4. V1 only: axis sign-flipping
+
+        Args:
+            daughter1, daughter2: The two daughter nuclei.
+            timepoint: 0-based timepoint of the daughters (used by lineage
+                mode for per-timepoint axis computation).
         """
         # Raw difference vector (daughter2 - daughter1)
         da = np.array([
@@ -393,20 +447,25 @@ class DivisionCaller:
         da[2] *= self.z_pix_res
 
         # Measurement correction: rotate to canonical frame
-        da = self._measurement_correction(da)
+        da = self._measurement_correction(da, timepoint=timepoint)
 
         return da
 
-    def _measurement_correction(self, da: np.ndarray) -> np.ndarray:
+    def _measurement_correction(
+        self, da: np.ndarray, timepoint: int = -1,
+    ) -> np.ndarray:
         """Apply the measurement correction (rotation to canonical frame).
 
         For v2: applies the CanonicalTransform rotation.
         For v1: applies angle rotation in XY plane, then axis sign-flipping.
-        For founder mode: applies the founder-derived rotation.
+        For lineage mode: computes axes from lineage centroids at *timepoint*.
+        For founder mode: applies the static founder-derived rotation.
         """
         if self.is_v2:
             # V2: use CanonicalTransform
             return self.canonical_transform.apply(da)  # type: ignore[union-attr]
+        elif self.is_lineage_mode:
+            return self._apply_lineage_transform(da, timepoint)
         elif self.is_founder_mode:
             # Founder mode: project onto founder axes
             return self._apply_founder_transform(da)
@@ -417,6 +476,23 @@ class DivisionCaller:
             if self._v1_sign_matrix is not None:
                 da = self._v1_sign_matrix @ da
             return da
+
+    def _apply_lineage_transform(self, da: np.ndarray, timepoint: int) -> np.ndarray:
+        """Transform a vector into canonical frame using lineage centroids.
+
+        Computes body axes at *timepoint* from the spatial distribution
+        of ABa-lineage vs ABp-lineage cells, making this inherently
+        robust to global embryo rotations around the AP axis.
+        """
+        axes = self._get_local_axes(timepoint)
+        if axes is None:
+            # Fallback to static founder axes if available
+            if self.founder_ap is not None and self.founder_lr is not None:
+                return self._apply_founder_transform(da)
+            return da  # No correction possible
+
+        ap_vec, lr_vec, dv_vec = axes
+        return axes_to_canonical(da, ap_vec, lr_vec, dv_vec)
 
     def _apply_founder_transform(self, da: np.ndarray) -> np.ndarray:
         """Transform a vector into canonical frame using founder-derived axes.

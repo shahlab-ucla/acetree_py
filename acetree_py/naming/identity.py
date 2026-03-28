@@ -26,6 +26,7 @@ from .canonical_transform import CanonicalTransform, TransformValidationError
 from .division_caller import DivisionCaller, DivisionClassification
 from .founder_id import FounderAssignment, identify_founders
 from .initial_id import NUC, identify_initial_cells
+from .lineage_axes import build_lineage_map
 from .rules import RuleManager
 from .validation import NamingWarning, validate_naming
 
@@ -237,39 +238,26 @@ class IdentityAssigner:
                 logger.info("Using AuxInfo v1 transform with topology-based founder ID")
                 return
 
-        # Use founder-derived axes
-        if fa.ap_vector is not None and fa.lr_vector is not None:
-            # Build a CanonicalTransform from founder axes
-            try:
-                ct = CanonicalTransform(fa.ap_vector, fa.lr_vector)
-                self.division_caller = DivisionCaller(
-                    rule_manager=self.rule_manager,
-                    z_pix_res=self.z_pix_res,
-                    canonical_transform=ct,
-                )
-                logger.info("Using founder-derived axes for division calling")
-                return
-            except TransformValidationError:
-                # Founder axes not orthogonal enough for CanonicalTransform
-                # Use direct projection instead
-                dv = fa.dv_vector
-                if dv is None:
-                    dv = np.cross(fa.ap_vector, fa.lr_vector)
-                    dv_norm = np.linalg.norm(dv)
-                    if dv_norm > 1e-6:
-                        dv = dv / dv_norm
-
-                self.division_caller = DivisionCaller(
-                    rule_manager=self.rule_manager,
-                    z_pix_res=self.z_pix_res,
-                    founder_ap=fa.ap_vector,
-                    founder_lr=fa.lr_vector,
-                    founder_dv=dv,
-                )
-                logger.info("Using founder-derived axes (direct projection mode)")
-                return
-
-        logger.warning("No axes available for division calling")
+        # Use per-timepoint lineage centroid axes (rotation-invariant).
+        # This approach re-derives AP/LR/DV at every timepoint from the
+        # spatial distribution of ABa-lineage vs ABp-lineage cells, so it
+        # automatically handles embryo rotations during imaging.
+        lineage_map = build_lineage_map(
+            self.nuclei_record,
+            four_cell_time=fa.four_cell_time,
+            aba_idx=fa.aba_idx,
+            abp_idx=fa.abp_idx,
+            ems_idx=fa.ems_idx,
+            p2_idx=fa.p2_idx,
+        )
+        self.division_caller = DivisionCaller(
+            rule_manager=self.rule_manager,
+            z_pix_res=self.z_pix_res,
+            lineage_map=lineage_map,
+            nuclei_record=self.nuclei_record,
+        )
+        logger.info("Using per-timepoint lineage centroid axes (rotation-invariant)")
+        return
 
     def _clear_all_names(self) -> None:
         """Clear all non-forced names in the nuclei record.
@@ -347,13 +335,16 @@ class IdentityAssigner:
                 dau2 = next_nuclei[s2_idx]
 
                 # Assign names (single-frame or multi-frame)
+                # division_time = i + 1 (0-based timepoint of the daughters)
                 if self.use_multi_frame:
                     name1, name2 = self.division_caller.assign_names_multi_frame(
                         parent, dau1, dau2,
-                        self.nuclei_record, i + 1,  # division_time is 0-based next timepoint
+                        self.nuclei_record, i + 1,
                     )
                 else:
-                    name1, name2 = self.division_caller.assign_names(parent, dau1, dau2)
+                    name1, name2 = self.division_caller.assign_names(
+                        parent, dau1, dau2, timepoint=i + 1,
+                    )
 
                 dau1.identity = name1
                 dau2.identity = name2

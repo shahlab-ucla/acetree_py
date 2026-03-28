@@ -362,17 +362,41 @@ def _try_identify_from_window(
         )
 
     # Step 4: Within AB pair, distinguish ABa from ABp
-    # ABa is more anterior — but we don't know orientation yet.
-    # For now, assign arbitrarily; axis determination will fix the labels later.
-    # Use x-coordinate as a provisional heuristic (will be refined).
+    # ABa is more anterior.  Use the AP vector (P2 -> AB centroid) to
+    # determine which AB daughter is more anterior.  The cell with the
+    # larger projection onto the AP vector is more anterior = ABa.
     (ab_d1_idx, ab_d1), (ab_d2_idx, ab_d2) = ab_pair
-    # Assign by x-position (smaller x = more anterior in most setups)
-    if ab_d1.x <= ab_d2.x:
-        aba_idx, aba_nuc = ab_d1_idx, ab_d1
-        abp_idx, abp_nuc = ab_d2_idx, ab_d2
+
+    pos_d1 = np.array([float(ab_d1.x), float(ab_d1.y), float(ab_d1.z) * z_pix_res])
+    pos_d2 = np.array([float(ab_d2.x), float(ab_d2.y), float(ab_d2.z) * z_pix_res])
+    pos_ems = np.array([float(ems_nuc.x), float(ems_nuc.y), float(ems_nuc.z) * z_pix_res])
+    pos_p2 = np.array([float(p2_nuc.x), float(p2_nuc.y), float(p2_nuc.z) * z_pix_res])
+
+    # AP direction: posterior (P2) -> anterior (AB midpoint)
+    ab_center = (pos_d1 + pos_d2) / 2.0
+    ap_raw = ab_center - pos_p2
+    ap_norm = np.linalg.norm(ap_raw)
+
+    if ap_norm > 1e-6:
+        ap_hat = ap_raw / ap_norm
+        # Project each AB daughter onto the AP axis
+        proj_d1 = np.dot(pos_d1, ap_hat)
+        proj_d2 = np.dot(pos_d2, ap_hat)
+        # More anterior = larger projection along P2->AB direction
+        if proj_d1 >= proj_d2:
+            aba_idx, aba_nuc = ab_d1_idx, ab_d1
+            abp_idx, abp_nuc = ab_d2_idx, ab_d2
+        else:
+            aba_idx, aba_nuc = ab_d2_idx, ab_d2
+            abp_idx, abp_nuc = ab_d1_idx, ab_d1
     else:
-        aba_idx, aba_nuc = ab_d2_idx, ab_d2
-        abp_idx, abp_nuc = ab_d1_idx, ab_d1
+        # Degenerate: fall back to x-coordinate heuristic
+        if ab_d1.x <= ab_d2.x:
+            aba_idx, aba_nuc = ab_d1_idx, ab_d1
+            abp_idx, abp_nuc = ab_d2_idx, ab_d2
+        else:
+            aba_idx, aba_nuc = ab_d2_idx, ab_d2
+            abp_idx, abp_nuc = ab_d1_idx, ab_d1
 
     # Step 5: Assign names to nuclei
     aba_nuc.identity = "ABa"
