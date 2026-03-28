@@ -91,7 +91,7 @@ acetree-py info config.xml --cell ABala
 - **Napari-based viewer** with nucleus overlay, z-plane navigation, and cell tracking
 - **3D volume view** — toggle between 2D slice and 3D rendering with color-coded nucleus spheres
 - **Manual tracking** — click-to-add nuclei, D-pad nudge controls, create datasets from raw images
-- **Topology-based naming** — automatic Sulston name assignment from lineage structure
+- **Topology-based naming** — automatic Sulston name assignment from lineage structure, with rotation-invariant axis estimation robust to embryo rotations during imaging
 - **Interactive relink** — click-based predecessor editing with automatic interpolation
 - **Full undo/redo** — up to 1000 edit commands with `Ctrl+Z` / `Ctrl+Y`
 - **Multi-panel lineage trees** — open multiple Sulston tree views with independent root cells, time ranges, expression ranges, and colormaps

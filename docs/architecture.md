@@ -27,6 +27,7 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     canonical_transform.py     # Rotation to canonical frame (Wahba solver)
     rules.py                   # Rule, RuleManager (naming rules)
     sulston_names.py           # Sulston conventions + letter maps
+    lineage_axes.py            # Per-timepoint body axis estimation from lineage centroids
     validation.py              # Post-naming validation
   editing/                     # Command-pattern edit system — no GUI deps
     commands.py                # EditCommand ABC + 8 concrete commands
@@ -255,7 +256,7 @@ Topology-based identification of ABa, ABp, EMS, P2 at the 4-cell stage:
    - Birth time grouping: cells born at the same time are sisters.
    - **Forward division pairing**: cells that next divide at similar times are sisters (for datasets starting at the 4-cell stage with no predecessor data).
 3. **AB vs P1 pair**: the pair that divides first are AB daughters; the pair that divides second are P1 daughters. This is a biological invariant of *C. elegans*.
-4. **Within-pair assignment**: EMS is larger than P2 (size ratio); ABa/ABp determined by position relative to LR axis.
+4. **Within-pair assignment**: EMS is larger than P2 (size ratio); ABa/ABp determined by projection onto the AP axis vector (more anterior = ABa).
 5. **Back-trace**: trace predecessors to name AB, P1, P0 and their continuation cells.
 6. **Axis derivation**: compute AP, DV, LR vectors from the 4 cell positions.
 
@@ -269,10 +270,11 @@ Classifies each cell division to determine daughter names:
 4. Dot product with the rule's axis vector determines which daughter gets which name.
 5. Angle between division vector and rule axis maps to a confidence score.
 
-Three coordinate transform modes:
-- **v2**: Full `CanonicalTransform` rotation (Wahba's problem solver).
-- **v1**: Sign-flip matrix + 2D rotation by angle.
-- **Founder**: Project onto founder-derived AP/DV/LR axes.
+Four coordinate transform modes (selected automatically based on available data):
+- **v2**: Full `CanonicalTransform` rotation (Wahba's problem solver). Used when AuxInfo v2 is available.
+- **v1**: Sign-flip matrix + 2D rotation by angle. Used when AuxInfo v1 is available.
+- **Lineage centroid** (primary no-AuxInfo mode): Per-timepoint axes derived from ABa/ABp/EMS/P2 lineage centroids via `lineage_axes.py`. Rotation-invariant — automatically handles embryo rotations during imaging.
+- **Static founder** (legacy fallback): Project onto axes derived once from the 4-cell stage positions. Used only when lineage centroid axes are unavailable at a given timepoint.
 
 ### 4.4 Rules (`naming/rules.py`)
 

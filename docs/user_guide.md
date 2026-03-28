@@ -377,9 +377,11 @@ If `--output` is omitted, the output filename is automatically derived from the 
 
 When a dataset is loaded, the naming pipeline automatically identifies cells:
 
-1. **Founder identification**: Finds the 4-cell stage and identifies ABa, ABp, EMS, P2 using topology and timing.
+1. **Founder identification**: Finds the 4-cell stage and identifies ABa, ABp, EMS, P2 using topology and timing. ABa/ABp are distinguished by projection onto the anterior-posterior axis (not image coordinates), making this step robust to arbitrary embryo orientations.
 2. **Back-tracing**: Names earlier cells (AB, P1, P0) by tracing predecessor links backward.
-3. **Forward naming**: Names all subsequent cells by classifying each division using 3D geometry.
+3. **Forward naming**: Names all subsequent cells by classifying each division using 3D geometry. The body axes (AP, LR, DV) are re-derived at every timepoint from lineage centroid positions, making naming robust to embryo rotations during imaging.
+
+If AuxInfo orientation data is available (v1 or v2), it is used for higher-precision axis estimation. Without AuxInfo, the pipeline uses the rotation-invariant lineage centroid approach described above.
 
 ### 10.2 Unnamed Cells
 

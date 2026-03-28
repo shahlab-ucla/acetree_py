@@ -138,7 +138,12 @@ $$\text{AB pair} = \begin{cases} \text{pair}_A & \text{if } t_A \leq t_B \\ \tex
 
 $$\text{EMS} = \arg\max_{n \in \text{P1 pair}} n.\text{size}$$
 
-**AB pair (ABa vs ABp):** Determined by position relative to the LR axis (see Section 4.4).
+**AB pair (ABa vs ABp):** Determined by projection onto the AP axis vector. The AP direction is estimated from the centroid of the AB pair toward the P1 pair (specifically, AB centroid − P2 position). ABa is the daughter with the larger projection onto this AP vector (more anterior):
+
+$$\vec{u}_\text{AP} = \frac{\vec{c}_\text{AB} - \vec{r}_{P2}}{\|\vec{c}_\text{AB} - \vec{r}_{P2}\|}$$
+$$\text{ABa} = \arg\max_{n \in \text{AB pair}} (\vec{r}_n \cdot \vec{u}_\text{AP})$$
+
+This projection-based method is robust regardless of embryo orientation in the image frame, unlike the legacy approach which used raw image-X coordinates.
 
 ### 3.5 Confidence Calculation
 
@@ -223,9 +228,47 @@ $$\begin{pmatrix} x' \\ y' \end{pmatrix} = \begin{pmatrix} \cos\theta & -\sin\th
 
 3. Apply sign flips: $\vec{v}_\text{corrected} = M \cdot (x', y', z)^T$
 
-### 4.4 Founder-Derived Transform
+### 4.4 Per-Timepoint Lineage Centroid Axes (Primary No-AuxInfo Mode)
 
-When no AuxInfo is available, axes are derived from the 4-cell positions:
+When no AuxInfo is available, axes are derived **at each timepoint** from the spatial distribution of lineage-labelled cells. This is the primary coordinate transform mode when AuxInfo is absent, and is inherently robust to global embryo rotations during imaging (common in compressed embryos).
+
+**Lineage map construction** (`naming/lineage_axes.py`):
+
+A lineage label (ABa, ABp, EMS, or P2) is assigned to every nucleus by propagating founder identity through predecessor/successor chains:
+
+1. Seed the 4 founders at the 4-cell midpoint with their labels.
+2. Back-propagate from 4-cell time to $t=0$: each nucleus inherits the label of its successor.
+3. Forward-propagate from 4-cell time to the end: each successor inherits its predecessor's label (both daughters of a dividing cell get the same lineage label).
+
+**Axis computation at timepoint $t$:**
+
+Let $\mathcal{A}_a(t), \mathcal{A}_p(t), \mathcal{E}(t), \mathcal{P}_2(t)$ be the sets of alive labelled cells at time $t$.
+
+1. **Group centroids:**
+$$\vec{c}_\text{AB}(t) = \text{mean}(\mathcal{A}_a(t) \cup \mathcal{A}_p(t)), \quad \vec{c}_{P1}(t) = \text{mean}(\mathcal{E}(t) \cup \mathcal{P}_2(t))$$
+$$\vec{c}_\text{ABa}(t) = \text{mean}(\mathcal{A}_a(t)), \quad \vec{c}_\text{ABp}(t) = \text{mean}(\mathcal{A}_p(t))$$
+
+2. **AP axis** (P1 → AB direction):
+$$\vec{u}_\text{AP}(t) = \frac{\vec{c}_\text{AB}(t) - \vec{c}_{P1}(t)}{\|\vec{c}_\text{AB}(t) - \vec{c}_{P1}(t)\|}$$
+
+3. **LR axis** (ABp → ABa, projected perpendicular to AP):
+$$\vec{s}(t) = \vec{c}_\text{ABa}(t) - \vec{c}_\text{ABp}(t)$$
+$$\vec{s}_\perp(t) = \vec{s}(t) - (\vec{s}(t) \cdot \vec{u}_\text{AP}(t))\, \vec{u}_\text{AP}(t)$$
+$$\vec{u}_\text{LR}(t) = \frac{\vec{s}_\perp(t)}{\|\vec{s}_\perp(t)\|}$$
+
+4. **DV axis** (completes right-handed frame):
+$$\vec{u}_\text{DV}(t) = \vec{u}_\text{AP}(t) \times \vec{u}_\text{LR}(t)$$
+
+**Division vector projection:**
+
+Given a raw division vector $\vec{d}$ at timepoint $t$, project onto the local axes:
+$$\vec{d}_\text{canonical}(t) = (-\vec{d} \cdot \vec{u}_\text{AP}(t),\ \vec{d} \cdot \vec{u}_\text{DV}(t),\ \vec{d} \cdot \vec{u}_\text{LR}(t))$$
+
+**Why per-timepoint?** In compressed embryos, the embryo can rotate around its AP axis during imaging. A static axis estimate from the 4-cell stage becomes progressively incorrect. By re-deriving axes from the *current* positions of ABa-lineage vs ABp-lineage centroids at each timepoint, the system automatically tracks these rotations.
+
+### 4.5 Static Founder-Derived Transform (Legacy Fallback)
+
+Used only as a fallback when the lineage centroid approach fails (e.g., too few labelled cells at a given timepoint). Axes are derived once from the 4-cell positions:
 
 Let $\vec{r}_a, \vec{r}_b, \vec{r}_e, \vec{r}_p$ be the 3D positions (with z scaled by `z_pix_res`) of ABa, ABp, EMS, P2 respectively.
 
@@ -249,7 +292,7 @@ $$\vec{u}_\text{LR} = \frac{\vec{u}_\text{DV} \times \vec{u}_\text{AP}}{\|\vec{u
 $$\text{lr}_\text{ABa} = (\vec{r}_a - \vec{c}_\text{AB}) \cdot \vec{u}_\text{LR}$$
 If $\text{lr}_\text{ABa} < 0$, flip both: $\vec{u}_\text{LR} \leftarrow -\vec{u}_\text{LR}$, $\vec{u}_\text{DV} \leftarrow -\vec{u}_\text{DV}$.
 
-**Division vector projection in founder mode:**
+**Division vector projection in static founder mode:**
 
 Given a raw division vector $\vec{d}$ (z-scaled), project onto the founder basis:
 $$d_\text{AP} = \vec{d} \cdot \vec{u}_\text{AP}, \quad d_\text{DV} = \vec{d} \cdot \vec{u}_\text{DV}, \quad d_\text{LR} = \vec{d} \cdot \vec{u}_\text{LR}$$
@@ -258,6 +301,8 @@ Map to canonical frame:
 $$\vec{d}_\text{canonical} = (-d_\text{AP},\ d_\text{DV},\ d_\text{LR})$$
 
 The negation of AP maps to the canonical AP direction $(-1, 0, 0)$.
+
+**Limitation:** This static approach assumes the embryo orientation does not change after the 4-cell stage. For compressed embryos that rotate during imaging, the per-timepoint lineage centroid approach (Section 4.4) is preferred.
 
 ---
 
@@ -270,7 +315,7 @@ Given parent nucleus $P$ dividing into daughters $D_1, D_2$, and division rule $
 1. **Raw division vector:**
 $$\vec{\delta} = (D_2.x - D_1.x,\ D_2.y - D_1.y,\ (D_2.z - D_1.z) \times z_\text{pix\_res})$$
 
-2. **Rotate to canonical frame:** $\vec{\delta}_c = T(\vec{\delta})$ where $T$ is the active transform (v2, v1, or founder).
+2. **Rotate to canonical frame:** $\vec{\delta}_c = T(\vec{\delta})$ where $T$ is the active transform (v2, v1, lineage centroid, or static founder).
 
 3. **Dot product:**
 $$\alpha = \vec{\delta}_c \cdot \vec{a}$$
