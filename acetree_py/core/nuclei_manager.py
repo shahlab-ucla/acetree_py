@@ -237,6 +237,8 @@ class NucleiManager:
         z: float,
         time: int,
         z_scale: bool = True,
+        require_hit: bool = False,
+        image_plane: int | None = None,
     ) -> Nucleus | None:
         """Find the nucleus closest to (x, y, z) at a given timepoint.
 
@@ -246,9 +248,15 @@ class NucleiManager:
             z: Z coordinate (plane number).
             time: 1-based timepoint.
             z_scale: If True, scale z by z_pix_res for distance calculation.
+            require_hit: If True, only return a nucleus if the click is
+                within (or on) its projected circle at *image_plane*.
+                When False (default), the closest nucleus is always returned.
+            image_plane: The z-plane being viewed.  Required when
+                *require_hit* is True; used to compute projected radii.
 
         Returns:
-            The closest alive Nucleus, or None if no nuclei at that time.
+            The closest alive Nucleus, or None if no nuclei at that time
+            (or none within projected radius when *require_hit* is True).
         """
         nuclei = self.alive_nuclei_at(time)
         if not nuclei:
@@ -263,6 +271,18 @@ class NucleiManager:
             dy = nuc.y - y
             dz = (nuc.z - z) * z_factor
             dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+            if require_hit and image_plane is not None:
+                # Only consider this nucleus if the click's 2D distance
+                # is within the nucleus's projected circle on the image.
+                proj_diam = self.nucleus_diameter(nuc, image_plane)
+                if proj_diam <= 0:
+                    continue  # Not visible at this z-plane
+                proj_radius = proj_diam / 2.0
+                dist_2d = math.sqrt(dx * dx + dy * dy)
+                if dist_2d > proj_radius:
+                    continue  # Click is outside the drawn circle
+
             if dist < best_dist:
                 best_dist = dist
                 best_nuc = nuc
@@ -274,6 +294,8 @@ class NucleiManager:
         x: float,
         y: float,
         time: int,
+        require_hit: bool = False,
+        image_plane: int | None = None,
     ) -> Nucleus | None:
         """Find the nucleus closest to (x, y) at a given timepoint (2D only).
 
@@ -281,9 +303,14 @@ class NucleiManager:
             x: X coordinate in pixels.
             y: Y coordinate in pixels.
             time: 1-based timepoint.
+            require_hit: If True, only return a nucleus if the click is
+                within (or on) its projected circle at *image_plane*.
+            image_plane: The z-plane being viewed.  Required when
+                *require_hit* is True.
 
         Returns:
-            The closest alive Nucleus, or None if no nuclei at that time.
+            The closest alive Nucleus, or None if no nuclei at that time
+            (or none within projected radius when *require_hit* is True).
         """
         nuclei = self.alive_nuclei_at(time)
         if not nuclei:
@@ -296,6 +323,15 @@ class NucleiManager:
             dx = nuc.x - x
             dy = nuc.y - y
             dist = dx * dx + dy * dy  # No need for sqrt, just comparing
+
+            if require_hit and image_plane is not None:
+                proj_diam = self.nucleus_diameter(nuc, image_plane)
+                if proj_diam <= 0:
+                    continue
+                proj_radius = proj_diam / 2.0
+                if math.sqrt(dist) > proj_radius:
+                    continue
+
             if dist < best_dist:
                 best_dist = dist
                 best_nuc = nuc

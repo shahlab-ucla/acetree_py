@@ -460,14 +460,17 @@ class AceTreeApp:
     def select_cell_at_position(self, x: float, y: float) -> None:
         """Select the closest cell to an (x, y) position on the current image.
 
-        Used for click-to-select in the viewer.
+        Used for click-to-select in the viewer.  The click must land within
+        (or on) the nucleus's projected circle — clicks in empty space are
+        ignored to avoid accidentally selecting distant cells.
 
         Args:
             x: X coordinate in image pixels.
             y: Y coordinate in image pixels.
         """
         nuc = self.manager.find_closest_nucleus(
-            x, y, float(self.current_plane), self.current_time
+            x, y, float(self.current_plane), self.current_time,
+            require_hit=True, image_plane=self.current_plane,
         )
         if nuc and nuc.effective_name:
             self.select_cell(nuc.effective_name, self.current_time)
@@ -504,7 +507,8 @@ class AceTreeApp:
             return False
 
         nuc = self.manager.find_closest_nucleus(
-            x, y, float(self.current_plane), self.current_time
+            x, y, float(self.current_plane), self.current_time,
+            require_hit=True, image_plane=self.current_plane,
         )
         if nuc is not None:
             cb = self._relink_pick_callback
@@ -835,27 +839,53 @@ class AceTreeApp:
             self._points_layer.features = {"name": display_names}
 
     def _on_3d_click(self, layer, event) -> None:
-        """Handle click on 3D Points layer to select a cell."""
-        if event.type != "mouse_press" or event.button != 2:
+        """Handle click on 3D Points layer to select a cell.
+
+        Supports relink pick mode and placement (track) mode in 3D — when
+        either is active, clicking a point fulfils the pick/place action
+        instead of doing a plain selection.
+        """
+        if event.type != "mouse_press":
             return
+
         # Get the index of the clicked point
         idx = layer.get_value(event.position, world=True)
+        nuc = None
         if idx is not None and isinstance(idx, (int, np.integer)):
             nuclei = self.manager.alive_nuclei_at(self.current_time)
             if 0 <= idx < len(nuclei):
                 nuc = nuclei[idx]
-                name = nuc.effective_name
-                if name:
-                    self.current_cell_name = name
-                    if self._viewer_integration:
-                        self._viewer_integration._shown_labels.add(name)
-                    self._update_3d_points()
-                    if self._cell_info_panel:
-                        self._cell_info_panel.refresh()
-                    for lw in self._lineage_widgets:
-                        lw.refresh_selection()
-                    if self._lineage_list:
-                        self._lineage_list.refresh_selection()
+
+        # --- Relink pick mode (right-click selects relink target) ---
+        if self._relink_pick_mode and self._relink_pick_callback is not None:
+            if event.button == 2 and nuc is not None:
+                cb = self._relink_pick_callback
+                self.exit_relink_pick_mode()
+                cb(self.current_time, nuc)
+            return  # consume all clicks while in pick mode
+
+        # --- Placement / track mode (right-click places a nucleus) ---
+        if self._placement_mode and event.button == 2:
+            # In 3D we can't get reliable (x,y) from event.position easily,
+            # so placement is only supported in 2D.  Just ignore.
+            pass
+
+        # --- Normal selection (right-click) ---
+        if event.button != 2:
+            return
+        if nuc is not None:
+            name = nuc.effective_name
+            if name:
+                self.current_cell_name = name
+                if self._viewer_integration:
+                    self._viewer_integration._shown_labels.add(name)
+                self._update_3d_points()
+                if self._cell_info_panel:
+                    self._cell_info_panel.refresh()
+                for lw in self._lineage_widgets:
+                    lw.refresh_selection()
+                if self._lineage_list:
+                    self._lineage_list.refresh_selection()
 
     # ── Display ───────────────────────────────────────────────────
 

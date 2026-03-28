@@ -263,11 +263,16 @@ class ViewerIntegration:
         except Exception as e:
             logger.debug("Error drawing division line: %s", e)
 
-    def _on_click(self, layer, event) -> None:
+    def _on_click(self, layer, event):
         """Handle mouse clicks on the shapes layer.
 
         Left-click:  Toggle the clicked cell's label on/off.
         Right-click: Select the clicked cell and make it active (also shows label).
+
+        This is a generator callback (yields once) so that napari properly
+        finalises the drag/pan cycle after the click is handled.  Without
+        the yield, napari can get stuck in pan mode after actions like
+        relink confirmation that open modal dialogs.
         """
         if event.type != "mouse_press":
             return
@@ -283,6 +288,7 @@ class ViewerIntegration:
         # Check for relink pick mode first (consumes any click)
         if self.app._relink_pick_mode:
             self.app._handle_relink_pick(x, y)
+            yield  # release drag cycle
             return
 
         button = event.button  # 1 = left, 2 = right
@@ -290,11 +296,13 @@ class ViewerIntegration:
         # Check for add mode (consumes left-click)
         if self.app._add_mode and button == 1:
             self.app._handle_add_click(x, y)
+            yield
             return
 
         # Check for placement mode (consumes right-click)
         if self.app._placement_mode and button == 2:
             self.app._handle_placement_click(x, y)
+            yield
             return
 
         if button == 2:
@@ -305,7 +313,8 @@ class ViewerIntegration:
         else:
             # Left-click: toggle label for nearest cell without selecting
             nuc = self.app.manager.find_closest_nucleus(
-                x, y, float(self.app.current_plane), self.app.current_time
+                x, y, float(self.app.current_plane), self.app.current_time,
+                require_hit=True, image_plane=self.app.current_plane,
             )
             if nuc is not None:
                 name = nuc.effective_name or f"Nuc{nuc.index}"
@@ -314,6 +323,8 @@ class ViewerIntegration:
                 else:
                     self._shown_labels.add(name)
                 self.update_overlays()
+
+        yield  # release drag cycle
 
     # ── Label visibility controls ─────────────────────────────────
 
