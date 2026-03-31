@@ -83,30 +83,32 @@ When you launch the GUI, you'll see:
 ┌─────────────────────────────────────────────────────┐
 │                                                     │
 │             Main Image Viewer                       │
-│     (napari canvas with nucleus overlay)            │
+│  (napari canvas with nucleus overlay + hover tips)  │
 │                                                     │
 ├──────────┬──────────────────────┬───────────────────┤
-│ Cell     │                      │ Contrast          │
-│ Info     │                      │ (min/max sliders) │
-│          │                      ├───────────────────┤
-│ Lineage  │                      │ Edit Tools        │
-│ List     │                      │ (buttons + history)│
+│ Contrast │                      │ Edit Tools        │
+│ (per-ch) │                      │ (color mode,      │
+│          │                      │  buttons, viz)    │
+│ Lineage  │                      │                   │
+│ List     │                      │                   │
 ├──────────┴──────────────────────┴───────────────────┤
-│  Player Controls    │  Lineage Tree (Sulston view)  │
-└─────────────────────┴───────────────────────────────┘
+│  Player Controls (time/plane/labels/deselect/3D)    │
+│  Lineage Tree (Sulston tree visualization)          │
+└─────────────────────────────────────────────────────┘
 ```
 
 ### Panels
 
 | Panel               | Location    | Purpose                                        |
 |---------------------|------------|------------------------------------------------|
-| **Image Viewer**     | Center     | Shows the current z-plane with nucleus circles  |
-| **Cell Info**        | Left       | Displays details of the selected cell           |
+| **Image Viewer**     | Center     | Shows the current z-plane with nucleus circles; hover over a cell to see a tooltip |
+| **Contrast**         | Left       | Per-channel brightness/contrast with visibility toggles |
 | **Lineage List**     | Left       | Searchable hierarchical cell tree               |
-| **Player Controls**  | Bottom     | Time/plane navigation with play/pause           |
+| **Player Controls**  | Bottom     | Time/plane navigation, labels, deselect, 3D mode, 3D window |
 | **Lineage Tree**     | Bottom     | Visual Sulston tree (multiple panels supported) |
-| **Contrast**         | Right      | Image brightness/contrast adjustment            |
-| **Edit Tools**       | Right      | Editing operations, undo/redo, save             |
+| **Edit Tools**       | Right      | Color mode toggle, editing operations, visualization tools |
+
+Napari's built-in layer list and layer controls are hidden by default to save screen space. They remain accessible via the napari Window menu.
 
 ---
 
@@ -116,16 +118,18 @@ When you launch the GUI, you'll see:
 
 | Key              | Action                    |
 |------------------|---------------------------|
-| `Right Arrow`    | Next timepoint            |
+| `Right Arrow`    | Next timepoint (follows tracked cell) |
 | `Left Arrow`     | Previous timepoint        |
-| `Up Arrow`       | Next z-plane (up)         |
-| `Down Arrow`     | Previous z-plane (down)   |
+| `Up Arrow`       | Next z-plane (deselects active cell) |
+| `Down Arrow`     | Previous z-plane (deselects active cell) |
 | `Ctrl+S`         | Save                      |
 | `Ctrl+Shift+S`   | Save As                   |
 | `Ctrl+Z`         | Undo                      |
 | `Ctrl+Y`         | Redo                      |
 | `Delete`         | Remove active cell's nucleus at the current timepoint |
 | `Escape`         | Exit active mode (Add, Track, Relink pick) |
+
+**Note:** Changing z-plane deselects the active cell because the user is manually exploring rather than following a tracked cell. Time navigation continues to follow the tracked cell's centroid.
 
 ### 4.2 Player Controls
 
@@ -134,14 +138,18 @@ The bottom panel provides full playback controls:
 ```
 [⏮] [◀] [◀◀] [⏸] [▶▶] [▶] [⏭]  t= [___] / 350
 [═══════════════ time slider ═══════════════════]
-[▲] [▼]  z= [___] / 30                      [3D]
+[▲] [▼]  z= [___] / 30  [Labels: ON] [Clear Labels] [Deselect] [3D] [3D Window]
 ```
 
 - **⏮ / ⏭**: Jump to first / last timepoint
 - **◀ / ▶**: Step one timepoint back / forward
 - **◀◀ / ▶▶**: Play backward / forward (animated)
 - **⏸**: Pause playback
+- **Labels: ON/OFF**: Toggle label display on all toggled cells
+- **Clear Labels**: Remove all shown cell name labels
+- **Deselect**: Clear the current cell selection and disable tracking
 - **3D**: Toggle between 2D slice view and 3D volume rendering (see Section 6.6)
+- **3D Window**: Open a detached 3D viewer window (see Section 6.7)
 - Type directly into the spinboxes for precise navigation
 
 ### 4.3 Cell Tracking
@@ -191,17 +199,16 @@ All edits are **undoable** (`Ctrl+Z`) and **redoable** (`Ctrl+Y`). Up to 1000 ed
 
 ```
 ┌─ Edit Tools ─────────────────┐
-│ [Save] [Save As...]          │
-│ [Undo] [Redo]                │
+│ Color Mode                   │
+│ (o) Editing  (o) Visualization│
+│ Preset: [Lineage depth ▾]   │
+│ [Edit Rules...]              │
+│                              │
+│ File: [Save] [Save As...]    │
+│       [Undo] [Redo]          │
 │                              │
 │ Nucleus Operations           │
-│ [Add] [Remove]               │
-│                              │
-│ Move / Resize                │
-│ [← 1][← 5] [↑1][↑5] [→ 1][→ 5] │
-│             [↓1][↓5]         │
-│ Z:   [-5][-1]  [+1][+5]     │
-│ Size:[-5][-1]  [+1][+5]     │
+│ [Add] [Remove] [Move/Resize↗]│
 │                              │
 │ Cell Operations              │
 │ [Rename] [Kill] [Resurrect]  │
@@ -211,13 +218,15 @@ All edits are **undoable** (`Ctrl+Z`) and **redoable** (`Ctrl+Y`). Up to 1000 ed
 │                              │
 │ Status: Ready                │
 │                              │
-│ Edit History                 │
-│ ┌──────────────────────────┐ │
-│ │ 1. Renamed ABa → X      │ │
-│ │ 2. Moved: x+5, y-1      │ │
-│ └──────────────────────────┘ │
+│ Visualization                │
+│ [Trails] Length: [10]        │
+│ [Screenshot] [Record...]     │
+│                              │
+│ [Edit History...]            │
 └──────────────────────────────┘
 ```
+
+The Move/Resize D-pad controls are now in a popup dialog (click **Move / Resize** to open). Edit History is also a popup window. This keeps the edit panel compact.
 
 ### 6.2 Nucleus Operations
 
@@ -299,10 +308,11 @@ If no cell is selected, Track enters root mode: a single right-click places one 
 
 ### 6.6 3D Volume View
 
-Toggle the **3D** button in the player controls (or use napari's built-in 3D toggle) to switch between 2D slice view and 3D volume rendering.
+Toggle the **3D** button in the player controls to switch between 2D slice view and 3D volume rendering.
 
-In 3D mode, all nuclei at the current timepoint are displayed as colored spheres with correct anisotropic scaling (z-spacing accounts for the physical z-resolution). The color scheme is:
+In 3D mode, all nuclei at the current timepoint are displayed as colored spheres with correct anisotropic scaling (z-spacing accounts for the physical z-resolution). The color scheme depends on the active color mode:
 
+**Editing mode (default):**
 | Color    | Meaning                                      |
 |----------|----------------------------------------------|
 | White    | Currently selected cell                      |
@@ -310,23 +320,70 @@ In 3D mode, all nuclei at the current timepoint are displayed as colored spheres
 | Orange   | Unnamed cell (auto-generated `Nuc*` name)    |
 | Gray     | No name / placeholder                        |
 
-This color scheme is consistent across both 2D overlay circles and 3D spheres.
+**Visualization mode:** Colors are determined by the active color rules (see Section 6.8).
 
-**Known limitation:** Text labels do not render on 3D points (napari/vispy limitation). However, selecting a cell from the lineage list panel does display its label in 3D.
+All image channels are loaded as 3D stacks when entering 3D mode. Clicking on a sphere selects the corresponding cell. Relink pick mode and track mode also work in 3D.
 
-Clicking on a sphere in 3D mode selects the corresponding cell, just like clicking in 2D. Relink pick mode also works in 3D — right-click a sphere to select it as the relink target.
+### 6.7 Detached 3D Viewer Window
+
+Click **3D Window** in the player controls to open a separate 3D viewer window. This window is designed for visualization and always uses rule-engine coloring (visualization mode), regardless of the main viewer's color mode. This allows you to edit in 2D in the main viewer while simultaneously viewing the embryo in 3D.
+
+**Controls:**
+- **Time slider + Sync button**: When Sync is on (default), the 3D window follows the main viewer's timepoint. Toggle off to navigate independently.
+- **Color Preset dropdown**: Switch between visualization presets (lineage depth, expression).
+- **Per-channel contrast**: Each image channel has visibility checkbox, min/max sliders, and auto/reset buttons.
+- **Labels: ON/OFF**: Toggle label visibility globally.
+- **Clear Labels**: Remove all shown labels.
+- **Left-click** on a 3D sphere: Toggle that cell's label on/off.
+
+Multiple 3D windows can be open simultaneously.
+
+### 6.8 Color Mode and Visualization Rules
+
+The Edit Panel provides a **Color Mode** toggle at the top:
+
+- **Editing** (default): Uses the hardcoded status-based palette (white/purple/orange/gray).
+- **Visualization**: Uses a rule-based color engine. Select a preset from the dropdown, or click **Edit Rules...** to open the full rule editor.
+
+**Color Rules dialog** (Edit Rules...):
+- Lists all active rules with enable/disable checkboxes.
+- **Add / Edit / Delete**: Manage individual rules. Double-click a rule to edit.
+- **Up / Down arrows**: Reorder rules (first matching rule wins).
+- **All other cells**: Configure the default color for cells that don't match any rule (white semi-transparent by default).
+- **Apply**: Push rules to the engine and re-render.
+
+**Rule editor** (per rule):
+- **Name**: Human-readable label.
+- **Match** (criterion): What property to test. Click the **?** button for help on each mode:
+  - `all` — matches every cell
+  - `name_exact` — exact cell name (e.g. `ABala`)
+  - `name_pattern` — wildcard glob (e.g. `AB*`, `MS?`)
+  - `name_regex` — regular expression (e.g. `^AB[ap]$`)
+  - `lineage_depth` — depth range from P0 (e.g. `2-4`)
+  - `fate` — end fate (`divided`, `alive`, `died`)
+  - `expression` — rweight value range (e.g. `500-2000`)
+- **Pattern**: The match value (depends on criterion).
+- **Color mode**: Solid (fixed color with alpha) or Colormap (map expression through a matplotlib colormap).
+
+**Built-in presets:**
+- *Lineage depth (rainbow)*: Rainbow colors by division depth (0-10).
+- *Expression (viridis)*: Map rweight through the viridis colormap.
 
 ---
 
 ## 7. Contrast Adjustment
 
-The **Contrast** panel on the right side provides:
+The **Contrast** panel on the left side provides per-channel controls. For multi-channel data (e.g. split-channel dual-color images), each channel gets its own control group:
 
+- **Visible checkbox**: Toggle channel visibility (multi-channel only)
 - **Min/Max sliders**: Drag to adjust the display range
-- **Auto**: Automatically compute optimal contrast from the current image
-- **Reset**: Reset to full dynamic range
+- **Auto**: Automatically compute optimal contrast from the current image data (1st/99th percentile)
+- **Reset**: Reset to full dynamic range (0–65535)
+- **Auto All / Reset All**: Apply to all channels at once
 
-These affect only the display, not the underlying data.
+For single-channel data, a simplified layout without the visibility checkbox is shown.
+
+Multi-channel images are displayed as separate napari layers with green/magenta colormaps (standard fluorescence convention) and additive blending.
 
 ---
 
@@ -443,8 +500,8 @@ All open panels update synchronously when edits are committed (relink, kill, ren
 5. Right-click the other cell → confirm. The system automatically sorts by time and determines the predecessor/child relationship.
 
 ### Identifying unnamed cells
-1. Look for **orange** circles in the image (unnamed `Nuc*` cells are orange, named ones are purple, gray indicates no name at all).
-2. Right-click to select, then check the Cell Info panel.
+1. Look for **orange** circles in the image (unnamed `Nuc*` cells are orange, named ones are purple, gray indicates no name at all). Or switch to visualization mode with the lineage depth preset for a rainbow view.
+2. Right-click to select, then hover over the cell to see the tooltip.
 3. Use **Rename** to assign a name if you know the identity.
 
 ### Decluttering labels
@@ -456,6 +513,16 @@ All open panels update synchronously when edits are committed (relink, kill, ren
 2. Step forward in time until the division occurs.
 3. On the frame after division, a yellow line connects the two daughters.
 4. The viewer automatically follows the first daughter.
+
+### Using the 3D viewer alongside editing
+1. Open the main viewer in 2D editing mode as usual.
+2. Click **3D Window** in the player controls to open a synced 3D view.
+3. Edit in the main viewer — the 3D window updates in real time.
+4. Use the 3D window's color preset dropdown to switch between lineage depth and expression views independently of the main viewer.
+
+### Screenshots and recording
+- Click **Screenshot** in the Visualization section of Edit Tools to capture the current view as a PNG.
+- Click **Record...** to export a sequence of PNGs across a timepoint range (useful for making movies).
 
 ### Exporting for analysis
 ```bash

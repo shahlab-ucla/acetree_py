@@ -179,12 +179,27 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         plane_row.addWidget(self._btn_toggle_labels)
         plane_row.addWidget(self._btn_clear_labels)
 
+        self._btn_deselect = QPushButton("Deselect")
+        self._btn_deselect.setToolTip("Clear cell selection (key: Escape)")
+        self._btn_deselect.setFixedWidth(65)
+        self._btn_deselect.clicked.connect(self._on_deselect)
+        plane_row.addWidget(self._btn_deselect)
+
         self._btn_3d = QPushButton("3D")
         self._btn_3d.setToolTip("Toggle 3D volume view (key: 3)")
         self._btn_3d.setFixedWidth(40)
         self._btn_3d.setCheckable(True)
         self._btn_3d.clicked.connect(self._on_toggle_3d)
         plane_row.addWidget(self._btn_3d)
+
+        self._btn_3d_window = QPushButton("3D Window")
+        self._btn_3d_window.setToolTip(
+            "Open a detached 3D viewer window (visualization mode, "
+            "synced to the main viewer's timepoint)"
+        )
+        self._btn_3d_window.setFixedWidth(80)
+        self._btn_3d_window.clicked.connect(self._on_open_3d_window)
+        plane_row.addWidget(self._btn_3d_window)
 
         layout.addLayout(plane_row)
 
@@ -247,6 +262,16 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         vi = self.app._viewer_integration
         if vi is not None:
             vi.clear_labels()
+
+    def _on_deselect(self) -> None:
+        """Clear the current cell selection."""
+        self.app.current_cell_name = ""
+        self.app.tracking = False
+        self.app.update_display()
+
+    def _on_open_3d_window(self) -> None:
+        """Open a detached 3D viewer window."""
+        self.app.open_3d_window()
 
     def _on_toggle_3d(self) -> None:
         """Toggle 3D volume view."""

@@ -132,6 +132,18 @@ class MockApp:
         self.tracking = True
         self._placement_mode = False
         self._add_mode = False
+        self._viz_mode = False
+        self._color_engine = None
+
+    @property
+    def color_engine(self):
+        if self._color_engine is None:
+            from acetree_py.gui.color_rules import ColorRuleEngine
+            self._color_engine = ColorRuleEngine()
+        return self._color_engine
+
+    def set_viz_mode(self, enabled):
+        self._viz_mode = enabled
 
     def update_display(self):
         pass
@@ -216,7 +228,7 @@ class TestEditPanel:
         assert panel._btn_redo.isEnabled()
 
     def test_history_list_populated(self, qtbot):
-        """History list shows executed command descriptions."""
+        """History dialog shows executed command descriptions when opened."""
         from acetree_py.gui.edit_panel import EditPanel
         app = MockApp()
         panel = EditPanel(app)
@@ -224,9 +236,12 @@ class TestEditPanel:
 
         app.edit_history.do(AddNucleus(time=1, x=50, y=50, z=5.0))
         app.edit_history.do(AddNucleus(time=1, x=60, y=60, z=6.0))
-        panel.refresh()
 
+        # History list is lazily created inside the popup dialog
+        panel._open_history_dialog()
+        assert panel._history_list is not None
         assert panel._history_list.count() == 2
+        panel._history_dialog.close()
 
     def test_status_label_default(self, qtbot):
         """Status label shows 'Ready' initially."""
@@ -373,7 +388,7 @@ class TestEditPanel:
         assert "Add nucleus" in panel._btn_undo.toolTip()
 
     def test_multiple_edits_history_order(self, qtbot):
-        """History list maintains correct chronological order."""
+        """History dialog maintains correct chronological order."""
         from acetree_py.gui.edit_panel import EditPanel
         app = MockApp()
         panel = EditPanel(app)
@@ -382,11 +397,13 @@ class TestEditPanel:
         app.edit_history.do(AddNucleus(time=1, x=50, y=50, z=5.0, identity="Cell1"))
         app.edit_history.do(AddNucleus(time=1, x=60, y=60, z=6.0, identity="Cell2"))
         app.edit_history.do(AddNucleus(time=1, x=70, y=70, z=7.0, identity="Cell3"))
-        panel.refresh()
 
+        # History list is in a popup dialog — open it to inspect
+        panel._open_history_dialog()
         assert panel._history_list.count() == 3
         assert "Cell1" in panel._history_list.item(0).text()
         assert "Cell3" in panel._history_list.item(2).text()
+        panel._history_dialog.close()
 
 
 # ── Dialog tests ─────────────────────────────────────────────────
@@ -649,7 +666,9 @@ class TestEditPanelIntegration:
         app = MockApp()
         panel = EditPanel(app)
         qtbot.addWidget(panel)
-        panel.refresh()
+
+        # Open history dialog to inspect list
+        panel._open_history_dialog()
         assert panel._history_list.count() == 0
 
         # External edit (not via panel)
@@ -658,6 +677,7 @@ class TestEditPanelIntegration:
 
         assert panel._history_list.count() == 1
         assert panel._btn_undo.isEnabled()
+        panel._history_dialog.close()
 
     def test_undo_redo_cycle_updates_panel(self, qtbot):
         """Full undo/redo cycle properly updates panel state."""
@@ -666,6 +686,9 @@ class TestEditPanelIntegration:
         app = MockApp()
         panel = EditPanel(app)
         qtbot.addWidget(panel)
+
+        # Open history dialog to inspect list
+        panel._open_history_dialog()
 
         # Do edit
         app.edit_history.do(AddNucleus(time=1, x=50, y=50, z=5.0))
@@ -685,6 +708,7 @@ class TestEditPanelIntegration:
         assert panel._btn_undo.isEnabled()
         assert not panel._btn_redo.isEnabled()
         assert panel._history_list.count() == 1
+        panel._history_dialog.close()
 
     def test_kill_cell_not_in_lineage(self, qtbot):
         """Kill cell shows status when cell not in lineage."""

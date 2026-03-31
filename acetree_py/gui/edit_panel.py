@@ -25,9 +25,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 try:
-    from qtpy.QtCore import Qt
-    from qtpy.QtGui import QFont
+    from qtpy.QtCore import Qt, Signal
+    from qtpy.QtGui import QColor, QFont
     from qtpy.QtWidgets import (
+        QButtonGroup,
+        QCheckBox,
+        QColorDialog,
+        QComboBox,
         QDialog,
         QDialogButtonBox,
         QDoubleSpinBox,
@@ -37,8 +41,10 @@ try:
         QLabel,
         QLineEdit,
         QListWidget,
+        QListWidgetItem,
         QMessageBox,
         QPushButton,
+        QRadioButton,
         QSpinBox,
         QTextEdit,
         QVBoxLayout,
@@ -83,6 +89,56 @@ class EditPanel(QWidget):  # type: ignore[misc]
         title = QLabel("Edit Tools")
         title.setFont(QFont("Sans Serif", 12, QFont.Bold))
         layout.addWidget(title)
+
+        # ── Color mode toggle ──
+        mode_group = QGroupBox("Color Mode")
+        mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setSpacing(2)
+
+        radio_row = QHBoxLayout()
+        self._radio_editing = QRadioButton("Editing")
+        self._radio_editing.setToolTip(
+            "Status-based colors: white=selected, purple=named, "
+            "orange=unnamed, gray=none"
+        )
+        self._radio_editing.setChecked(True)
+        self._radio_viz = QRadioButton("Visualization")
+        self._radio_viz.setToolTip(
+            "Rule-based coloring: choose a preset or define custom rules"
+        )
+        self._mode_btn_group = QButtonGroup(self)
+        self._mode_btn_group.addButton(self._radio_editing, 0)
+        self._mode_btn_group.addButton(self._radio_viz, 1)
+
+        radio_row.addWidget(self._radio_editing)
+        radio_row.addWidget(self._radio_viz)
+        mode_layout.addLayout(radio_row)
+
+        # Preset selector (only visible in visualization mode)
+        preset_row = QHBoxLayout()
+        preset_label = QLabel("Preset:")
+        self._combo_preset = QComboBox()
+        self._combo_preset.setToolTip("Select a visualization color preset")
+        from .color_rules import PRESET_NAMES
+        for key, label in PRESET_NAMES.items():
+            self._combo_preset.addItem(label, userData=key)
+        # Default to lineage depth
+        self._combo_preset.setCurrentIndex(1)
+        self._combo_preset.setEnabled(False)
+        preset_row.addWidget(preset_label)
+        preset_row.addWidget(self._combo_preset, stretch=1)
+        mode_layout.addLayout(preset_row)
+
+        self._btn_edit_rules = QPushButton("Edit Rules\u2026")
+        self._btn_edit_rules.setToolTip("Open the color rule editor")
+        self._btn_edit_rules.setEnabled(False)
+        self._btn_edit_rules.clicked.connect(self._open_color_rules_dialog)
+        self._color_rules_dialog = None  # lazy-created
+        mode_layout.addWidget(self._btn_edit_rules)
+
+        self._mode_btn_group.idClicked.connect(self._on_mode_changed)
+        self._combo_preset.currentIndexChanged.connect(self._on_preset_changed)
+        layout.addWidget(mode_group)
 
         # ── File operations ──
         file_group = QGroupBox("File")
@@ -132,16 +188,17 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._btn_remove.setToolTip("Remove (kill) the selected nucleus")
         self._btn_remove.clicked.connect(self._on_remove_nucleus)
 
+        self._btn_move = QPushButton("Move / Resize \u2197")
+        self._btn_move.setToolTip(
+            "Open the Move/Resize controls for nudging position, z, and size"
+        )
+        self._btn_move.clicked.connect(self._open_move_dialog)
+        self._move_dialog = None  # lazy-created
+
         nuc_layout.addWidget(self._btn_add)
         nuc_layout.addWidget(self._btn_remove)
+        nuc_layout.addWidget(self._btn_move)
         layout.addWidget(nuc_group)
-
-        # ── Move / nudge controls ──
-        move_group = QGroupBox("Move / Resize")
-        move_layout = QVBoxLayout(move_group)
-
-        self._build_move_controls(move_layout)
-        layout.addWidget(move_group)
 
         # ── Cell-level operations ──
         cell_group = QGroupBox("Cell Operations")
@@ -194,14 +251,57 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
 
-        # ── History log ──
-        history_label = QLabel("Edit History")
-        history_label.setFont(QFont("Sans Serif", 10, QFont.Bold))
-        layout.addWidget(history_label)
+        # ── Visualization tools ──
+        viz_group = QGroupBox("Visualization")
+        viz_layout = QVBoxLayout(viz_group)
+        viz_layout.setSpacing(4)
 
-        self._history_list = QListWidget()
-        self._history_list.setMaximumHeight(150)
-        layout.addWidget(self._history_list)
+        # Trail toggle + length spinner
+        trail_row = QHBoxLayout()
+        self._chk_trails = QPushButton("Trails")
+        self._chk_trails.setCheckable(True)
+        self._chk_trails.setToolTip(
+            "Show ghost trail of selected cell's past positions"
+        )
+        self._chk_trails.clicked.connect(self._on_trail_toggle)
+
+        trail_label = QLabel("Length:")
+        self._spin_trail_len = QSpinBox()
+        self._spin_trail_len.setRange(1, 100)
+        self._spin_trail_len.setValue(10)
+        self._spin_trail_len.setToolTip("Number of past timepoints to show")
+        self._spin_trail_len.valueChanged.connect(self._on_trail_length_changed)
+
+        trail_row.addWidget(self._chk_trails)
+        trail_row.addWidget(trail_label)
+        trail_row.addWidget(self._spin_trail_len)
+        viz_layout.addLayout(trail_row)
+
+        # Screenshot + export row
+        export_row = QHBoxLayout()
+        self._btn_screenshot = QPushButton("Screenshot")
+        self._btn_screenshot.setToolTip("Save current view as PNG image")
+        self._btn_screenshot.clicked.connect(self._on_screenshot)
+
+        self._btn_record = QPushButton("Record...")
+        self._btn_record.setToolTip(
+            "Export a sequence of screenshots across a timepoint range"
+        )
+        self._btn_record.clicked.connect(self._on_record_sequence)
+
+        export_row.addWidget(self._btn_screenshot)
+        export_row.addWidget(self._btn_record)
+        viz_layout.addLayout(export_row)
+
+        layout.addWidget(viz_group)
+
+        # ── History (opens in a popup window) ──
+        self._btn_history = QPushButton("Edit History\u2026")
+        self._btn_history.setToolTip("Show the full edit history in a popup")
+        self._btn_history.clicked.connect(self._open_history_dialog)
+        self._history_dialog = None  # lazy-created
+        self._history_list = None  # created inside the dialog
+        layout.addWidget(self._btn_history)
 
         layout.addStretch()
 
@@ -309,17 +409,142 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._btn_undo.setToolTip(undo_tip)
         self._btn_redo.setToolTip(redo_tip)
 
-        # Update history list
-        self._history_list.clear()
-        for desc in history.history_log():
-            self._history_list.addItem(desc)
-        # Scroll to latest
-        if self._history_list.count() > 0:
-            self._history_list.scrollToBottom()
+        # Update history popup if it's open
+        if self._history_list is not None:
+            self._history_list.clear()
+            for desc in history.history_log():
+                self._history_list.addItem(desc)
+            if self._history_list.count() > 0:
+                self._history_list.scrollToBottom()
 
         # Sync toggle button states
         self._btn_track.setChecked(self.app._placement_mode)
         self._btn_add.setChecked(self.app._add_mode)
+
+        # Sync color mode radio
+        if self.app._viz_mode:
+            self._radio_viz.setChecked(True)
+            self._combo_preset.setEnabled(True)
+            self._btn_edit_rules.setEnabled(True)
+        else:
+            self._radio_editing.setChecked(True)
+            self._combo_preset.setEnabled(False)
+            self._btn_edit_rules.setEnabled(False)
+
+        # Sync trail button
+        vi = self.app._viewer_integration
+        if vi is not None:
+            self._chk_trails.setChecked(vi.trails_visible)
+
+    # ── Color mode handlers ──────────────────────────────────────
+
+    def _on_mode_changed(self, btn_id: int) -> None:
+        """Handle editing / visualization radio toggle."""
+        viz = btn_id == 1
+        self._combo_preset.setEnabled(viz)
+        self._btn_edit_rules.setEnabled(viz)
+        if viz:
+            # Apply current preset
+            self._on_preset_changed(self._combo_preset.currentIndex())
+        self.app.set_viz_mode(viz)
+
+    def _on_preset_changed(self, index: int) -> None:
+        """Handle preset combo box change."""
+        from .color_rules import PRESET_EDITING
+
+        key = self._combo_preset.itemData(index)
+        if key is None or key == PRESET_EDITING:
+            return
+        self.app.color_engine.load_preset(key)
+        if self.app._viz_mode:
+            self.app.set_viz_mode(True)  # re-render with new preset
+
+    def _open_color_rules_dialog(self) -> None:
+        """Open (or raise) the Color Rules editor popup."""
+        if self._color_rules_dialog is None:
+            self._color_rules_dialog = ColorRulesDialog(
+                self.app, parent=self
+            )
+            self._color_rules_dialog.rules_changed.connect(self._on_rules_applied)
+        # Sync dialog with current engine rules
+        self._color_rules_dialog.load_rules(self.app.color_engine.rules)
+        self._color_rules_dialog.show()
+        self._color_rules_dialog.raise_()
+
+    def _on_rules_applied(self) -> None:
+        """Called when the Color Rules dialog applies new rules."""
+        if self.app._viz_mode:
+            self.app.set_viz_mode(True)  # re-render
+
+    # ── Trail + export handlers ────────────────────────────────────
+
+    def _on_trail_toggle(self, checked: bool) -> None:
+        vi = self.app._viewer_integration
+        if vi is not None:
+            vi.toggle_trails(checked)
+
+    def _on_trail_length_changed(self, value: int) -> None:
+        vi = self.app._viewer_integration
+        if vi is not None:
+            vi.set_trail_length(value)
+
+    def _on_screenshot(self) -> None:
+        path = self.app.screenshot()
+        if path is not None:
+            self._status_label.setText(f"Screenshot: {path.name}")
+        else:
+            self._status_label.setText("Screenshot cancelled")
+
+    def _on_record_sequence(self) -> None:
+        """Open a dialog to record a sequence of screenshots."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Record Sequence")
+        dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        form = QFormLayout(dlg)
+
+        spin_start = QSpinBox()
+        spin_start.setRange(1, 9999)
+        spin_start.setValue(self.app.current_time)
+        form.addRow("Start time:", spin_start)
+
+        spin_end = QSpinBox()
+        spin_end.setRange(1, 9999)
+        spin_end.setValue(min(self.app.current_time + 20,
+                              len(self.app.manager.nuclei_record)))
+        form.addRow("End time:", spin_end)
+
+        spin_step = QSpinBox()
+        spin_step.setRange(1, 100)
+        spin_step.setValue(1)
+        form.addRow("Step:", spin_step)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+
+        if dlg.exec_() != QDialog.Accepted:
+            self._status_label.setText("Recording cancelled")
+            return
+
+        t_start = spin_start.value()
+        t_end = spin_end.value()
+        step = spin_step.value()
+
+        from qtpy.QtWidgets import QFileDialog
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Select output directory"
+        )
+        if not out_dir:
+            self._status_label.setText("Recording cancelled")
+            return
+
+        count = self.app.record_sequence(t_start, t_end, step, out_dir)
+        self._status_label.setText(
+            f"Recorded {count} frames to {out_dir}"
+        )
 
     # ── Save handlers ────────────────────────────────────────────
 
@@ -354,6 +579,62 @@ class EditPanel(QWidget):  # type: ignore[misc]
         else:
             self._status_label.setText("Nothing to redo")
         self.refresh()
+
+    # ── Popup dialogs (Move/Resize and History) ────────────────
+
+    def _open_move_dialog(self) -> None:
+        """Open (or focus) the non-modal Move/Resize dialog."""
+        if self._move_dialog is not None:
+            self._move_dialog.raise_()
+            self._move_dialog.activateWindow()
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Move / Resize")
+        dlg.setWindowFlags(
+            dlg.windowFlags() & ~Qt.WindowContextHelpButtonHint
+        )
+        layout = QVBoxLayout(dlg)
+        self._build_move_controls(layout)
+        dlg.finished.connect(self._on_move_dialog_closed)
+        dlg.setFixedSize(dlg.sizeHint())
+        self._move_dialog = dlg
+        dlg.show()
+
+    def _on_move_dialog_closed(self) -> None:
+        self._move_dialog = None
+
+    def _open_history_dialog(self) -> None:
+        """Open (or focus) the non-modal Edit History dialog."""
+        if self._history_dialog is not None:
+            self._history_dialog.raise_()
+            self._history_dialog.activateWindow()
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit History")
+        dlg.setWindowFlags(
+            dlg.windowFlags() & ~Qt.WindowContextHelpButtonHint
+        )
+        dlg.setMinimumSize(300, 250)
+        layout = QVBoxLayout(dlg)
+
+        self._history_list = QListWidget()
+        layout.addWidget(self._history_list)
+
+        # Populate with current history
+        for desc in self.app.edit_history.history_log():
+            self._history_list.addItem(desc)
+        if self._history_list.count() > 0:
+            self._history_list.scrollToBottom()
+
+        dlg.finished.connect(self._on_history_dialog_closed)
+        self._history_dialog = dlg
+        dlg.show()
+
+    def _on_history_dialog_closed(self) -> None:
+        self._history_list = None
+        self._history_dialog = None
 
     # ── Edit operation handlers ─────────────────────────────────
 
@@ -1064,3 +1345,413 @@ class RelinkInterpolationDialog(QDialog):
             "end_time": self._end_time_spin.value(),
             "end_index": self._end_index_spin.value(),
         }
+
+
+# ── Color Rules Dialog ──────────────────────────────────────────────
+
+
+class ColorRulesDialog(QDialog):  # type: ignore[misc]
+    """Popup dialog for viewing and editing visualization color rules.
+
+    Provides a list of rules with enable/disable checkboxes, and buttons
+    to add, edit, delete, reorder, and clear rules.  Changes are pushed
+    to the :class:`ColorRuleEngine` on the app when *Apply* is clicked.
+    """
+
+    rules_changed = Signal()
+
+    def __init__(self, app: AceTreeApp, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.app = app
+        self.setWindowTitle("Color Rules")
+        self.setWindowFlags(
+            self.windowFlags() & ~Qt.WindowContextHelpButtonHint
+        )
+        self.setMinimumWidth(420)
+        self._rules: list = []  # list[ColorRule] — local working copy
+
+        layout = QVBoxLayout(self)
+
+        # Rule list
+        self._list = QListWidget()
+        self._list.setAlternatingRowColors(True)
+        self._list.itemDoubleClicked.connect(self._on_edit_rule)
+        layout.addWidget(self._list)
+
+        # "All other cells" default color
+        default_row = QHBoxLayout()
+        default_row.addWidget(QLabel("All other cells:"))
+        self._btn_default_color = QPushButton()
+        self._btn_default_color.setToolTip(
+            "Color for cells that don't match any rule above"
+        )
+        self._btn_default_color.clicked.connect(self._pick_default_color)
+        self._default_color: tuple = (1.0, 1.0, 1.0, 0.3)
+        self._update_default_color_button()
+        default_row.addWidget(self._btn_default_color, stretch=1)
+        layout.addLayout(default_row)
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+        self._btn_add = QPushButton("Add")
+        self._btn_add.clicked.connect(self._on_add_rule)
+        self._btn_edit = QPushButton("Edit")
+        self._btn_edit.clicked.connect(
+            lambda: self._on_edit_rule(self._list.currentItem())
+        )
+        self._btn_delete = QPushButton("Delete")
+        self._btn_delete.clicked.connect(self._on_delete_rule)
+        self._btn_up = QPushButton("\u25b2")
+        self._btn_up.setToolTip("Move rule up (higher priority)")
+        self._btn_up.setFixedWidth(30)
+        self._btn_up.clicked.connect(lambda: self._move_rule(-1))
+        self._btn_down = QPushButton("\u25bc")
+        self._btn_down.setToolTip("Move rule down (lower priority)")
+        self._btn_down.setFixedWidth(30)
+        self._btn_down.clicked.connect(lambda: self._move_rule(1))
+        self._btn_clear = QPushButton("Clear All")
+        self._btn_clear.clicked.connect(self._on_clear)
+
+        btn_row.addWidget(self._btn_add)
+        btn_row.addWidget(self._btn_edit)
+        btn_row.addWidget(self._btn_delete)
+        btn_row.addWidget(self._btn_up)
+        btn_row.addWidget(self._btn_down)
+        btn_row.addStretch()
+        btn_row.addWidget(self._btn_clear)
+        layout.addLayout(btn_row)
+
+        # Apply / Close
+        bottom = QHBoxLayout()
+        self._btn_apply = QPushButton("Apply")
+        self._btn_apply.setToolTip("Push rules to the viewer")
+        self._btn_apply.clicked.connect(self._on_apply)
+        self._btn_close = QPushButton("Close")
+        self._btn_close.clicked.connect(self.close)
+        bottom.addStretch()
+        bottom.addWidget(self._btn_apply)
+        bottom.addWidget(self._btn_close)
+        layout.addLayout(bottom)
+
+    def load_rules(self, rules: list) -> None:
+        """Populate the dialog from a list of ColorRule objects."""
+        from .color_rules import ColorRule
+
+        # Deep copy so edits don't affect the engine until Apply
+        self._rules = [
+            ColorRule(
+                name=r.name,
+                criterion=r.criterion,
+                pattern=r.pattern,
+                color_mode=r.color_mode,
+                color=r.color,
+                colormap=r.colormap,
+                vmin=r.vmin,
+                vmax=r.vmax,
+                priority=r.priority,
+                enabled=r.enabled,
+            )
+            for r in rules
+        ]
+        # Sync default color from engine
+        self._default_color = self.app.color_engine.default_color
+        self._update_default_color_button()
+        self._rebuild_list()
+
+    def _rebuild_list(self) -> None:
+        """Refresh the QListWidget from self._rules."""
+        self._list.clear()
+        for rule in self._rules:
+            item = QListWidgetItem()
+            item.setFlags(
+                item.flags() | Qt.ItemIsUserCheckable
+            )
+            item.setCheckState(
+                Qt.Checked if rule.enabled else Qt.Unchecked
+            )
+            item.setText(self._rule_label(rule))
+            self._list.addItem(item)
+
+    @staticmethod
+    def _rule_label(rule) -> str:
+        """Build a human-readable label for a rule."""
+        from .color_rules import ColorMode
+
+        label = rule.name or rule.criterion.value
+        if rule.pattern:
+            label += f"  [{rule.pattern}]"
+        if rule.color_mode == ColorMode.SOLID:
+            r, g, b, a = rule.color
+            label += f"  \u25a0 ({r:.1f},{g:.1f},{b:.1f},{a:.1f})"
+        else:
+            label += f"  cmap={rule.colormap}"
+        return label
+
+    def _sync_enabled_from_list(self) -> None:
+        """Sync rule.enabled from checkbox states."""
+        for i, rule in enumerate(self._rules):
+            item = self._list.item(i)
+            if item is not None:
+                rule.enabled = item.checkState() == Qt.Checked
+
+    def _on_add_rule(self) -> None:
+        from .color_rules import ColorRule
+
+        dlg = _RuleEditorDialog(ColorRule(), parent=self)
+        if dlg.exec_() == QDialog.Accepted:
+            self._sync_enabled_from_list()
+            self._rules.append(dlg.get_rule())
+            self._rebuild_list()
+
+    def _on_edit_rule(self, item: QListWidgetItem | None) -> None:
+        if item is None:
+            return
+        row = self._list.row(item)
+        if row < 0 or row >= len(self._rules):
+            return
+        self._sync_enabled_from_list()
+        dlg = _RuleEditorDialog(self._rules[row], parent=self)
+        if dlg.exec_() == QDialog.Accepted:
+            self._rules[row] = dlg.get_rule()
+            self._rebuild_list()
+
+    def _on_delete_rule(self) -> None:
+        row = self._list.currentRow()
+        if row < 0 or row >= len(self._rules):
+            return
+        self._sync_enabled_from_list()
+        del self._rules[row]
+        self._rebuild_list()
+
+    def _move_rule(self, direction: int) -> None:
+        """Move the selected rule up (-1) or down (+1)."""
+        row = self._list.currentRow()
+        new_row = row + direction
+        if row < 0 or new_row < 0 or new_row >= len(self._rules):
+            return
+        self._sync_enabled_from_list()
+        self._rules[row], self._rules[new_row] = (
+            self._rules[new_row],
+            self._rules[row],
+        )
+        self._rebuild_list()
+        self._list.setCurrentRow(new_row)
+
+    def _on_clear(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Clear All Rules",
+            "Remove all color rules?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self._rules.clear()
+            self._rebuild_list()
+
+    def _update_default_color_button(self) -> None:
+        r, g, b, a = self._default_color
+        ri, gi, bi = int(r * 255), int(g * 255), int(b * 255)
+        self._btn_default_color.setStyleSheet(
+            f"background-color: rgba({ri},{gi},{bi},{int(a * 255)}); "
+            f"min-height: 20px;"
+        )
+        self._btn_default_color.setText(
+            f"({r:.2f}, {g:.2f}, {b:.2f}, {a:.2f})"
+        )
+
+    def _pick_default_color(self) -> None:
+        r, g, b, a = self._default_color
+        initial = QColor(int(r * 255), int(g * 255), int(b * 255), int(a * 255))
+        color = QColorDialog.getColor(
+            initial, self, "Default Color (All Other Cells)",
+            QColorDialog.ShowAlphaChannel,
+        )
+        if color.isValid():
+            self._default_color = (
+                color.redF(), color.greenF(), color.blueF(), color.alphaF(),
+            )
+            self._update_default_color_button()
+
+    def _on_apply(self) -> None:
+        """Push the working rule list to the engine."""
+        self._sync_enabled_from_list()
+        # Assign descending priorities based on list order
+        for i, rule in enumerate(self._rules):
+            rule.priority = len(self._rules) - i
+        self.app.color_engine.set_rules(list(self._rules))
+        self.app.color_engine.default_color = self._default_color
+        self.rules_changed.emit()
+
+
+class _RuleEditorDialog(QDialog):  # type: ignore[misc]
+    """Sub-dialog for creating or editing a single ColorRule."""
+
+    def __init__(self, rule, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from .color_rules import ColorMode, ColorRule, RuleCriterion
+
+        self._ColorMode = ColorMode
+        self._ColorRule = ColorRule
+        self._RuleCriterion = RuleCriterion
+
+        self.setWindowTitle("Edit Color Rule")
+        self.setWindowFlags(
+            self.windowFlags() & ~Qt.WindowContextHelpButtonHint
+        )
+        self.setMinimumWidth(350)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        # Name
+        self._name_edit = QLineEdit(rule.name)
+        form.addRow("Name:", self._name_edit)
+
+        # Criterion + info button
+        criterion_row = QHBoxLayout()
+        self._criterion_combo = QComboBox()
+        for c in RuleCriterion:
+            self._criterion_combo.addItem(c.value, userData=c)
+        idx = [c for c in RuleCriterion].index(rule.criterion)
+        self._criterion_combo.setCurrentIndex(idx)
+        criterion_row.addWidget(self._criterion_combo, stretch=1)
+
+        btn_info = QPushButton("?")
+        btn_info.setFixedWidth(24)
+        btn_info.setToolTip("Explain match modes")
+        btn_info.clicked.connect(self._show_match_help)
+        criterion_row.addWidget(btn_info)
+        form.addRow("Match:", criterion_row)
+
+        # Pattern
+        self._pattern_edit = QLineEdit(rule.pattern)
+        self._pattern_edit.setPlaceholderText(
+            "e.g. AB*, 2-5, divided, ^MS[ap]$"
+        )
+        form.addRow("Pattern:", self._pattern_edit)
+
+        # Color mode
+        self._color_mode_combo = QComboBox()
+        for m in ColorMode:
+            self._color_mode_combo.addItem(m.value, userData=m)
+        cm_idx = [m for m in ColorMode].index(rule.color_mode)
+        self._color_mode_combo.setCurrentIndex(cm_idx)
+        self._color_mode_combo.currentIndexChanged.connect(
+            self._on_color_mode_changed
+        )
+        form.addRow("Color mode:", self._color_mode_combo)
+
+        # Solid color picker
+        self._color_btn = QPushButton()
+        self._current_color = rule.color  # (r, g, b, a)
+        self._update_color_button()
+        self._color_btn.clicked.connect(self._pick_color)
+        form.addRow("Color:", self._color_btn)
+
+        # Colormap settings
+        self._cmap_edit = QLineEdit(rule.colormap)
+        self._cmap_edit.setPlaceholderText("viridis, inferno, plasma, ...")
+        form.addRow("Colormap:", self._cmap_edit)
+
+        self._vmin_spin = QDoubleSpinBox()
+        self._vmin_spin.setRange(-1e6, 1e6)
+        self._vmin_spin.setValue(rule.vmin)
+        form.addRow("Min value:", self._vmin_spin)
+
+        self._vmax_spin = QDoubleSpinBox()
+        self._vmax_spin.setRange(-1e6, 1e6)
+        self._vmax_spin.setValue(rule.vmax)
+        form.addRow("Max value:", self._vmax_spin)
+
+        layout.addLayout(form)
+
+        # Show/hide fields based on color mode
+        self._on_color_mode_changed(cm_idx)
+
+        # OK / Cancel
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _show_match_help(self) -> None:
+        """Show a help dialog explaining the match modes."""
+        QMessageBox.information(
+            self,
+            "Match Modes",
+            "<b>all</b> — Matches every cell. Use this for a catch-all "
+            "rule or to color everything with one colormap.<br><br>"
+            "<b>name_exact</b> — Matches one specific cell by name.<br>"
+            "Pattern: <code>ABala</code><br><br>"
+            "<b>name_pattern</b> — Matches cell names using wildcards "
+            "(like file globbing).<br>"
+            "Pattern: <code>AB*</code> (all AB-lineage cells), "
+            "<code>MS?</code> (MSa, MSp, etc.)<br><br>"
+            "<b>name_regex</b> — Matches cell names using a regular "
+            "expression for advanced patterns.<br>"
+            "Pattern: <code>^AB[ap]$</code> (only ABa and ABp), "
+            "<code>.*ala.*</code> (any name containing 'ala')<br><br>"
+            "<b>lineage_depth</b> — Matches cells by how many divisions "
+            "from the founder cell P0. Depth 0 = P0 itself.<br>"
+            "Pattern: <code>2-4</code> (depths 2 through 4), "
+            "<code>3</code> (depth 3 only)<br><br>"
+            "<b>fate</b> — Matches cells by their end fate.<br>"
+            "Pattern: <code>divided</code>, <code>alive</code>, or "
+            "<code>died</code><br><br>"
+            "<b>expression</b> — Matches cells by expression level "
+            "(rweight / fluorescence intensity).<br>"
+            "Pattern: <code>500-2000</code> (values between 500 and 2000)",
+        )
+
+    def _on_color_mode_changed(self, index: int) -> None:
+        """Show/hide fields based on color mode."""
+        is_solid = index == 0  # SOLID
+        self._color_btn.setVisible(is_solid)
+        self._cmap_edit.setVisible(not is_solid)
+        self._vmin_spin.setVisible(not is_solid)
+        self._vmax_spin.setVisible(not is_solid)
+
+    def _update_color_button(self) -> None:
+        r, g, b, a = self._current_color
+        ri, gi, bi = int(r * 255), int(g * 255), int(b * 255)
+        self._color_btn.setStyleSheet(
+            f"background-color: rgb({ri},{gi},{bi}); "
+            f"min-width: 60px; min-height: 20px;"
+        )
+        self._color_btn.setText(f"({r:.2f}, {g:.2f}, {b:.2f}, {a:.2f})")
+
+    def _pick_color(self) -> None:
+        r, g, b, a = self._current_color
+        initial = QColor(int(r * 255), int(g * 255), int(b * 255), int(a * 255))
+        color = QColorDialog.getColor(
+            initial, self, "Pick Rule Color",
+            QColorDialog.ShowAlphaChannel,
+        )
+        if color.isValid():
+            self._current_color = (
+                color.redF(),
+                color.greenF(),
+                color.blueF(),
+                color.alphaF(),
+            )
+            self._update_color_button()
+
+    def get_rule(self):
+        """Build a ColorRule from the dialog's current values."""
+        criterion = self._criterion_combo.currentData()
+        color_mode = self._color_mode_combo.currentData()
+        return self._ColorRule(
+            name=self._name_edit.text().strip(),
+            criterion=criterion,
+            pattern=self._pattern_edit.text().strip(),
+            color_mode=color_mode,
+            color=self._current_color,
+            colormap=self._cmap_edit.text().strip() or "viridis",
+            vmin=self._vmin_spin.value(),
+            vmax=self._vmax_spin.value(),
+            priority=0,
+            enabled=True,
+        )

@@ -27,6 +27,7 @@ from ..core.nuclei_manager import NucleiManager
 from ..editing.history import EditHistory
 from ..io.config import AceTreeConfig, load_config
 from ..io.image_provider import ImageProvider, create_image_provider_from_config
+from .color_rules import ColorRuleEngine
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +87,15 @@ class AceTreeApp:
         self._lineage_widgets: list = []  # Multiple lineage tree panels
         self._lineage_list = None
 
-        # Cached image layer
-        self._image_layer = None
+        # Cached image layers (one per channel)
+        self._image_layers: list = []
+        # Default colormaps for multi-channel display (green/magenta)
+        self._channel_colormaps = ["green", "magenta", "cyan", "yellow", "red", "blue"]
 
         # 3D view state
         self._3d_mode: bool = False
         self._points_layer = None  # napari Points layer for 3D nuclei
+        self._trail_points_layer = None  # 3D ghost trail Points layer
 
         # Relink pick mode state (Feature 4)
         self._relink_pick_mode: bool = False
@@ -104,6 +108,14 @@ class AceTreeApp:
 
         # Click-to-add nucleus mode (Add button)
         self._add_mode: bool = False
+
+        # Visualization mode — when True, uses ColorRuleEngine for coloring;
+        # when False, uses the hardcoded editing palette (white/purple/orange/gray).
+        self._viz_mode: bool = False
+        self._color_engine: ColorRuleEngine | None = None
+
+        # Detached 3D viewer windows
+        self._3d_windows: list = []
 
     @classmethod
     def from_config(
@@ -240,7 +252,6 @@ class AceTreeApp:
                 "napari is required for the GUI: pip install 'acetree-py[gui]'"
             )
 
-        from .cell_info_panel import CellInfoPanel
         from .contrast_tools import ContrastTools
         from .edit_panel import EditPanel
         from .lineage_list import LineageListWidget
@@ -250,6 +261,16 @@ class AceTreeApp:
 
         self.viewer = napari.Viewer(title="AceTree")
 
+        # Hide napari's default layer list and layer controls — they're
+        # rarely needed and consume valuable dock space.  Still accessible
+        # via the Window menu toggle actions.
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            for dw in list(self.viewer.window._dock_widgets.values()):
+                if dw.objectName() in ("layer list", "layer controls"):
+                    dw.setVisible(False)
+
         # Set up image layer
         self._load_image()
 
@@ -257,7 +278,8 @@ class AceTreeApp:
         self._viewer_integration = ViewerIntegration(self)
         self._viewer_integration.setup_layers()
 
-        # Add dock widgets
+        # ── Dock widgets ──────────────────────────────────────────
+        # Bottom: Player Controls, then Lineage Tree
         self._player_controls = PlayerControls(self)
         self.viewer.window.add_dock_widget(
             self._player_controls,
@@ -265,20 +287,22 @@ class AceTreeApp:
             area="bottom",
         )
 
-        self._cell_info_panel = CellInfoPanel(self)
-        self.viewer.window.add_dock_widget(
-            self._cell_info_panel,
-            name="Cell Info",
-            area="left",
-        )
-
+        # Left: Contrast (compact), then Lineage List
         self._contrast_tools = ContrastTools(self)
         self.viewer.window.add_dock_widget(
             self._contrast_tools,
             name="Contrast",
-            area="right",
+            area="left",
         )
 
+        self._lineage_list = LineageListWidget(self)
+        self.viewer.window.add_dock_widget(
+            self._lineage_list,
+            name="Lineage List",
+            area="left",
+        )
+
+        # Right: Edit Tools (compact — D-pad and history are popups)
         self._edit_panel = EditPanel(self)
         self.viewer.window.add_dock_widget(
             self._edit_panel,
@@ -286,16 +310,12 @@ class AceTreeApp:
             area="right",
         )
 
-        # Lineage tree view (graphical Sulston tree) — first default panel
+        # Bottom: Lineage tree view (graphical Sulston tree)
         self.add_lineage_panel()
 
-        # Lineage list view (hierarchical JTree-style list)
-        self._lineage_list = LineageListWidget(self)
-        self.viewer.window.add_dock_widget(
-            self._lineage_list,
-            name="Lineage List",
-            area="left",
-        )
+        # Cell Info is now a hover tooltip, not a dock widget.
+        # Keep a reference for the tooltip builder but don't dock it.
+        self._cell_info_panel = None
 
         # Add toggle actions to Window menu so closed panels can be reopened
         self._add_panel_menu_actions()
@@ -380,6 +400,85 @@ class AceTreeApp:
                 )
             return None
 
+    # ── Screenshot + export ─────────────────────────────────────
+
+    def screenshot(self, path: Path | None = None) -> Path | None:
+        """Capture the current viewer canvas as a PNG image.
+
+        Args:
+            path: Destination file path.  If None, opens a file dialog.
+
+        Returns:
+            The Path that was saved to, or None if cancelled.
+        """
+        if self.viewer is None:
+            return None
+
+        if path is None:
+            from qtpy.QtWidgets import QFileDialog
+
+            path_str, _ = QFileDialog.getSaveFileName(
+                self.viewer.window._qt_window,
+                "Save Screenshot",
+                f"screenshot_t{self.current_time:04d}.png",
+                "PNG images (*.png);;All files (*)",
+            )
+            if not path_str:
+                return None
+            path = Path(path_str)
+
+        try:
+            self.viewer.screenshot(str(path), canvas_only=True)
+            logger.info("Screenshot saved to %s", path)
+            return path
+        except Exception:
+            logger.exception("Failed to save screenshot to %s", path)
+            return None
+
+    def record_sequence(
+        self,
+        start_time: int,
+        end_time: int,
+        step: int = 1,
+        output_dir: str | Path = ".",
+    ) -> int:
+        """Export a sequence of screenshots across a timepoint range.
+
+        Args:
+            start_time: First timepoint (1-based).
+            end_time: Last timepoint (1-based, inclusive).
+            step: Timepoint increment between frames.
+            output_dir: Directory to write PNG files into.
+
+        Returns:
+            Number of frames exported.
+        """
+        if self.viewer is None:
+            return 0
+
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        original_time = self.current_time
+        count = 0
+
+        for t in range(start_time, end_time + 1, step):
+            self.set_time(t)
+            # Force a synchronous repaint so the screenshot captures the
+            # updated frame.
+            self.viewer.window._qt_window.repaint()
+
+            frame_path = out / f"frame_{t:04d}.png"
+            try:
+                self.viewer.screenshot(str(frame_path), canvas_only=True)
+                count += 1
+            except Exception:
+                logger.exception("Failed to capture frame at t=%d", t)
+
+        # Restore original timepoint
+        self.set_time(original_time)
+        logger.info("Recorded %d frames to %s", count, out)
+        return count
+
     # ── Navigation ────────────────────────────────────────────────
 
     def set_time(self, time: int) -> None:
@@ -402,6 +501,9 @@ class AceTreeApp:
     def set_plane(self, plane: int) -> None:
         """Navigate to a specific z-plane.
 
+        Changing z-plane deselects the active cell (the user is manually
+        exploring, not following a tracked cell).
+
         Args:
             plane: 1-based z-plane index.
         """
@@ -410,7 +512,13 @@ class AceTreeApp:
         if plane == self.current_plane:
             return
         self.current_plane = plane
-        self._update_display_plane_only()
+        # Deselect active cell — user is manually navigating z
+        if self.current_cell_name:
+            self.current_cell_name = ""
+            self.tracking = False
+            self.update_display()
+        else:
+            self._update_display_plane_only()
 
     def next_time(self) -> None:
         """Advance to the next timepoint."""
@@ -525,6 +633,41 @@ class AceTreeApp:
     def exit_add_mode(self) -> None:
         """Exit click-to-add mode."""
         self._add_mode = False
+
+    @property
+    def _image_layer(self):
+        """Backward-compatible accessor: first image layer (or None)."""
+        return self._image_layers[0] if self._image_layers else None
+
+    # ── Visualization mode ───────────────────────────────────────
+
+    @property
+    def color_engine(self) -> ColorRuleEngine:
+        """Lazily-created color rule engine for visualization mode."""
+        if self._color_engine is None:
+            self._color_engine = ColorRuleEngine()
+        return self._color_engine
+
+    def set_viz_mode(self, enabled: bool) -> None:
+        """Switch between editing and visualization color modes.
+
+        Args:
+            enabled: True for visualization mode (rule-based coloring),
+                     False for editing mode (status-based palette).
+        """
+        self._viz_mode = enabled
+        if self._3d_mode:
+            self._update_3d_points()
+        else:
+            self.update_display()
+
+    def open_3d_window(self) -> None:
+        """Open a new detached 3D viewer window."""
+        from .viewer_3d_window import Viewer3DWindow
+
+        win = Viewer3DWindow(self)
+        self._3d_windows.append(win)
+        win.show()
 
     def _handle_add_click(self, x: float, y: float) -> bool:
         """Handle a left-click in add mode — place a nucleus at (x, y).
@@ -714,23 +857,30 @@ class AceTreeApp:
 
         z_scale = self.manager.z_pix_res
 
-        # Load full z-stack and replace 2D image layer data
-        try:
-            stack = self.image_provider.get_stack(self.current_time)
-        except (FileNotFoundError, IndexError) as e:
-            logger.warning("Could not load 3D stack: %s", e)
-            self._3d_mode = False
-            return
+        # Load full z-stacks for all channels
+        n_ch = self.image_provider.num_channels
+        for ch in range(n_ch):
+            try:
+                stack = self.image_provider.get_stack(
+                    self.current_time, channel=ch
+                )
+            except (FileNotFoundError, IndexError) as e:
+                logger.warning("Could not load 3D stack ch%d: %s", ch, e)
+                self._3d_mode = False
+                return
 
-        if self._image_layer is not None:
-            self._image_layer.data = stack
-            self._image_layer.scale = (z_scale, 1.0, 1.0)
+            if ch < len(self._image_layers):
+                self._image_layers[ch].data = stack
+                self._image_layers[ch].scale = (z_scale, 1.0, 1.0)
 
-        # Hide 2D shapes overlay
-        if self._viewer_integration and self._viewer_integration._shapes_layer:
-            self._viewer_integration._shapes_layer.visible = False
-        if self._viewer_integration and self._viewer_integration._division_line_layer:
-            self._viewer_integration._division_line_layer.visible = False
+        # Hide 2D shapes overlay (incl. trails)
+        if self._viewer_integration:
+            if self._viewer_integration._shapes_layer:
+                self._viewer_integration._shapes_layer.visible = False
+            if self._viewer_integration._division_line_layer:
+                self._viewer_integration._division_line_layer.visible = False
+            if self._viewer_integration._trails_layer:
+                self._viewer_integration._trails_layer.visible = False
 
         # Build 3D Points layer for nuclei
         self._update_3d_points()
@@ -754,15 +904,26 @@ class AceTreeApp:
                 pass
             self._points_layer = None
 
-        # Restore 2D image layer
-        if self._image_layer is not None:
-            self._image_layer.scale = (1.0, 1.0)
+        # Remove 3D trail layer
+        if self._trail_points_layer is not None:
+            try:
+                self.viewer.layers.remove(self._trail_points_layer)
+            except ValueError:
+                pass
+            self._trail_points_layer = None
 
-        # Show 2D shapes overlay
-        if self._viewer_integration and self._viewer_integration._shapes_layer:
-            self._viewer_integration._shapes_layer.visible = True
-        if self._viewer_integration and self._viewer_integration._division_line_layer:
-            self._viewer_integration._division_line_layer.visible = True
+        # Restore 2D image layers
+        for layer in self._image_layers:
+            layer.scale = (1.0, 1.0)
+
+        # Show 2D shapes overlay (incl. trails)
+        if self._viewer_integration:
+            if self._viewer_integration._shapes_layer:
+                self._viewer_integration._shapes_layer.visible = True
+            if self._viewer_integration._division_line_layer:
+                self._viewer_integration._division_line_layer.visible = True
+            if self._viewer_integration._trails_layer:
+                self._viewer_integration._trails_layer.visible = True
 
         # Reload 2D plane
         self.update_display()
@@ -777,7 +938,6 @@ class AceTreeApp:
 
         coords = []
         sizes = []
-        colors = []
         names_list = []
 
         for nuc in nuclei:
@@ -786,15 +946,27 @@ class AceTreeApp:
             sizes.append(nuc.size)
             names_list.append(nuc.effective_name or f"Nuc{nuc.index}")
 
-            name = nuc.effective_name or ""
-            if name == self.current_cell_name and name:
-                colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
-            elif name.startswith("Nuc"):
-                colors.append([1.0, 0.6, 0.15, 0.8])  # Orange — unnamed (Nuc*)
-            elif name:
-                colors.append([0.55, 0.27, 1.0, 0.8])  # Purple — named
-            else:
-                colors.append([0.5, 0.5, 0.5, 0.5])  # Gray — no name at all
+        if self._viz_mode:
+            # Visualization mode — batch rule-engine colors
+            colors = [
+                list(c) for c in self.color_engine.colors_for_frame(
+                    nuclei, self.manager, self.current_time,
+                    selected_name=self.current_cell_name,
+                )
+            ]
+        else:
+            # Editing mode — status-based palette
+            colors = []
+            for nuc in nuclei:
+                name = nuc.effective_name or ""
+                if name == self.current_cell_name and name:
+                    colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
+                elif name.startswith("Nuc"):
+                    colors.append([1.0, 0.6, 0.15, 0.8])  # Orange — unnamed
+                elif name:
+                    colors.append([0.55, 0.27, 1.0, 0.8])  # Purple — named
+                else:
+                    colors.append([0.5, 0.5, 0.5, 0.5])  # Gray — no name
 
         if not coords:
             if self._points_layer is not None:
@@ -838,58 +1010,150 @@ class AceTreeApp:
             self._points_layer.face_color = colors_arr
             self._points_layer.features = {"name": display_names}
 
-    def _on_3d_click(self, layer, event) -> None:
-        """Handle click on 3D Points layer to select a cell.
+        # Ghost trail in 3D
+        self._update_3d_trail()
 
-        Supports relink pick mode and placement (track) mode in 3D — when
-        either is active, clicking a point fulfils the pick/place action
-        instead of doing a plain selection.
+    def _update_3d_trail(self) -> None:
+        """Update 3D ghost trail points for the selected cell's past positions."""
+        vi = self._viewer_integration
+        if self.viewer is None or vi is None or not vi.trails_visible:
+            if self._trail_points_layer is not None:
+                self._trail_points_layer.data = np.empty((0, 3))
+            return
+
+        cell_name = self.current_cell_name
+        if not cell_name:
+            if self._trail_points_layer is not None:
+                self._trail_points_layer.data = np.empty((0, 3))
+            return
+
+        cell = self.manager.get_cell(cell_name)
+        if cell is None:
+            if self._trail_points_layer is not None:
+                self._trail_points_layer.data = np.empty((0, 3))
+            return
+
+        trail_len = vi.trail_length
+        start = max(cell.start_time, self.current_time - trail_len)
+
+        coords = []
+        sizes = []
+        colors = []
+
+        for t in range(start, self.current_time):
+            nuc = cell.get_nucleus_at(t)
+            if nuc is None:
+                continue
+            age = self.current_time - t
+            alpha = max(0.15, 0.6 * (1.0 - age / (trail_len + 1)))
+            coords.append([nuc.z, nuc.y, nuc.x])
+            sizes.append(nuc.size * 0.6)  # slightly smaller than live nuclei
+            colors.append([0.3, 0.8, 1.0, alpha])
+
+        z_scale = self.manager.z_pix_res
+
+        if not coords:
+            if self._trail_points_layer is not None:
+                self._trail_points_layer.data = np.empty((0, 3))
+            return
+
+        coords_arr = np.array(coords)
+        sizes_arr = np.array(sizes)
+        colors_arr = np.array(colors)
+
+        if self._trail_points_layer is None:
+            self._trail_points_layer = self.viewer.add_points(
+                coords_arr,
+                size=sizes_arr,
+                face_color=colors_arr,
+                border_color="transparent",
+                name="Trail 3D",
+                scale=(z_scale, 1.0, 1.0),
+                opacity=0.5,
+            )
+        else:
+            self._trail_points_layer.data = coords_arr
+            self._trail_points_layer.size = sizes_arr
+            self._trail_points_layer.face_color = colors_arr
+
+    def _on_3d_click(self, layer, event):
+        """Handle click on 3D Points layer to select or label a cell.
+
+        Left-click:  Toggle the clicked cell's label on/off.
+        Right-click: Select the clicked cell and make it active (also shows label).
+
+        Also supports relink pick mode and placement (track) mode in 3D.
+
+        This is a generator callback (yields once) so that napari properly
+        finalises the drag/pan cycle after the click is handled.
         """
         if event.type != "mouse_press":
             return
 
-        # Get the index of the clicked point
-        idx = layer.get_value(event.position, world=True)
+        # ── 3D ray-based point picking ──
+        # The event carries view_direction and dims_displayed from the
+        # camera; passing them to get_value enables proper 3D ray casting
+        # instead of falling back to unreliable 2D projection.
+        view_direction = getattr(event, "view_direction", None)
+        dims_displayed = getattr(event, "dims_displayed", None)
+        idx = layer.get_value(
+            event.position,
+            view_direction=view_direction,
+            dims_displayed=dims_displayed,
+            world=True,
+        )
         nuc = None
         if idx is not None and isinstance(idx, (int, np.integer)):
             nuclei = self.manager.alive_nuclei_at(self.current_time)
             if 0 <= idx < len(nuclei):
                 nuc = nuclei[idx]
 
-        # --- Relink pick mode (right-click selects relink target) ---
+        # --- Relink pick mode (any click selects relink target) ---
         # Defer callback via QTimer so napari finalises the click event
         # before the modal confirmation dialog opens.
         if self._relink_pick_mode and self._relink_pick_callback is not None:
-            if event.button == 2 and nuc is not None:
+            if nuc is not None:
                 cb = self._relink_pick_callback
                 t = self.current_time
                 self.exit_relink_pick_mode()
                 from qtpy.QtCore import QTimer
                 QTimer.singleShot(0, lambda: cb(t, nuc))
-            return  # consume all clicks while in pick mode
+            yield  # release drag cycle
+            return
+
+        button = event.button  # 1 = left, 2 = right
 
         # --- Placement / track mode (right-click places a nucleus) ---
-        if self._placement_mode and event.button == 2:
-            # In 3D we can't get reliable (x,y) from event.position easily,
-            # so placement is only supported in 2D.  Just ignore.
-            pass
-
-        # --- Normal selection (right-click) ---
-        if event.button != 2:
+        # In 3D we cannot reliably determine the (x, y, z) data position
+        # from the click ray, so placement is only supported in 2D.
+        if self._placement_mode and button == 2:
+            yield
             return
-        if nuc is not None:
-            name = nuc.effective_name
-            if name:
-                self.current_cell_name = name
-                if self._viewer_integration:
+
+        if button == 2:
+            # --- Right-click: select cell and show its label ---
+            if nuc is not None:
+                name = nuc.effective_name
+                if name:
+                    self.current_cell_name = name
+                    if self._viewer_integration:
+                        self._viewer_integration._shown_labels.add(name)
+                    self._update_3d_points()
+                    for lw in self._lineage_widgets:
+                        lw.refresh_selection()
+                    if self._lineage_list:
+                        self._lineage_list.refresh_selection()
+        else:
+            # --- Left-click: toggle label for clicked cell ---
+            if nuc is not None and self._viewer_integration:
+                name = nuc.effective_name or f"Nuc{nuc.index}"
+                if name in self._viewer_integration._shown_labels:
+                    self._viewer_integration._shown_labels.discard(name)
+                else:
                     self._viewer_integration._shown_labels.add(name)
                 self._update_3d_points()
-                if self._cell_info_panel:
-                    self._cell_info_panel.refresh()
-                for lw in self._lineage_widgets:
-                    lw.refresh_selection()
-                if self._lineage_list:
-                    self._lineage_list.refresh_selection()
+
+        yield  # release drag cycle
 
     # ── Display ───────────────────────────────────────────────────
 
@@ -900,8 +1164,8 @@ class AceTreeApp:
         if self._viewer_integration and not self._3d_mode:
             self._viewer_integration.update_overlays()
 
-        if self._cell_info_panel:
-            self._cell_info_panel.refresh()
+        if self._contrast_tools:
+            self._contrast_tools.refresh()
 
         if self._player_controls:
             self._player_controls.refresh()
@@ -915,6 +1179,14 @@ class AceTreeApp:
         if self._lineage_list:
             self._lineage_list.refresh_selection()
 
+        # Refresh any detached 3D viewer windows
+        for win in self._3d_windows:
+            try:
+                if win.isVisible():
+                    win.refresh()
+            except RuntimeError:
+                pass  # window was deleted
+
     def _update_display_plane_only(self) -> None:
         """Refresh only z-plane-sensitive components (skip lineage tree).
 
@@ -927,9 +1199,6 @@ class AceTreeApp:
 
         if self._viewer_integration:
             self._viewer_integration.update_overlays()
-
-        if self._cell_info_panel:
-            self._cell_info_panel.refresh()
 
         if self._player_controls:
             self._player_controls.refresh()
@@ -1004,32 +1273,51 @@ class AceTreeApp:
                 "selected_idx": -1,
             }
 
+        # Pre-compute visualization-mode colors for the whole frame
+        # (batched for efficiency; skipped in editing mode).
+        if self._viz_mode:
+            viz_colors = self.color_engine.colors_for_frame(
+                nuclei, self.manager, self.current_time,
+                selected_name=self.current_cell_name,
+            )
+
         centers = []
         radii = []
         colors = []
         names = []
         selected_idx = -1
+        viz_idx = 0  # tracks position in the unfiltered nuclei list
 
         for nuc in nuclei:
             diam = self.manager.nucleus_diameter(nuc, self.current_plane)
             if diam <= 0:
+                viz_idx += 1
                 continue
 
             centers.append([nuc.y, nuc.x])  # napari uses (row, col) = (y, x)
             radii.append(diam / 2.0)
-            names.append(nuc.effective_name or f"Nuc{nuc.index}")
+            ename = nuc.effective_name or f"Nuc{nuc.index}"
+            names.append(ename)
 
-            # Color: selected=white, named=purple, Nuc*=orange, none=gray
-            ename = nuc.effective_name or ""
-            if ename == self.current_cell_name and ename:
-                selected_idx = len(centers) - 1
-                colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
-            elif ename.startswith("Nuc"):
-                colors.append([1.0, 0.6, 0.15, 0.8])  # Orange — unnamed
-            elif ename:
-                colors.append([0.55, 0.27, 1.0, 0.8])  # Purple — named
+            if self._viz_mode:
+                # Visualization mode — rule-engine colors
+                r, g, b, a = viz_colors[viz_idx]
+                colors.append([r, g, b, a])
+                if ename == self.current_cell_name and ename:
+                    selected_idx = len(centers) - 1
             else:
-                colors.append([0.5, 0.5, 0.5, 0.5])  # Gray — no name
+                # Editing mode — status-based palette
+                if ename == self.current_cell_name and ename:
+                    selected_idx = len(centers) - 1
+                    colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
+                elif ename.startswith("Nuc"):
+                    colors.append([1.0, 0.6, 0.15, 0.8])  # Orange — unnamed
+                elif ename:
+                    colors.append([0.55, 0.27, 1.0, 0.8])  # Purple — named
+                else:
+                    colors.append([0.5, 0.5, 0.5, 0.5])  # Gray — no name
+
+            viz_idx += 1
 
         return {
             "centers": np.array(centers) if centers else np.empty((0, 2)),
@@ -1042,38 +1330,60 @@ class AceTreeApp:
     # ── Internal methods ──────────────────────────────────────────
 
     def _load_image(self) -> None:
-        """Load the current image plane (or stack in 3D mode) into the viewer."""
+        """Load the current image plane (or stack in 3D mode) into the viewer.
+
+        Creates one napari Image layer per channel.  For single-channel
+        data a gray colormap is used; for multi-channel, green/magenta
+        (standard fluorescence convention).
+        """
         if self.viewer is None or self.image_provider is None:
             return
 
+        n_ch = self.image_provider.num_channels
+
         if self._3d_mode:
-            # In 3D mode, load full stack and update points
-            try:
-                stack = self.image_provider.get_stack(self.current_time)
-            except (FileNotFoundError, IndexError) as e:
-                logger.warning("Could not load 3D stack: %s", e)
-                return
-            if self._image_layer is not None:
-                self._image_layer.data = stack
+            for ch in range(n_ch):
+                try:
+                    stack = self.image_provider.get_stack(
+                        self.current_time, channel=ch
+                    )
+                except (FileNotFoundError, IndexError) as e:
+                    logger.warning("Could not load 3D stack ch%d: %s", ch, e)
+                    continue
+                if ch < len(self._image_layers):
+                    self._image_layers[ch].data = stack
+                else:
+                    cmap = "gray" if n_ch == 1 else self._channel_colormaps[ch % len(self._channel_colormaps)]
+                    layer = self.viewer.add_image(
+                        stack,
+                        name=f"Ch{ch + 1}" if n_ch > 1 else "Image",
+                        colormap=cmap,
+                        blending="additive" if n_ch > 1 else "translucent",
+                    )
+                    self._image_layers.append(layer)
             self._update_3d_points()
             return
 
-        try:
-            plane_data = self.image_provider.get_plane(
-                self.current_time, self.current_plane
-            )
-        except (FileNotFoundError, IndexError) as e:
-            logger.warning("Could not load image: %s", e)
-            return
+        for ch in range(n_ch):
+            try:
+                plane_data = self.image_provider.get_plane(
+                    self.current_time, self.current_plane, channel=ch
+                )
+            except (FileNotFoundError, IndexError) as e:
+                logger.warning("Could not load image ch%d: %s", ch, e)
+                continue
 
-        if self._image_layer is None:
-            self._image_layer = self.viewer.add_image(
-                plane_data,
-                name="Image",
-                colormap="gray",
-            )
-        else:
-            self._image_layer.data = plane_data
+            if ch < len(self._image_layers):
+                self._image_layers[ch].data = plane_data
+            else:
+                cmap = "gray" if n_ch == 1 else self._channel_colormaps[ch % len(self._channel_colormaps)]
+                layer = self.viewer.add_image(
+                    plane_data,
+                    name=f"Ch{ch + 1}" if n_ch > 1 else "Image",
+                    colormap=cmap,
+                    blending="additive" if n_ch > 1 else "translucent",
+                )
+                self._image_layers.append(layer)
 
     def _track_cell_at_time(self) -> None:
         """Update current_plane to follow the tracked cell's z position."""

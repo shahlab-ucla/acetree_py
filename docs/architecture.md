@@ -46,10 +46,12 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     lineage_widget.py          # LineageWidget (Sulston tree)
     lineage_layout.py          # Layout engine (pure computation)
     lineage_list.py            # LineageListWidget (hierarchical list)
-    player_controls.py         # PlayerControls (time/plane navigation)
-    cell_info_panel.py         # CellInfoPanel (info display)
-    contrast_tools.py          # ContrastTools (brightness/contrast)
+    player_controls.py         # PlayerControls (time/plane/labels/3D)
+    cell_info_panel.py         # CellInfoPanel (hover tooltip builder)
+    contrast_tools.py          # ContrastTools (per-channel contrast)
+    color_rules.py             # ColorRuleEngine, ColorRule, presets
     edit_panel.py              # EditPanel + dialog classes
+    viewer_3d_window.py        # Viewer3DWindow (detached 3D viewer)
     dataset_dialog.py          # DatasetCreationDialog (4-page wizard)
   analysis/                    # Post-hoc analysis — no GUI dependencies
     expression.py              # Expression time series analysis
@@ -333,32 +335,43 @@ Pre-edit validation returns `list[str]` error messages (empty = valid). Checks i
 
 Main coordinator. Owns the napari `Viewer`, `NucleiManager`, `EditHistory`, and all dock widgets.
 
+**Multi-channel display:** The app creates one napari Image layer per channel. Single-channel data uses a gray colormap; multi-channel (e.g. split-channel dual-color) uses green/magenta with additive blending. Channel visibility and per-channel contrast are controlled by `ContrastTools`.
+
+**Visualization mode:** The app supports two color modes for nucleus display, toggled via the Edit Panel:
+- **Editing mode** (default): hardcoded status palette — white=selected, purple=named, orange=unnamed, gray=none.
+- **Visualization mode**: rule-based coloring via `ColorRuleEngine`. Presets include lineage-depth (rainbow) and expression (viridis colormap). Users can define custom rules.
+
+**Z-plane deselect:** Manually changing z-plane deselects the active cell (the user is exploring, not tracking). Time navigation continues to follow the tracked cell's centroid.
+
 **Widget layout:**
 ```
 ┌──────────────────────────────────────────────┐
 │  napari Viewer (image + nucleus overlay)      │
 ├──────────┬───────────────────┬───────────────┤
-│ Cell Info│                   │ Contrast      │
-│ Panel    │                   │ Tools         │
-│          │                   ├───────────────┤
-│ Lineage  │                   │ Edit          │
-│ List     │                   │ Panel         │
+│ Contrast │                   │ Edit          │
+│ (per-ch) │                   │ Tools         │
+│          │                   │               │
+│ Lineage  │                   │               │
+│ List     │                   │               │
 ├──────────┴───────────────────┴───────────────┤
-│ Player Controls (time/plane navigation)       │
+│ Player Controls (time/plane/labels/deselect/3D)│
 │ Lineage Tree (Sulston tree visualization)     │
 └──────────────────────────────────────────────┘
 ```
+
+Napari's default layer list and layer controls panels are hidden on startup to save screen space. They remain accessible via napari's Window menu.
 
 **Keyboard shortcuts:**
 | Key            | Action                   |
 |----------------|--------------------------|
 | `Right`/`Left` | Next/previous timepoint  |
-| `Up`/`Down`    | Next/previous z-plane    |
+| `Up`/`Down`    | Next/previous z-plane (deselects active cell) |
 | `Ctrl+S`       | Save                     |
 | `Ctrl+Shift+S` | Save As                  |
 | `Ctrl+Z`       | Undo                     |
 | `Ctrl+Y`       | Redo                     |
 | `Delete`       | Remove nucleus at current timepoint |
+| `Escape`       | Exit active mode (Add, Track, Relink pick) |
 
 ### 6.2 ViewerIntegration (`gui/viewer_integration.py`)
 
@@ -372,6 +385,10 @@ Draws nucleus circles as a napari Shapes layer (polygon approximation with 32 ve
 - **Left-click** on nucleus: toggle label visibility on/off — requires click within the drawn circle
 
 **Division line overlay:** When the selected cell has just divided (current_time == cell.end_time + 1), a yellow line connects the two daughter cell positions. Disappears on any navigation or selection change.
+
+**Ghost trail layer:** When enabled (via the Trails button in Edit Tools), a semi-transparent trail of the selected cell's past positions is drawn as shapes connected by lines. Trail length is configurable (default 10 timepoints). Works in both 2D (shapes) and 3D (points).
+
+**Hover tooltip:** A floating tooltip appears when hovering over a nucleus, showing the cell name and basic info. Uses a delay (`_hover_delay_ms = 300ms`) to avoid flicker.
 
 ### 6.3 LineageWidget (`gui/lineage_widget.py`)
 
@@ -410,10 +427,12 @@ Pure computational layout engine (no Qt dependency):
 | Widget             | Purpose                                      |
 |--------------------|----------------------------------------------|
 | `LineageListWidget` | Hierarchical QTreeWidget with search/filter  |
-| `PlayerControls`    | Time/plane navigation, play/pause animation  |
-| `CellInfoPanel`     | Read-only cell details display               |
-| `ContrastTools`     | Min/max contrast sliders with auto-contrast  |
-| `EditPanel`         | Edit buttons, D-pad move, relink, add/track modes |
+| `PlayerControls`    | Time/plane navigation, play/pause, labels toggle, deselect, 3D mode, 3D window |
+| `CellInfoPanel`     | Cell info builder (used by hover tooltip)    |
+| `ContrastTools`     | Per-channel contrast sliders with visibility toggles, auto-contrast |
+| `EditPanel`         | Color mode toggle, edit buttons, D-pad move (popup), relink, add/track, trails, screenshot/record, edit history (popup) |
+| `ColorRulesDialog`  | Rule list editor popup: add/edit/delete/reorder rules, "All other cells" default color, apply to engine |
+| `_RuleEditorDialog` | Single rule editor: criterion, pattern, color mode, color picker, colormap settings, match mode help |
 
 ### 6.6 Interactive Modes
 
@@ -435,16 +454,49 @@ Pure computational layout engine (no Qt dependency):
 
 All modes are mutually exclusive and can be cancelled with **Escape**.
 
-### 6.7 3D Volume View
+### 6.7 Color Rule Engine (`gui/color_rules.py`)
+
+Provides a flexible, rule-based system for assigning colors to nuclei in visualization mode. Rules are evaluated in priority order; the first matching rule wins. Unmatched nuclei fall through to a configurable default color (white semi-transparent by default).
+
+**`RuleCriterion` enum:** `ALL`, `NAME_EXACT`, `NAME_PATTERN` (glob), `NAME_REGEX`, `LINEAGE_DEPTH` (range), `FATE`, `EXPRESSION` (rweight range).
+
+**`ColorMode` enum:** `SOLID` (fixed RGBA), `COLORMAP` (map a numeric value through a matplotlib colormap).
+
+**`ColorRule` dataclass:** name, criterion, pattern, color_mode, color, colormap, vmin, vmax, priority, enabled.
+
+**`ColorRuleEngine`:**
+- `set_rules(rules)` — sort by descending priority
+- `load_preset(preset)` — load built-in rule sets
+- `color_for_nucleus(nuc, manager, time)` — evaluate rules, return RGBA
+- `colors_for_frame(nuclei, manager, time)` — batch evaluation with per-frame cell cache
+
+**Built-in presets:** `PRESET_LINEAGE_DEPTH` (rainbow by depth 0–10), `PRESET_EXPRESSION` (viridis colormap by rweight).
+
+### 6.8 3D Volume View
 
 Toggled via the **3D** button in player controls. Switches napari to `ndisplay=3` and creates a `Points` layer with:
 - Sphere size proportional to nucleus diameter.
 - Anisotropic z-scaling via `scale=(z_pix_res, 1.0, 1.0)`.
-- Color coding: white=selected, purple=named, orange=unnamed (Nuc*), gray=no name.
+- In editing mode: white=selected, purple=named, orange=unnamed (Nuc\*), gray=no name.
+- In visualization mode: colors from the active `ColorRuleEngine` rules.
 
-Click-to-select works in 3D mode. Text labels are a known napari/vispy limitation in 3D but display when a cell is selected from the lineage list.
+All channels are loaded as 3D stacks when entering 3D mode. Click-to-select and relink pick mode work in 3D.
 
-### 6.8 Dataset Creation
+### 6.9 Detached 3D Viewer (`gui/viewer_3d_window.py`)
+
+A standalone `QWidget` window containing an embedded napari viewer, always in 3D mode with visualization-mode coloring. Launched via the **3D Window** button in player controls.
+
+**Features:**
+- **Time sync:** Time slider/spinner with a Sync toggle. When Sync is on, the window follows the main viewer's timepoint. When off, it navigates independently.
+- **Color preset selector:** Dropdown for switching visualization presets (lineage depth, expression).
+- **Per-channel contrast:** Same controls as main viewer — visibility checkboxes, min/max sliders, auto/reset per channel.
+- **Label controls:** Left-click on a 3D sphere toggles its label. "Labels: ON/OFF" button for global toggle. "Clear Labels" to remove all.
+- **Ghost trails:** Mirrors the main viewer's trail visibility settings.
+- **Multi-channel:** Loads all image channels with green/magenta colormaps.
+
+Multiple 3D windows can be open simultaneously. Each is tracked in `app._3d_windows` and refreshed by `update_display()`.
+
+### 6.10 Dataset Creation
 
 `AceTreeApp.from_new_dataset(config, num_timepoints, output_dir)` creates an app with an empty `NucleiManager` for manual annotation. `AceTreeApp.from_dialog()` shows the `DatasetCreationDialog` wizard first.
 
@@ -488,7 +540,7 @@ acetree-py info <config.xml> -c ABala           # Query cell details
 
 ## 9. Testing
 
-25 test files in `tests/` covering all modules: data model, I/O, naming, editing, GUI, CLI, analysis, and integration tests. Run with `pytest tests/`.
+26 test files in `tests/` covering all modules: data model, I/O, naming, editing, GUI widgets, color rules, CLI, analysis, and integration tests. Run with `pytest tests/`.
 
 ---
 

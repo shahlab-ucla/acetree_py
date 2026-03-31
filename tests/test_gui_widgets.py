@@ -264,6 +264,22 @@ class TestCellInfoPanel:
 # ── ContrastTools widget tests ────────────────────────────────────
 
 
+class _FakeLayer:
+    """Minimal stand-in for a napari Image layer."""
+
+    def __init__(self):
+        self.data = np.random.randint(100, 5000, (30, 64, 64), dtype=np.uint16)
+        self.contrast_limits = (0, 65535)
+        self.visible = True
+
+
+def _make_app_with_fake_layer():
+    """Create app + inject a fake image layer so contrast tools can build."""
+    app = _make_app_with_images()
+    app._image_layers = [_FakeLayer()]
+    return app
+
+
 class TestContrastTools:
     def test_instantiation(self, qtbot):
         app = _make_app_with_images()
@@ -273,50 +289,58 @@ class TestContrastTools:
         assert widget.isVisible()
 
     def test_slider_range(self, qtbot):
-        app = _make_app_with_images()
+        app = _make_app_with_fake_layer()
         widget = ContrastTools(app)
         qtbot.addWidget(widget)
+        widget.refresh()  # build channel controls
 
-        assert widget._min_slider.minimum() == 0
-        assert widget._max_slider.maximum() == 65535
+        ctrl = widget._channel_ctrls[0]
+        assert ctrl.min_slider.minimum() == 0
+        assert ctrl.max_slider.maximum() == 65535
 
     def test_min_slider_syncs_spinbox(self, qtbot):
-        app = _make_app_with_images()
+        app = _make_app_with_fake_layer()
         widget = ContrastTools(app)
         qtbot.addWidget(widget)
+        widget.refresh()
 
-        widget._min_slider.setValue(500)
-        assert widget._min_spin.value() == 500
+        ctrl = widget._channel_ctrls[0]
+        ctrl.min_slider.setValue(500)
+        assert ctrl.min_spin.value() == 500
 
     def test_max_slider_syncs_spinbox(self, qtbot):
-        app = _make_app_with_images()
+        app = _make_app_with_fake_layer()
         widget = ContrastTools(app)
         qtbot.addWidget(widget)
+        widget.refresh()
 
-        widget._max_slider.setValue(30000)
-        assert widget._max_spin.value() == 30000
+        ctrl = widget._channel_ctrls[0]
+        ctrl.max_slider.setValue(30000)
+        assert ctrl.max_spin.value() == 30000
 
     def test_reset_contrast(self, qtbot):
+        app = _make_app_with_fake_layer()
+        widget = ContrastTools(app)
+        qtbot.addWidget(widget)
+        widget.refresh()
+
+        ctrl = widget._channel_ctrls[0]
+        ctrl.min_slider.setValue(1000)
+        ctrl.max_slider.setValue(5000)
+        widget._reset_all()
+        assert ctrl.min_slider.value() == 0
+        assert ctrl.max_slider.value() == 65535
+
+    def test_auto_contrast_no_layers(self, qtbot):
+        """Auto contrast with no image layers should not crash."""
         app = _make_app_with_images()
         widget = ContrastTools(app)
         qtbot.addWidget(widget)
+        widget.refresh()
 
-        widget._min_slider.setValue(1000)
-        widget._max_slider.setValue(5000)
-        widget._reset_contrast()
-        assert widget._min_slider.value() == 0
-        assert widget._max_slider.value() == 65535
-
-    def test_auto_contrast_with_image(self, qtbot):
-        """Auto contrast needs an image layer — test without napari viewer."""
-        app = _make_app_with_images()
-        widget = ContrastTools(app)
-        qtbot.addWidget(widget)
-
-        # No image layer set, so auto should not crash
-        widget._auto_contrast()
-        # Should still be at defaults (no crash)
-        assert widget._min_slider.value() >= 0
+        # No layers, so auto_all should be a no-op
+        widget._auto_all()
+        assert len(widget._channel_ctrls) == 0
 
 
 # ── LineageWidget tests ───────────────────────────────────────────

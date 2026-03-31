@@ -2,7 +2,7 @@
 
 Python reimplementation of [AceTree](https://github.com/zhirongbaolab/AceTree) for *C. elegans* embryogenesis visualization and lineage annotation.
 
-Built on [napari](https://napari.org) with full undo/redo, topology-based cell naming, interactive relink, 3D volume view, manual tracking, and multi-panel lineage tree display.
+Built on [napari](https://napari.org) with full undo/redo, topology-based cell naming, interactive relink, 3D volume view, multi-channel display, rule-based visualization, manual tracking, and multi-panel lineage tree display.
 
 ## Installation
 
@@ -88,13 +88,17 @@ acetree-py info config.xml --cell ABala
 
 ## Features
 
-- **Napari-based viewer** with nucleus overlay, z-plane navigation, and cell tracking
-- **3D volume view** — toggle between 2D slice and 3D rendering with color-coded nucleus spheres
+- **Napari-based viewer** with nucleus overlay, z-plane navigation, cell tracking, and hover tooltips
+- **Multi-channel display** — per-channel contrast sliders, visibility toggles, green/magenta colormaps for dual-channel data
+- **Rule-based visualization** — color nuclei by lineage depth, expression level, cell fate, name pattern, or custom rules with a full GUI rule editor
+- **3D volume view** — toggle 2D/3D in the main viewer, or open a detached 3D window with independent visualization controls
+- **Ghost trails** — visualize selected cell's movement history as a semi-transparent trail
 - **Manual tracking** — click-to-add nuclei, D-pad nudge controls, create datasets from raw images
 - **Topology-based naming** — automatic Sulston name assignment from lineage structure, with rotation-invariant axis estimation robust to embryo rotations during imaging
 - **Interactive relink** — click-based predecessor editing with automatic interpolation
 - **Full undo/redo** — up to 1000 edit commands with `Ctrl+Z` / `Ctrl+Y`
 - **Multi-panel lineage trees** — open multiple Sulston tree views with independent root cells, time ranges, expression ranges, and colormaps
+- **Screenshot and recording** — capture single frames or export image sequences across timepoints
 - **Save/Save As** — persist edits to ZIP files compatible with Java AceTree
 - **Export** — cell tables, nucleus tables, expression time series, Newick trees
 
