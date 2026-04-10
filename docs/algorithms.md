@@ -56,14 +56,23 @@ Input: nuclei_record[t][i] for all timepoints t, nucleus index i
 Step 1:  Clear non-forced names
          ∀ nuc: if assigned_id = "": identity ← ""
 
+Step 1b: Propagate forced names (assigned_id) through continuation chains
+         For each nucleus with assigned_id set:
+           Forward: follow successor1 chain (non-dividing only),
+                    set assigned_id + identity on each continuation cell
+           Backward: follow predecessor chain (stop at division boundaries),
+                     set assigned_id + identity back to cell's birth
+
 Step 2:  Build CanonicalTransform (if AuxInfo v2)
 
 Step 3:  Topology-based founder identification
          → FounderAssignment with ABa, ABp, EMS, P2 indices + confidence
 
-Step 4:  If Step 3 fails (confidence < 0.3): legacy InitialID fallback
+Step 4:  If Step 3 fails (confidence < 0.3): warn and assign generic names
+         (legacy InitialID fallback available via legacy_mode=True)
 
 Step 5:  Set up DivisionCaller with coordinate axes
+         Compute seed axes (AP, LR) at 4-cell midpoint for sign anchoring
 
 Step 6:  Forward pass — apply canonical rules:
          for t = four_cell_time to ending_index:
@@ -82,7 +91,15 @@ Step 7:  Assign generic names to remaining unnamed nuclei
 
 ### 2.2 Pre-assigned Name Handling
 
-If a nucleus has `assigned_id` set (manual override), its identity is forced. When both daughters of a division have pre-assigned names, the automatic classification is skipped. If only one daughter has a pre-assigned name, the other receives the complement name.
+If a nucleus has `assigned_id` set (manual override via Rename), the forced name is **propagated through the cell's entire lifetime** before canonical rules run:
+
+1. **Forward propagation**: The forced name follows the `successor1` chain (non-dividing continuations) to all future timepoints where the cell exists, stopping at divisions.
+2. **Backward propagation**: The forced name follows the `predecessor` chain back to the cell's birth (the timepoint where the predecessor divided to create this cell).
+3. **Division boundary**: Propagation does not cross division boundaries. When the forced-name cell eventually divides, its name is used as the parent name for the division caller, which applies the standard Sulston rules to name the daughters.
+
+If a different `assigned_id` already exists on a nucleus in the chain, propagation stops (the existing override takes precedence).
+
+When both daughters of a division have pre-assigned names, the automatic classification is skipped. If only one daughter has a pre-assigned name, the other receives the complement name.
 
 If automatic naming would produce a name collision with an existing `assigned_id`, the automatic name gets an `"X"` suffix appended.
 
@@ -134,14 +151,20 @@ $$\text{AB pair} = \begin{cases} \text{pair}_A & \text{if } t_A \leq t_B \\ \tex
 
 ### 3.4 Within-Pair Assignment
 
-**P1 pair (EMS vs P2):** EMS is typically larger than P2.
+**P1 pair (EMS vs P2):** Two signals are used, with forward division timing as the primary discriminator:
 
-$$\text{EMS} = \arg\max_{n \in \text{P1 pair}} n.\text{size}$$
+1. **Primary — forward division timing:** EMS divides before P2 at the 8→16 cell transition. Both cells are traced forward through their successor chains until they divide. If one divides at least 1 frame before the other, that cell is EMS.
 
-**AB pair (ABa vs ABp):** Determined by projection onto the AP axis vector. The AP direction is estimated from the centroid of the AB pair toward the P1 pair (specifically, AB centroid − P2 position). ABa is the daughter with the larger projection onto this AP vector (more anterior):
+2. **Secondary — nucleus size:** EMS is typically larger than P2. Used when forward timing is unavailable or simultaneous.
+
+$$\text{EMS} = \begin{cases} \text{earlier divider} & \text{if forward timing gap} \geq 1 \\ \arg\max_{n \in \text{P1 pair}} n.\text{size} & \text{otherwise} \end{cases}$$
+
+**AB pair (ABa vs ABp):** Determined by projection onto the AP axis vector, averaged over the 4-cell stage window for robustness. The AP direction is estimated from the centroid of the AB pair toward P2. ABa is the daughter with the larger projection onto this AP vector (more anterior):
 
 $$\vec{u}_\text{AP} = \frac{\vec{c}_\text{AB} - \vec{r}_{P2}}{\|\vec{c}_\text{AB} - \vec{r}_{P2}\|}$$
-$$\text{ABa} = \arg\max_{n \in \text{AB pair}} (\vec{r}_n \cdot \vec{u}_\text{AP})$$
+$$\text{ABa} = \arg\max_{n \in \text{AB pair}} \left(\frac{1}{T}\sum_{t} \vec{r}_n(t) \cdot \vec{u}_\text{AP}(t)\right)$$
+
+where the average is taken over all timepoints in the 4-cell window. If no 2-cell stage is present (AP axis degenerate), PC1 of the 4-cell point cloud is used as the embryo long axis — ABa is closer to one end.
 
 This projection-based method is robust regardless of embryo orientation in the image frame, unlike the legacy approach which used raw image-X coordinates.
 
@@ -259,6 +282,25 @@ $$\vec{u}_\text{LR}(t) = \frac{\vec{s}_\perp(t)}{\|\vec{s}_\perp(t)\|}$$
 4. **DV axis** (completes right-handed frame):
 $$\vec{u}_\text{DV}(t) = \vec{u}_\text{AP}(t) \times \vec{u}_\text{LR}(t)$$
 
+**LR quality metric:**
+
+The LR axis can become geometrically degenerate during division transitions when ABa and ABp descendants become nearly collinear with AP. The quality metric quantifies this:
+
+$$q_\text{LR}(t) = \frac{\|\vec{s}_\perp(t)\|}{\|\vec{s}(t)\|}$$
+
+where $\|\vec{s}(t)\|$ is the total ABa-ABp centroid separation and $\|\vec{s}_\perp(t)\|$ is the perpendicular component. When $q_\text{LR} < 0.15$, the LR axis is unreliable (less than 15% of the separation is perpendicular to AP).
+
+`compute_local_axes()` returns `(ap_vec, lr_vec, dv_vec, lr_quality)`.
+
+**Quality-aware sign correction:**
+
+LR axis direction is inherently ambiguous (ABa could be on either side). Sign continuity is maintained by comparing against recent cached axes, with quality-dependent behavior:
+
+- **High quality** ($q_\text{LR} \geq 0.15$): Only correct sign against nearby cached timepoints (gap $\leq 3$ frames). Store in the LR history buffer for smoothing.
+- **Low quality** ($q_\text{LR} < 0.15$): Use temporal smoothing — an exponentially-weighted average of recent high-quality LR vectors (half-life 10 timepoints). Fall back to sign correction against any cached timepoint if smoothing is unavailable.
+
+This prevents noise from degenerate frames (where perpendicular LR component drops to 0.8–4.7 pixels) from corrupting the axis estimate.
+
 **Division vector projection:**
 
 Given a raw division vector $\vec{d}$ at timepoint $t$, project onto the local axes:
@@ -340,7 +382,7 @@ Constants: `HIGH_CONFIDENCE_ANGLE = 20°`, `LOW_CONFIDENCE_ANGLE = 40°`, `RULE_
 
 ### 5.3 Multi-Frame Averaging
 
-For improved robustness, division vectors can be averaged over $N$ frames after division (default $N = 3$):
+For improved robustness in v1/v2 modes, division vectors can be averaged over $N$ frames after division (default $N = 3$):
 
 1. For each frame $t_\text{div} + k$ ($k = 0, \ldots, N-1$):
 $$\vec{\delta}_k = T\left(\frac{D_2^{(k)} - D_1^{(k)}}{\|D_2^{(k)} - D_1^{(k)}\|}\right)$$
@@ -352,6 +394,27 @@ $$\vec{\delta}_\text{avg} = \frac{1}{n} \sum_k \hat{\delta}_k$$
 3. Consistency metric: $\|\vec{\delta}_\text{avg}\|$ (1.0 = all frames agree, 0.0 = random).
 
 The averaged vector is then used in the standard classification algorithm (Section 5.1).
+
+**Note:** Multi-frame averaging is **disabled in lineage centroid mode**. With per-timepoint axes that may differ between frames, averaging the division vector across frames mixes coordinate systems (each frame's vector is projected through different axes). Single-frame classification with quality-aware axis smoothing (Section 4.4) gives better results empirically.
+
+### 5.4 Deferred Majority-Vote Evaluation
+
+When the initial single-frame classification has low confidence ($C < 0.3$, corresponding to $\theta > 55°$), the result may be unreliable — particularly during LR axis degeneracy. Rather than committing to a potentially wrong assignment, the system defers and re-evaluates using a look-ahead window.
+
+**Algorithm:**
+
+1. Follow both daughters forward through their successor chains for up to 8 frames.
+2. At each look-ahead frame $t_\text{div} + k$, re-classify the division using the daughter positions at that frame and the axes at that frame.
+3. Each frame casts a vote for the positive or negative assignment. Track the best individual confidence seen.
+4. After all frames, the majority vote determines the assignment:
+
+$$\text{margin} = \frac{|V_+ - V_-|}{V_+ + V_-}$$
+
+$$C_\text{vote} = \max(C_\text{best},\ \text{margin})$$
+
+5. The deferred result replaces the initial classification if $C_\text{vote} \geq C_\text{initial}$.
+
+This mechanism is especially effective when the axes at the moment of division are degenerate (low LR quality) but recover within a few frames as cells separate.
 
 ---
 
@@ -435,9 +498,11 @@ After every `do`/`undo`/`redo`, the `on_edit` callback is invoked. In the GUI, t
 
 ### 8.4 RenameCell
 
-**Execute:** Save `(identity_0, assigned_id_0)`. Set both to `new_name`.
+**Execute:** Save `(identity_0, assigned_id_0)`. Set both to `new_name` at the specified timepoint.
 
 **Undo:** Restore both.
+
+**Note:** The `RenameCell` command sets `assigned_id` at a single timepoint. The naming pipeline (`_propagate_assigned_ids()`) then extends this forced name to the cell's entire lifetime via continuation chains when identities are reassigned (see Section 2.2).
 
 ### 8.5 RelinkNucleus
 

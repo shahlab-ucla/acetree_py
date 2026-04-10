@@ -263,7 +263,7 @@ Each button press executes immediately and is individually undoable with `Ctrl+Z
 ### 6.4 Cell Operations
 
 #### Rename
-Select a cell, then click **Rename**. Enter a new name. This sets the `assigned_id` field, which is a manual override that persists through automatic re-naming.
+Select a cell, then click **Rename**. Enter a new name. This sets the `assigned_id` field, which is a manual override that persists through automatic re-naming. The forced name is automatically propagated to all timepoints the cell exists (both forward and backward through continuation links). When the cell divides, the forced name is used as the parent name for Sulston daughter naming rules.
 
 #### Kill
 Select a cell, then click **Kill**. Choose a time range. All nuclei of that cell within the range are marked dead.
@@ -447,7 +447,11 @@ Cells that can't be automatically named receive placeholder names like `Nuc042_1
 
 ### 10.3 Manual Overrides
 
-When you **Rename** a cell (Section 6.3), the name is stored as a permanent override (`assigned_id`). This name survives automatic re-naming — even if you save and reload the dataset, the override persists.
+When you **Rename** a cell (Section 6.4), the name is stored as a permanent override (`assigned_id`). This name survives automatic re-naming — even if you save and reload the dataset, the override persists.
+
+**Automatic propagation:** When the naming pipeline runs (on load or after edits), the forced name is automatically propagated to every timepoint the cell exists — both forward through continuation links and backward to the cell's birth. This means you only need to rename the cell at one timepoint; the override covers its entire lifetime.
+
+**Division naming:** When a renamed cell divides, the forced name is used as the parent name for determining daughter names via the standard Sulston rules. For example, if you rename a cell to "ABal", its daughters will be named according to the division rule for "ABal" (e.g., "ABala" and "ABalp").
 
 ---
 

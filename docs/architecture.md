@@ -27,7 +27,7 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     canonical_transform.py     # Rotation to canonical frame (Wahba solver)
     rules.py                   # Rule, RuleManager (naming rules)
     sulston_names.py           # Sulston conventions + letter maps
-    lineage_axes.py            # Per-timepoint body axis estimation from lineage centroids
+    lineage_axes.py            # Per-timepoint body axis estimation from lineage centroids + LR quality metric
     validation.py              # Post-naming validation
   editing/                     # Command-pattern edit system — no GUI deps
     commands.py                # EditCommand ABC + 8 concrete commands
@@ -240,13 +240,14 @@ Embryo orientation metadata.
 
 `IdentityAssigner.assign_identities()`:
 
-1. Clear non-forced names.
-2. Build `CanonicalTransform` (if v2 AuxInfo available).
-3. **Try topology-based identification** (`identify_founders()`).
-4. If topology fails, **fall back to legacy** diamond-pattern identification.
-5. Set up `DivisionCaller` using derived or provided axes.
-6. **Forward pass**: apply canonical rules from 4-cell stage onward.
-7. Assign generic `Nuc_t_z_x_y` names to remaining unnamed cells.
+1. Clear non-forced names (cells with `assigned_id` are preserved).
+2. **Propagate forced names** (`_propagate_assigned_ids()`): extend each `assigned_id` forward through `successor1` chains and backward through `predecessor` chains, covering the cell's entire lifetime. Stops at division boundaries.
+3. Build `CanonicalTransform` (if v2 AuxInfo available, used for cross-validation only).
+4. **Topology-based identification** (`identify_founders()`).
+5. If topology fails (confidence < 0.3): warn and assign generic names. Legacy diamond-pattern identification available via `legacy_mode=True`.
+6. Set up `DivisionCaller` with per-timepoint lineage centroid axes and seed axes from 4-cell midpoint.
+7. **Forward pass**: apply canonical rules from 4-cell stage onward (single-frame classification with quality-aware axis smoothing; multi-frame averaging disabled in lineage mode).
+8. Assign generic `Nuc_t_z_x_y` names to remaining unnamed cells.
 
 ### 4.2 Founder ID (`naming/founder_id.py`)
 
@@ -258,9 +259,12 @@ Topology-based identification of ABa, ABp, EMS, P2 at the 4-cell stage:
    - Birth time grouping: cells born at the same time are sisters.
    - **Forward division pairing**: cells that next divide at similar times are sisters (for datasets starting at the 4-cell stage with no predecessor data).
 3. **AB vs P1 pair**: the pair that divides first are AB daughters; the pair that divides second are P1 daughters. This is a biological invariant of *C. elegans*.
-4. **Within-pair assignment**: EMS is larger than P2 (size ratio); ABa/ABp determined by projection onto the AP axis vector (more anterior = ABa).
+4. **Within-pair assignment**:
+   - **EMS vs P2**: Primary signal is forward division timing (EMS divides before P2); secondary signal is nucleus size (EMS is typically larger).
+   - **ABa vs ABp**: Projection onto the AP axis vector, averaged over the 4-cell window for robustness (more anterior = ABa). Falls back to PC1 of 4-cell point cloud when no 2-cell stage is available.
 5. **Back-trace**: trace predecessors to name AB, P1, P0 and their continuation cells.
 6. **Axis derivation**: compute AP, DV, LR vectors from the 4 cell positions.
+7. **Confidence**: composite of timing, size, and axis confidence with per-component breakdown.
 
 ### 4.3 Division Caller (`naming/division_caller.py`)
 
@@ -271,12 +275,15 @@ Classifies each cell division to determine daughter names:
 3. Rotate the vector into the canonical frame.
 4. Dot product with the rule's axis vector determines which daughter gets which name.
 5. Angle between division vector and rule axis maps to a confidence score.
+6. If confidence < 0.3, **deferred majority-vote evaluation**: follow daughters forward up to 8 frames, re-classify at each, and use majority vote.
 
 Four coordinate transform modes (selected automatically based on available data):
 - **v2**: Full `CanonicalTransform` rotation (Wahba's problem solver). Used when AuxInfo v2 is available.
 - **v1**: Sign-flip matrix + 2D rotation by angle. Used when AuxInfo v1 is available.
-- **Lineage centroid** (primary no-AuxInfo mode): Per-timepoint axes derived from ABa/ABp/EMS/P2 lineage centroids via `lineage_axes.py`. Rotation-invariant — automatically handles embryo rotations during imaging.
+- **Lineage centroid** (primary no-AuxInfo mode): Per-timepoint axes derived from ABa/ABp/EMS/P2 lineage centroids via `lineage_axes.py`. Rotation-invariant — automatically handles embryo rotations during imaging. Includes LR quality metric, quality-aware sign correction with gap limits, and temporal LR smoothing for degenerate frames.
 - **Static founder** (legacy fallback): Project onto axes derived once from the 4-cell stage positions. Used only when lineage centroid axes are unavailable at a given timepoint.
+
+Multi-frame averaging is disabled in lineage centroid mode (per-timepoint axes make cross-frame averaging unreliable). Seed axes from the 4-cell midpoint provide initial sign anchoring.
 
 ### 4.4 Rules (`naming/rules.py`)
 
