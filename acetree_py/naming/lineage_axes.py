@@ -116,7 +116,7 @@ def compute_local_axes(
     lineage_map: list[list[str]],
     t: int,
     z_pix_res: float,
-) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, float]:
     """Compute body axes at timepoint *t* from lineage centroids.
 
     Args:
@@ -126,11 +126,17 @@ def compute_local_axes(
         z_pix_res: Z pixel resolution (z_res / xy_res).
 
     Returns:
-        (ap_vec, lr_vec, dv_vec) as unit vectors in the lab frame,
-        or (None, None, None) if there aren't enough labelled cells.
+        (ap_vec, lr_vec, dv_vec, lr_quality) as unit vectors in the lab
+        frame plus a quality metric for the LR axis (0-1).  Returns
+        (None, None, None, 0.0) if there aren't enough labelled cells.
+
+        *lr_quality* is the fraction of the ABa-ABp separation that is
+        perpendicular to AP.  When ABa and ABp centroids are nearly
+        collinear with AP this ratio approaches 0 and the LR axis is
+        unreliable.
     """
     if t >= len(nuclei_record) or t >= len(lineage_map):
-        return None, None, None
+        return None, None, None, 0.0
 
     nucs = nuclei_record[t]
     labels = lineage_map[t]
@@ -157,11 +163,11 @@ def compute_local_axes(
         elif label in (LINEAGE_EMS, LINEAGE_P2):
             p1_positions.append(pos)
 
-    # Need at least 1 cell in each group
+    # Need at least 1 cell in each group.
     if not ab_positions or not p1_positions:
-        return None, None, None
+        return None, None, None, 0.0
     if not aba_positions or not abp_positions:
-        return None, None, None
+        return None, None, None, 0.0
 
     ab_centroid = np.mean(ab_positions, axis=0)
     p1_centroid = np.mean(p1_positions, axis=0)
@@ -172,25 +178,67 @@ def compute_local_axes(
     ap_raw = ab_centroid - p1_centroid
     ap_norm = np.linalg.norm(ap_raw)
     if ap_norm < 1e-6:
-        return None, None, None
+        return None, None, None, 0.0
     ap_vec = ap_raw / ap_norm
 
     # LR: ABp-centroid -> ABa-centroid, projected perpendicular to AP
     lr_raw = aba_centroid - abp_centroid
+    lr_total = np.linalg.norm(lr_raw)
     lr_perp = lr_raw - np.dot(lr_raw, ap_vec) * ap_vec
     lr_norm = np.linalg.norm(lr_perp)
+
+    # LR quality: fraction of ABa-ABp separation that is perpendicular to AP
+    lr_quality = lr_norm / lr_total if lr_total > 1e-6 else 0.0
+
     if lr_norm < 1e-6:
-        return ap_vec, None, None
+        return ap_vec, None, None, 0.0
     lr_vec = lr_perp / lr_norm
 
     # DV: completes right-handed frame
     dv_vec = np.cross(ap_vec, lr_vec)
     dv_norm = np.linalg.norm(dv_vec)
     if dv_norm < 1e-6:
-        return ap_vec, None, None
+        return ap_vec, None, None, 0.0
     dv_vec = dv_vec / dv_norm
 
-    return ap_vec, lr_vec, dv_vec
+    return ap_vec, lr_vec, dv_vec, lr_quality
+
+
+def check_axis_continuity(
+    current: tuple[np.ndarray, np.ndarray, np.ndarray],
+    previous: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Ensure axis continuity between consecutive timepoints.
+
+    If the AP or LR axis flips by more than 90 degrees compared to the
+    previous timepoint, negate the axis to maintain consistent orientation.
+    This handles cases where the centroid-based computation produces
+    an arbitrary sign flip.
+
+    Args:
+        current: (ap, lr, dv) axes at the current timepoint.
+        previous: (ap, lr, dv) axes at the previous timepoint.
+
+    Returns:
+        Corrected (ap, lr, dv) with consistent orientation.
+    """
+    ap, lr, dv = current
+    prev_ap, prev_lr, prev_dv = previous
+
+    # Check AP axis continuity
+    if np.dot(ap, prev_ap) < 0:
+        ap = -ap
+        # Flipping AP requires flipping one other axis to maintain handedness
+        dv = -dv
+        logger.debug("AP axis flip corrected at current timepoint")
+
+    # Check LR axis continuity
+    if np.dot(lr, prev_lr) < 0:
+        lr = -lr
+        dv = -dv  # maintain right-handedness
+        logger.debug("LR axis flip corrected at current timepoint")
+
+    return ap, lr, dv
 
 
 def axes_to_canonical(

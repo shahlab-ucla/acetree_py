@@ -38,6 +38,15 @@ RULE_OVERRIDE_ANGLE = 55.0      # degrees — use observed dominant axis instead
 # Number of frames to average division vector over
 DEFAULT_AVG_FRAMES = 3
 
+# LR axis quality thresholds
+LR_QUALITY_THRESHOLD = 0.15  # Below this, LR axis is degenerate
+_LR_HISTORY_MAX = 20         # Max entries in LR smoothing buffer
+_LR_CONTINUITY_GAP = 3       # Max gap for continuity-based sign correction
+
+# Deferred naming: re-evaluate with look-ahead when confidence is below this
+_DEFERRED_CONFIDENCE_THRESHOLD = 0.3
+_DEFERRED_LOOKAHEAD_FRAMES = 8  # Max frames to look ahead
+
 
 @dataclass
 class DivisionClassification:
@@ -84,6 +93,8 @@ class DivisionCaller:
         founder_dv: np.ndarray | None = None,
         lineage_map: list[list[str]] | None = None,
         nuclei_record: list[list] | None = None,
+        seed_ap: np.ndarray | None = None,
+        seed_lr: np.ndarray | None = None,
     ) -> None:
         """Initialize the DivisionCaller.
 
@@ -100,6 +111,9 @@ class DivisionCaller:
                 (output of build_lineage_map).
             nuclei_record: For lineage mode — full nuclei record (needed
                 to compute per-timepoint axes).
+            seed_ap: Initial AP axis direction for sign anchoring
+                (typically from 4-cell midpoint).
+            seed_lr: Initial LR axis direction for sign anchoring.
         """
         self.rule_manager = rule_manager
         self.z_pix_res = z_pix_res
@@ -118,6 +132,17 @@ class DivisionCaller:
 
         # Cache for per-timepoint axes in lineage mode
         self._axes_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+        # Anchor-based sign convention and temporal smoothing for LR.
+        # Seed from the 4-cell midpoint axes for a reliable starting sign.
+        self._lr_anchor: np.ndarray | None = (
+            seed_lr.copy() if seed_lr is not None else None
+        )
+        self._lr_anchor_time: int = 0 if seed_lr is not None else -1
+        self._ap_anchor: np.ndarray | None = (
+            seed_ap.copy() if seed_ap is not None else None
+        )
+        self._lr_history: list[tuple[int, np.ndarray, float]] = []
 
         # Precompute v1 sign matrix if needed
         self._v1_sign_matrix: np.ndarray | None = None
@@ -164,14 +189,21 @@ class DivisionCaller:
         daughter1: Nucleus,
         daughter2: Nucleus,
         timepoint: int = -1,
+        nuclei_record: list[list] | None = None,
     ) -> tuple[str, str]:
         """Assign Sulston names to the two daughters of a dividing cell.
+
+        When the initial classification has very low confidence (high angle
+        from rule) and a *nuclei_record* is provided, looks ahead several
+        frames to re-evaluate with more separated daughters and potentially
+        recovered axes.
 
         Args:
             parent: The dividing parent nucleus.
             daughter1: First daughter nucleus (successor1).
             daughter2: Second daughter nucleus (successor2).
             timepoint: 0-based timepoint of the daughters (for lineage mode).
+            nuclei_record: Full nuclei record for look-ahead re-evaluation.
 
         Returns:
             (name1, name2) — the names to assign to daughter1 and daughter2.
@@ -184,8 +216,19 @@ class DivisionCaller:
         classification = self._classify_division(
             parent, daughter1, daughter2, rule, timepoint=timepoint,
         )
-        self._classifications.append(classification)
 
+        # If confidence is very low and we can look ahead, re-evaluate
+        # using majority vote across future frames
+        if (classification.confidence < _DEFERRED_CONFIDENCE_THRESHOLD
+                and nuclei_record is not None
+                and timepoint >= 0):
+            deferred = self._deferred_evaluate(
+                daughter1, daughter2, rule, nuclei_record, timepoint,
+            )
+            if deferred is not None and deferred.confidence >= classification.confidence:
+                classification = deferred
+
+        self._classifications.append(classification)
         return classification.daughter1_name, classification.daughter2_name
 
     def assign_names_multi_frame(
@@ -268,22 +311,191 @@ class DivisionCaller:
 
         return name1, name2
 
+    def _deferred_evaluate(
+        self,
+        daughter1: Nucleus,
+        daughter2: Nucleus,
+        rule: Rule,
+        nuclei_record: list[list[Nucleus]],
+        division_time: int,
+    ) -> DivisionClassification | None:
+        """Re-evaluate a division using later frames when initial confidence is low.
+
+        Follows both daughters forward up to ``_DEFERRED_LOOKAHEAD_FRAMES``
+        frames, re-classifying at each step.  Uses majority vote across
+        all look-ahead frames to decide the assignment, which is more robust
+        than any single frame when angles are near 90 degrees.
+        """
+        votes_positive = 0  # dot >= 0
+        votes_negative = 0  # dot < 0
+        best_confidence = 0.0
+        d1_cur, d2_cur = daughter1, daughter2
+
+        for dt in range(1, _DEFERRED_LOOKAHEAD_FRAMES + 1):
+            t = division_time + dt
+            if t >= len(nuclei_record):
+                break
+
+            d1_next = _follow_successor(d1_cur, nuclei_record[t])
+            d2_next = _follow_successor(d2_cur, nuclei_record[t])
+            if d1_next is None or d2_next is None:
+                break
+
+            cls = self._classify_division(
+                daughter1, d1_next, d2_next, rule, timepoint=t,
+            )
+
+            if cls.dot_product >= 0:
+                votes_positive += 1
+            else:
+                votes_negative += 1
+
+            best_confidence = max(best_confidence, cls.confidence)
+            d1_cur, d2_cur = d1_next, d2_next
+
+        total_votes = votes_positive + votes_negative
+        if total_votes == 0:
+            return None
+
+        # Majority vote determines assignment
+        if votes_positive >= votes_negative:
+            name1, name2 = rule.daughter1, rule.daughter2
+        else:
+            name1, name2 = rule.daughter2, rule.daughter1
+
+        # Confidence is boosted by vote margin
+        margin = abs(votes_positive - votes_negative) / total_votes
+        vote_confidence = max(best_confidence, margin)
+
+        return DivisionClassification(
+            parent_name=daughter1.effective_name or rule.daughter1,
+            daughter1_name=name1,
+            daughter2_name=name2,
+            axis_used=rule.sulston_letter,
+            confidence=vote_confidence,
+            angle_from_rule=0.0,  # not meaningful for vote
+            dot_product=float(votes_positive - votes_negative),
+        )
+
     def _get_local_axes(self, t: int) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         """Get body axes at timepoint t (lineage mode only).
 
-        Caches results to avoid recomputation within the same timepoint.
+        Uses a two-tier sign correction strategy:
+        1. If a nearby (within ``_LR_CONTINUITY_GAP``) cached frame exists,
+           use continuity correction against it (works well when cache is dense).
+        2. Otherwise, fall back to the seed anchor from the 4-cell stage.
+
+        When the LR axis quality is below ``LR_QUALITY_THRESHOLD``, substitutes
+        a temporally smoothed LR from recent high-quality frames.
         """
         if t in self._axes_cache:
             return self._axes_cache[t]
 
-        axes = compute_local_axes(
+        ap, lr, dv, lr_quality = compute_local_axes(
             self._nuclei_record, self._lineage_map, t, self.z_pix_res,
         )
-        if axes[0] is None or axes[1] is None or axes[2] is None:
+        if ap is None or lr is None or dv is None:
             return None
 
-        self._axes_cache[t] = axes  # type: ignore[assignment]
-        return axes  # type: ignore[return-value]
+        # --- AP sign consistency against nearby cache ---
+        if self._axes_cache:
+            candidates = [k for k in self._axes_cache if k < t]
+            if candidates:
+                prev_t = max(candidates)
+                if t - prev_t <= _LR_CONTINUITY_GAP:
+                    if np.dot(ap, self._axes_cache[prev_t][0]) < 0:
+                        ap = -ap
+                        dv = -dv
+
+        # --- LR handling depends on quality ---
+        if lr_quality < LR_QUALITY_THRESHOLD:
+            # Low quality: prefer temporal smoothing over noisy fresh value
+            smoothed = self._get_smoothed_lr(t)
+            if smoothed is not None:
+                lr = smoothed
+                dv = np.cross(ap, lr)
+                dv_norm = np.linalg.norm(dv)
+                if dv_norm > 1e-6:
+                    dv = dv / dv_norm
+                else:
+                    return None
+            else:
+                # No smoothing history — use any previous cache for sign
+                lr, dv = self._correct_lr_sign(lr, dv, t, lr_quality)
+        else:
+            # High quality: only correct sign against nearby cache
+            lr, dv = self._correct_lr_sign(lr, dv, t, lr_quality)
+
+            self._lr_history.append((t, lr.copy(), lr_quality))
+            if len(self._lr_history) > _LR_HISTORY_MAX:
+                self._lr_history.pop(0)
+
+        result = (ap, lr, dv)
+        self._axes_cache[t] = result
+        return result
+
+    def _correct_lr_sign(
+        self, lr: np.ndarray, dv: np.ndarray, t: int,
+        lr_quality: float = 1.0,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Correct LR sign using cached reference.
+
+        The correction strategy depends on LR quality:
+        - High quality (>= threshold): only correct against nearby cache
+          (within ``_LR_CONTINUITY_GAP``) — trust the fresh computation
+          when no nearby reference exists.
+        - Low quality (< threshold): correct against ANY previous cache
+          entry, since the fresh value is unreliable noise.
+        """
+        if not self._axes_cache:
+            return lr, dv
+
+        candidates = [k for k in self._axes_cache if k < t]
+        if not candidates:
+            return lr, dv
+
+        prev_t = max(candidates)
+
+        if lr_quality >= LR_QUALITY_THRESHOLD:
+            # High quality: only use nearby reference
+            if t - prev_t > _LR_CONTINUITY_GAP:
+                return lr, dv
+        # Low quality or nearby cache: apply correction
+        reference_lr = self._axes_cache[prev_t][1]
+        if np.dot(lr, reference_lr) < 0:
+            lr = -lr
+            dv = -dv
+
+        return lr, dv
+
+    def _get_smoothed_lr(self, t: int) -> np.ndarray | None:
+        """Get a temporally smoothed LR axis from recent high-quality frames.
+
+        Uses exponential weighting by recency and quality.
+        """
+        if not self._lr_history:
+            return None
+
+        weighted_sum = np.zeros(3)
+        total_weight = 0.0
+
+        for hist_t, hist_lr, hist_quality in self._lr_history:
+            dt = abs(t - hist_t)
+            # Exponential decay: half-life of 10 timepoints
+            recency_weight = 0.5 ** (dt / 10.0)
+            weight = recency_weight * hist_quality
+            weighted_sum += weight * hist_lr
+            total_weight += weight
+
+        if total_weight < 1e-6:
+            return None
+
+        smoothed = weighted_sum / total_weight
+        smoothed_norm = np.linalg.norm(smoothed)
+        if smoothed_norm < 1e-6:
+            return None
+
+        return smoothed / smoothed_norm
 
     def _classify_division(
         self,
@@ -345,18 +557,26 @@ class DivisionCaller:
     ) -> tuple[np.ndarray | None, float]:
         """Compute averaged division vector over multiple frames.
 
+        Averages raw lab-frame vectors (z-scaled only), then transforms
+        into canonical frame ONCE using the division-time axes.  This
+        avoids mixing coordinate systems when axes change between frames.
+
         Returns:
             (averaged_corrected_diff, consistency_confidence) or (None, 0)
         """
-        vectors = []
+        lab_vectors = []
 
-        # First frame: use the provided nuclei directly
-        diff0 = self._diffs_corrected(daughter1, daughter2, timepoint=division_time)
-        diff0_norm = np.linalg.norm(diff0)
-        if diff0_norm > 1e-6:
-            vectors.append(diff0 / diff0_norm)
+        # First frame: raw z-scaled vector
+        raw0 = np.array([
+            daughter2.x - daughter1.x,
+            daughter2.y - daughter1.y,
+            (daughter2.z - daughter1.z) * self.z_pix_res,
+        ], dtype=np.float64)
+        raw0_norm = np.linalg.norm(raw0)
+        if raw0_norm > 1e-6:
+            lab_vectors.append(raw0 / raw0_norm)
 
-        # Subsequent frames: find the same cells by tracking successors
+        # Subsequent frames: follow successors, collect raw lab-frame vectors
         d1_current = daughter1
         d2_current = daughter2
 
@@ -367,38 +587,44 @@ class DivisionCaller:
 
             next_nuclei = nuclei_record[t]
 
-            # Follow successor1 for both daughters
             d1_next = _follow_successor(d1_current, next_nuclei)
             d2_next = _follow_successor(d2_current, next_nuclei)
 
             if d1_next is None or d2_next is None:
                 break  # One of the daughters divided or died
 
-            diff = self._diffs_corrected(d1_next, d2_next, timepoint=t)
-            diff_norm = np.linalg.norm(diff)
-            if diff_norm > 1e-6:
-                vectors.append(diff / diff_norm)
+            raw = np.array([
+                d2_next.x - d1_next.x,
+                d2_next.y - d1_next.y,
+                (d2_next.z - d1_next.z) * self.z_pix_res,
+            ], dtype=np.float64)
+            raw_norm = np.linalg.norm(raw)
+            if raw_norm > 1e-6:
+                lab_vectors.append(raw / raw_norm)
 
             d1_current = d1_next
             d2_current = d2_next
 
-        if not vectors:
+        if not lab_vectors:
             return None, 0.0
 
-        # Average the unit vectors
-        avg = np.mean(vectors, axis=0)
-        avg_norm = np.linalg.norm(avg)
+        # Average the unit vectors in lab frame
+        avg_lab = np.mean(lab_vectors, axis=0)
+        avg_norm = np.linalg.norm(avg_lab)
 
-        # Consistency: if all vectors point the same way, avg_norm ≈ 1.0
+        # Consistency: if all vectors point the same way, avg_norm ~ 1.0
         consistency = avg_norm
 
         if avg_norm > 1e-6:
-            avg = avg / avg_norm
+            avg_lab = avg_lab / avg_norm
 
-        # Scale back to approximate physical magnitude using first frame
-        avg = avg * diff0_norm
+        # Scale to first-frame magnitude
+        avg_lab = avg_lab * raw0_norm
 
-        return avg, consistency
+        # Transform ONCE using division-time axes
+        avg_canonical = self._measurement_correction(avg_lab, timepoint=division_time)
+
+        return avg_canonical, consistency
 
     def _compute_dot_product(
         self,

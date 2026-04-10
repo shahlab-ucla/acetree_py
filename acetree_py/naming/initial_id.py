@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
+import warnings
 
 import numpy as np
 
@@ -114,7 +115,20 @@ def identify_initial_cells(
 
     Returns:
         InitialIDResult with identification results.
+
+    .. deprecated::
+        Use ``identify_founders()`` from ``founder_id.py`` instead.
+        This legacy algorithm requires AuxInfo orientation data and is
+        not robust to arbitrary embryo orientations.  It is retained
+        only for backward compatibility testing via ``legacy_mode=True``.
     """
+    warnings.warn(
+        "identify_initial_cells() is deprecated. Use identify_founders() "
+        "from founder_id.py for rotation-invariant identification. "
+        "This function is retained for legacy_mode backward compatibility testing.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     result = InitialIDResult()
 
     if ending_index < 0:

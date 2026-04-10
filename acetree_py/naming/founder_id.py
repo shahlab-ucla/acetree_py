@@ -107,6 +107,11 @@ class FounderAssignment:
     # Start index for canonical naming (0-based)
     start_index: int = 0
 
+    # Per-component confidence breakdown
+    timing_confidence: float = 0.0
+    size_confidence: float = 0.0
+    axis_confidence: float = 0.0
+
     # Warnings accumulated during identification
     warnings: list[str] = field(default_factory=list)
 
@@ -342,61 +347,26 @@ def _try_identify_from_window(
     else:
         timing_confidence = min(1.0, 0.6 + timing_gap * 0.1)
 
-    # Step 3: Within P1 pair, EMS is typically larger than P2
+    # Step 3: Within P1 pair, distinguish EMS from P2.
+    # Primary signal: EMS divides before P2 (forward division timing).
+    # Secondary signal: EMS is typically larger than P2 (nucleus size).
     (p1_d1_idx, p1_d1), (p1_d2_idx, p1_d2) = p1_pair
-    if p1_d1.size >= p1_d2.size:
-        ems_idx, ems_nuc = p1_d1_idx, p1_d1
-        p2_idx, p2_nuc = p1_d2_idx, p1_d2
-    else:
-        ems_idx, ems_nuc = p1_d2_idx, p1_d2
-        p2_idx, p2_nuc = p1_d1_idx, p1_d1
+    ems_idx, ems_nuc, p2_idx, p2_nuc, size_confidence = _distinguish_ems_p2(
+        nuclei_record, p1_d1_idx, p1_d1, p1_d2_idx, p1_d2,
+        mid_time, last_four, ending_index, result,
+    )
 
-    # Size confidence for EMS/P2 distinction
-    size_sum = max(1, ems_nuc.size + p2_nuc.size)
-    size_diff = abs(ems_nuc.size - p2_nuc.size)
-    size_confidence = min(1.0, 0.5 + size_diff / size_sum)
-
-    if size_diff < 2:
-        result.warnings.append(
-            f"EMS/P2 size difference small ({ems_nuc.size} vs {p2_nuc.size})"
-        )
-
-    # Step 4: Within AB pair, distinguish ABa from ABp
-    # ABa is more anterior.  Use the AP vector (P2 -> AB centroid) to
-    # determine which AB daughter is more anterior.  The cell with the
-    # larger projection onto the AP vector is more anterior = ABa.
+    # Step 4: Within AB pair, distinguish ABa from ABp.
+    # ABa is more anterior. We average spatial projections over a window
+    # of 4-cell-stage timepoints for robustness. If no 2-cell stage is
+    # present (AP axis degenerate), use PC1 of the 4-cell point cloud
+    # as the long axis of the embryo — ABa is closer to the long axis.
     (ab_d1_idx, ab_d1), (ab_d2_idx, ab_d2) = ab_pair
-
-    pos_d1 = np.array([float(ab_d1.x), float(ab_d1.y), float(ab_d1.z) * z_pix_res])
-    pos_d2 = np.array([float(ab_d2.x), float(ab_d2.y), float(ab_d2.z) * z_pix_res])
-    pos_ems = np.array([float(ems_nuc.x), float(ems_nuc.y), float(ems_nuc.z) * z_pix_res])
-    pos_p2 = np.array([float(p2_nuc.x), float(p2_nuc.y), float(p2_nuc.z) * z_pix_res])
-
-    # AP direction: posterior (P2) -> anterior (AB midpoint)
-    ab_center = (pos_d1 + pos_d2) / 2.0
-    ap_raw = ab_center - pos_p2
-    ap_norm = np.linalg.norm(ap_raw)
-
-    if ap_norm > 1e-6:
-        ap_hat = ap_raw / ap_norm
-        # Project each AB daughter onto the AP axis
-        proj_d1 = np.dot(pos_d1, ap_hat)
-        proj_d2 = np.dot(pos_d2, ap_hat)
-        # More anterior = larger projection along P2->AB direction
-        if proj_d1 >= proj_d2:
-            aba_idx, aba_nuc = ab_d1_idx, ab_d1
-            abp_idx, abp_nuc = ab_d2_idx, ab_d2
-        else:
-            aba_idx, aba_nuc = ab_d2_idx, ab_d2
-            abp_idx, abp_nuc = ab_d1_idx, ab_d1
-    else:
-        # Degenerate: fall back to x-coordinate heuristic
-        if ab_d1.x <= ab_d2.x:
-            aba_idx, aba_nuc = ab_d1_idx, ab_d1
-            abp_idx, abp_nuc = ab_d2_idx, ab_d2
-        else:
-            aba_idx, aba_nuc = ab_d2_idx, ab_d2
-            abp_idx, abp_nuc = ab_d1_idx, ab_d1
+    aba_idx, aba_nuc, abp_idx, abp_nuc = _distinguish_aba_abp(
+        nuclei_record, ab_d1_idx, ab_d1, ab_d2_idx, ab_d2,
+        ems_idx, ems_nuc, p2_idx, p2_nuc,
+        first_four, last_four, z_pix_res, result,
+    )
 
     # Step 5: Assign names to nuclei
     aba_nuc.identity = "ABa"
@@ -427,11 +397,18 @@ def _try_identify_from_window(
         aba_nuc, abp_nuc, ems_nuc, p2_nuc, z_pix_res,
     )
 
-    # Compute overall confidence
-    axis_confidence = 1.0
+    # Compute axis confidence from spatial separation of founders
+    axis_confidence = _compute_axis_confidence(
+        aba_nuc, abp_nuc, ems_nuc, p2_nuc, z_pix_res,
+    )
     if result.ap_vector is None:
         axis_confidence = 0.0
         result.warnings.append("Could not determine embryo axes from founder positions")
+
+    # Store per-component confidence breakdown
+    result.timing_confidence = timing_confidence
+    result.size_confidence = size_confidence
+    result.axis_confidence = axis_confidence
 
     result.confidence = max(
         0.0,
@@ -440,12 +417,270 @@ def _try_identify_from_window(
     result.success = True
 
     logger.info(
-        "Founder identification succeeded (confidence=%.2f, timing_gap=%d, "
-        "size_diff=%d, warnings=%d)",
-        result.confidence, timing_gap, size_diff, len(result.warnings),
+        "Founder identification succeeded (confidence=%.2f: "
+        "timing=%.2f, size=%.2f, axis=%.2f, warnings=%d)",
+        result.confidence, timing_confidence, size_confidence,
+        axis_confidence, len(result.warnings),
     )
 
     return result
+
+
+def _distinguish_ems_p2(
+    nuclei_record: list[list[Nucleus]],
+    d1_idx: int,
+    d1: Nucleus,
+    d2_idx: int,
+    d2: Nucleus,
+    mid_time: int,
+    last_four: int,
+    ending_index: int,
+    result: FounderAssignment,
+) -> tuple[int, Nucleus, int, Nucleus, float]:
+    """Distinguish EMS from P2 within the P1-daughter pair.
+
+    Primary signal: EMS divides before P2 (forward division timing).
+    Secondary signal: EMS is typically larger than P2 (nucleus size).
+
+    Returns:
+        (ems_idx, ems_nuc, p2_idx, p2_nuc, confidence)
+    """
+    # Primary: forward division timing — EMS divides before P2
+    div_t1 = _trace_forward_to_division(nuclei_record, d1, mid_time, ending_index)
+    div_t2 = _trace_forward_to_division(nuclei_record, d2, mid_time, ending_index)
+
+    timing_decided = False
+    if div_t1 < ending_index and div_t2 < ending_index:
+        timing_gap = abs(div_t1 - div_t2)
+        if timing_gap >= 1:
+            # EMS divides first
+            if div_t1 < div_t2:
+                ems_idx, ems_nuc = d1_idx, d1
+                p2_idx, p2_nuc = d2_idx, d2
+            else:
+                ems_idx, ems_nuc = d2_idx, d2
+                p2_idx, p2_nuc = d1_idx, d1
+            timing_decided = True
+            confidence = min(1.0, 0.6 + timing_gap * 0.1)
+            logger.info(
+                "EMS/P2 by division timing: EMS div=%d, P2 div=%d, gap=%d",
+                min(div_t1, div_t2), max(div_t1, div_t2), timing_gap,
+            )
+
+    if not timing_decided:
+        # Secondary: nucleus size — EMS is typically larger
+        if d1.size >= d2.size:
+            ems_idx, ems_nuc = d1_idx, d1
+            p2_idx, p2_nuc = d2_idx, d2
+        else:
+            ems_idx, ems_nuc = d2_idx, d2
+            p2_idx, p2_nuc = d1_idx, d1
+
+        size_sum = max(1, ems_nuc.size + p2_nuc.size)
+        size_diff = abs(ems_nuc.size - p2_nuc.size)
+        confidence = min(1.0, 0.5 + size_diff / size_sum)
+
+        if size_diff < 2:
+            result.warnings.append(
+                f"EMS/P2 size difference small ({ems_nuc.size} vs {p2_nuc.size})"
+            )
+        logger.info(
+            "EMS/P2 by size: EMS=%d, P2=%d (timing unavailable or simultaneous)",
+            ems_nuc.size, p2_nuc.size,
+        )
+
+    return ems_idx, ems_nuc, p2_idx, p2_nuc, confidence
+
+
+def _distinguish_aba_abp(
+    nuclei_record: list[list[Nucleus]],
+    d1_idx: int,
+    d1: Nucleus,
+    d2_idx: int,
+    d2: Nucleus,
+    ems_idx: int,
+    ems_nuc: Nucleus,
+    p2_idx: int,
+    p2_nuc: Nucleus,
+    first_four: int,
+    last_four: int,
+    z_pix_res: float,
+    result: FounderAssignment,
+) -> tuple[int, Nucleus, int, Nucleus]:
+    """Distinguish ABa from ABp within the AB-daughter pair.
+
+    Uses spatial projections averaged over the 4-cell-stage window for
+    robustness. ABa is more anterior (larger projection onto AP axis).
+
+    If the 2-cell stage is not present (AP axis from P2→AB degenerate),
+    falls back to PC1 of the 4-cell point cloud as the long axis of the
+    embryo — ABa is closer to the long axis endpoint.
+
+    Returns:
+        (aba_idx, aba_nuc, abp_idx, abp_nuc)
+    """
+    # Average spatial projections over the 4-cell-stage window
+    proj_sum_d1 = 0.0
+    proj_sum_d2 = 0.0
+    n_valid_frames = 0
+
+    # Track the two AB daughters and two P1 daughters across the window
+    # by following successor chains from the midpoint
+    d1_at_t = {(first_four + last_four) // 2: d1}
+    d2_at_t = {(first_four + last_four) // 2: d2}
+    ems_at_t = {(first_four + last_four) // 2: ems_nuc}
+    p2_at_t = {(first_four + last_four) // 2: p2_nuc}
+
+    # Forward-propagate from midpoint
+    mid = (first_four + last_four) // 2
+    for t in range(mid, last_four):
+        for mapping, idx_key in [(d1_at_t, t), (d2_at_t, t), (ems_at_t, t), (p2_at_t, t)]:
+            if t in mapping:
+                nuc = mapping[t]
+                if nuc.successor1 > 0 and nuc.successor2 == NILLI:
+                    s_idx = nuc.successor1 - 1
+                    if t + 1 < len(nuclei_record) and 0 <= s_idx < len(nuclei_record[t + 1]):
+                        mapping[t + 1] = nuclei_record[t + 1][s_idx]
+
+    # Back-propagate from midpoint
+    for t in range(mid, first_four, -1):
+        for mapping in [d1_at_t, d2_at_t, ems_at_t, p2_at_t]:
+            if t in mapping:
+                nuc = mapping[t]
+                if nuc.predecessor != NILLI:
+                    pred_idx = nuc.predecessor - 1
+                    if 0 <= pred_idx < len(nuclei_record[t - 1]):
+                        pred = nuclei_record[t - 1][pred_idx]
+                        if pred.successor2 == NILLI:  # continuation, not division
+                            mapping[t - 1] = pred
+
+    # Compute projection at each available timepoint
+    use_pc1 = False
+    for t in range(first_four, last_four + 1):
+        if not (t in d1_at_t and t in d2_at_t and t in p2_at_t):
+            continue
+
+        pos1 = np.array([float(d1_at_t[t].x), float(d1_at_t[t].y),
+                         float(d1_at_t[t].z) * z_pix_res])
+        pos2 = np.array([float(d2_at_t[t].x), float(d2_at_t[t].y),
+                         float(d2_at_t[t].z) * z_pix_res])
+        pos_p2_t = np.array([float(p2_at_t[t].x), float(p2_at_t[t].y),
+                             float(p2_at_t[t].z) * z_pix_res])
+
+        ab_center = (pos1 + pos2) / 2.0
+        ap_raw = ab_center - pos_p2_t
+        ap_norm = np.linalg.norm(ap_raw)
+
+        if ap_norm > 1e-6:
+            ap_hat = ap_raw / ap_norm
+            proj_sum_d1 += np.dot(pos1, ap_hat)
+            proj_sum_d2 += np.dot(pos2, ap_hat)
+            n_valid_frames += 1
+
+    if n_valid_frames > 0:
+        # Averaged projection — more anterior = ABa
+        avg_proj_d1 = proj_sum_d1 / n_valid_frames
+        avg_proj_d2 = proj_sum_d2 / n_valid_frames
+        if avg_proj_d1 >= avg_proj_d2:
+            return d1_idx, d1, d2_idx, d2
+        else:
+            return d2_idx, d2, d1_idx, d1
+
+    # Fallback: PC1 of the 4-cell point cloud as the long axis.
+    # This handles datasets where the 2-cell stage is absent (AP degenerate).
+    logger.info("AP axis degenerate — using PC1 of 4-cell point cloud for ABa/ABp")
+    use_pc1 = True
+
+    # Collect all 4-cell positions across the window
+    all_positions = []
+    for t in range(first_four, last_four + 1):
+        for mapping in [d1_at_t, d2_at_t, ems_at_t, p2_at_t]:
+            if t in mapping:
+                nuc = mapping[t]
+                all_positions.append(np.array([
+                    float(nuc.x), float(nuc.y), float(nuc.z) * z_pix_res,
+                ]))
+
+    if len(all_positions) >= 4:
+        pts = np.array(all_positions)
+        centroid = np.mean(pts, axis=0)
+        pts_centered = pts - centroid
+
+        # PC1 via SVD
+        _, _, Vt = np.linalg.svd(pts_centered, full_matrices=False)
+        pc1 = Vt[0]  # first principal component = long axis
+
+        # Project the two AB daughters (at midpoint) onto PC1
+        pos1_mid = np.array([float(d1.x), float(d1.y), float(d1.z) * z_pix_res])
+        pos2_mid = np.array([float(d2.x), float(d2.y), float(d2.z) * z_pix_res])
+        proj1 = np.dot(pos1_mid - centroid, pc1)
+        proj2 = np.dot(pos2_mid - centroid, pc1)
+
+        # ABa is closer to the long axis endpoint (larger absolute projection)
+        # Use the sign that puts the AB centroid at the "anterior" end
+        ab_mid = (pos1_mid + pos2_mid) / 2.0
+        ab_proj = np.dot(ab_mid - centroid, pc1)
+        # Orient PC1 so that the AB end is positive
+        if ab_proj < 0:
+            proj1, proj2 = -proj1, -proj2
+        # ABa = more anterior = larger projection
+        if proj1 >= proj2:
+            result.warnings.append("ABa/ABp assigned via PC1 long axis (no 2-cell stage)")
+            return d1_idx, d1, d2_idx, d2
+        else:
+            result.warnings.append("ABa/ABp assigned via PC1 long axis (no 2-cell stage)")
+            return d2_idx, d2, d1_idx, d1
+
+    # Last resort: x-coordinate heuristic
+    result.warnings.append("ABa/ABp assigned via x-coordinate heuristic (degenerate geometry)")
+    if d1.x <= d2.x:
+        return d1_idx, d1, d2_idx, d2
+    else:
+        return d2_idx, d2, d1_idx, d1
+
+
+def _compute_axis_confidence(
+    aba: Nucleus,
+    abp: Nucleus,
+    ems: Nucleus,
+    p2: Nucleus,
+    z_pix_res: float,
+) -> float:
+    """Compute confidence in axis determination from spatial separation.
+
+    Higher confidence when the 4 founder cells are well-separated in 3D.
+    Lower confidence when cells are tightly clustered.
+
+    Returns:
+        Confidence score between 0.3 and 1.0.
+    """
+    positions = [
+        np.array([float(n.x), float(n.y), float(n.z) * z_pix_res])
+        for n in [aba, abp, ems, p2]
+    ]
+
+    # Compute all pairwise distances
+    dists = []
+    for i in range(4):
+        for j in range(i + 1, 4):
+            dists.append(np.linalg.norm(positions[i] - positions[j]))
+
+    if not dists:
+        return 0.3
+
+    min_dist = min(dists)
+    median_dist = sorted(dists)[len(dists) // 2]
+
+    # If minimum pairwise distance is very small relative to median,
+    # cells are poorly separated
+    if median_dist < 1e-6:
+        return 0.3
+
+    separation_ratio = min_dist / median_dist
+    # Map separation_ratio to confidence: 0 -> 0.3, 0.3+ -> 1.0
+    confidence = min(1.0, 0.3 + separation_ratio * 2.33)
+
+    return confidence
 
 
 def _find_sister_pairs(
