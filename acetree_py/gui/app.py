@@ -1429,15 +1429,24 @@ class AceTreeApp:
             if self._lineage_list:
                 self._lineage_list.rebuild()
 
-        # After a rename, the tracked cell's name in the tree has changed.
-        # Update current_cell_name so tracking continues to work.
+        # After a rename (or undo of rename), the tracked cell's name in the
+        # tree has changed.  Read the nucleus's current effective_name to get
+        # the correct post-rebuild name (works for both execute and undo).
         from ..editing.commands import RenameCell
         if isinstance(cmd, RenameCell) and self.current_cell_name:
-            new_name = cmd.new_name
-            if self.manager.get_cell(new_name) is not None:
-                self.current_cell_name = new_name
-                if self._viewer_integration is not None:
-                    self._viewer_integration._shown_labels.add(new_name)
+            # cmd.time is 1-based, nuclei_record is 0-indexed
+            t_idx = cmd.time - 1
+            n_idx = cmd.index - 1  # cmd.index is 1-based
+            nr = self.manager.nuclei_record
+            if 0 <= t_idx < len(nr) and 0 <= n_idx < len(nr[t_idx]):
+                nuc = nr[t_idx][n_idx]
+                new_name = nuc.effective_name
+                if new_name:
+                    old_name = self.current_cell_name
+                    self.current_cell_name = new_name
+                    if self._viewer_integration is not None:
+                        self._viewer_integration._shown_labels.discard(old_name)
+                        self._viewer_integration._shown_labels.add(new_name)
 
         self.update_display()
 

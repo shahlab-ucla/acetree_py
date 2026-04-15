@@ -247,6 +247,14 @@ def build_lineage_tree(
         # Count alive cells at this timepoint
         tree.cell_counts[t] = sum(1 for n in nuclei if n.status >= 1)
 
+    # Update Cell names for cells whose nuclei have assigned_id.
+    # Continuation cells reuse the same Cell object across timepoints,
+    # so Cell.name is set at birth and never updated.  If the user
+    # renames a cell (setting assigned_id), the naming pipeline
+    # propagates assigned_id to all continuation nuclei, but the Cell
+    # object's .name field stays stale.  Fix that here.
+    _apply_assigned_id_names(cells_by_hash)
+
     # Build name lookup tables
     tree.cells_by_hash = cells_by_hash
     tree.cells_by_name = _build_name_lookup(cells_by_hash, dummy_cells)
@@ -366,6 +374,32 @@ def _process_root_cell(
                 return cell
 
     return cell
+
+
+def _apply_assigned_id_names(cells_by_hash: dict[str, Cell]) -> None:
+    """Update Cell.name for cells that contain a nucleus with assigned_id.
+
+    When a user renames a cell via assigned_id, the naming pipeline
+    propagates the forced name to all continuation nuclei (identity +
+    assigned_id).  However, the Cell object that spans those timepoints
+    keeps its original .name from birth.  This function scans every Cell
+    and, if any of its nuclei carries an assigned_id, updates the Cell's
+    .name to match.
+
+    This must run *before* _build_name_lookup() so the name dict
+    reflects the forced name.
+    """
+    seen: set[int] = set()  # avoid processing the same Cell twice
+    for cell in cells_by_hash.values():
+        cell_id = id(cell)
+        if cell_id in seen:
+            continue
+        seen.add(cell_id)
+
+        for _t, nuc in cell.nuclei:
+            if nuc.assigned_id:
+                cell.name = nuc.assigned_id
+                break  # one assigned_id is enough
 
 
 def _build_name_lookup(
