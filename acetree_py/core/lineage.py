@@ -197,7 +197,7 @@ def build_lineage_tree(
                     hash_key = _make_hash_key(time_1based, nuc_index_1based)
                     nuc.hash_key = hash_key
 
-                    daughter_name = nuc.identity or nuc.effective_name or f"Nuc{time_1based}_{j}"
+                    daughter_name = nuc.effective_name or f"Nuc{time_1based}_{j}"
 
                     # Check if the parent already has a dummy child with this
                     # name (from _create_dummy_ancestors).  If so, merge the
@@ -334,7 +334,7 @@ def _process_root_cell(
     If the cell's identity matches a dummy ancestor, replace the dummy
     with real data. Otherwise, create a new root cell.
     """
-    name = nuc.identity or nuc.effective_name or f"Nuc{time_1based}_{nuc_index_1based}"
+    name = nuc.effective_name or f"Nuc{time_1based}_{nuc_index_1based}"
     hash_key = _make_hash_key(time_1based, nuc_index_1based)
     nuc.hash_key = hash_key
 

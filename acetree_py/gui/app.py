@@ -584,7 +584,7 @@ class AceTreeApp:
             self.select_cell(nuc.effective_name, self.current_time)
         elif nuc:
             # Unnamed nucleus — just highlight it
-            self.current_cell_name = nuc.identity or f"idx={nuc.index}"
+            self.current_cell_name = nuc.effective_name or f"idx={nuc.index}"
             self.update_display()
 
     # ── Relink pick mode (Feature 4) ─────────────────────────────
@@ -1428,6 +1428,16 @@ class AceTreeApp:
                 lw.rebuild_tree()
             if self._lineage_list:
                 self._lineage_list.rebuild()
+
+        # After a rename, the tracked cell's name in the tree has changed.
+        # Update current_cell_name so tracking continues to work.
+        from ..editing.commands import RenameCell
+        if isinstance(cmd, RenameCell) and self.current_cell_name:
+            new_name = cmd.new_name
+            if self.manager.get_cell(new_name) is not None:
+                self.current_cell_name = new_name
+                if self._viewer_integration is not None:
+                    self._viewer_integration._shown_labels.add(new_name)
 
         self.update_display()
 
