@@ -765,7 +765,12 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self.refresh()
 
     def _on_rename_cell(self) -> None:
-        """Open the Rename Cell dialog."""
+        """Open the Rename Cell dialog.
+
+        Renames are cell-scoped: the forced name is written to every
+        nucleus in the cell's continuation chain (see RenameCell).  On
+        name collision with another cell, the user is offered a Swap.
+        """
         sel = self._get_selected_nucleus()
         if sel is None:
             self._status_label.setText("No nucleus selected")
@@ -773,18 +778,52 @@ class EditPanel(QWidget):  # type: ignore[misc]
 
         nuc, time, index = sel
         dialog = RenameCellDialog(nuc.effective_name, parent=self)
-        if dialog.exec_() == QDialog.Accepted:
-            new_name = dialog.get_name()
-            if not new_name:
-                self._status_label.setText("Name cannot be empty")
-                return
+        if dialog.exec_() != QDialog.Accepted:
+            return
 
-            from ..editing.commands import RenameCell
+        new_name = dialog.get_name()
+        if not new_name:
+            self._status_label.setText("Name cannot be empty")
+            return
 
-            cmd = RenameCell(time=time, index=index, new_name=new_name)
-            self.app.edit_history.do(cmd)
-            self._status_label.setText(f"Done: {cmd.description}")
-            self.refresh()
+        from ..editing.commands import RenameCell, SwapCellNames
+        from ..editing.validators import validate_rename_cell
+
+        errors, collision = validate_rename_cell(
+            self.app.edit_history.nuclei_record, time, index, new_name,
+        )
+
+        if errors:
+            if collision is not None:
+                # Offer to swap names with the conflicting cell
+                other_t, other_j = collision
+                swap_btn = QMessageBox.question(
+                    self,
+                    "Name Collision",
+                    f"{errors[0]}\n\n"
+                    f"Swap names with the other cell?\n"
+                    f"(This will atomically exchange the forced names of both cells.)",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if swap_btn == QMessageBox.Yes:
+                    swap_cmd = SwapCellNames(
+                        time_a=time, index_a=index,
+                        time_b=other_t, index_b=other_j,
+                    )
+                    self.app.edit_history.do(swap_cmd)
+                    self._status_label.setText(f"Done: {swap_cmd.description}")
+                    self.refresh()
+                else:
+                    self._status_label.setText("Rename cancelled (name collision)")
+            else:
+                QMessageBox.warning(self, "Rename Error", "\n".join(errors))
+                self._status_label.setText(f"Error: {errors[0]}")
+            return
+
+        cmd = RenameCell(time=time, index=index, new_name=new_name)
+        self.app.edit_history.do(cmd)
+        self._status_label.setText(f"Done: {cmd.description}")
+        self.refresh()
 
     def _on_kill_cell(self) -> None:
         """Open the Kill Cell dialog."""

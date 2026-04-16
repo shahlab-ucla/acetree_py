@@ -386,6 +386,13 @@ def _apply_assigned_id_names(cells_by_hash: dict[str, Cell]) -> None:
     and, if any of its nuclei carries an assigned_id, updates the Cell's
     .name to match.
 
+    To be deterministic in the face of legacy or externally-edited saves
+    where different nuclei in the same chain might carry *different*
+    assigned_ids, we pick the earliest (lowest-timepoint) value and log
+    a warning if the chain is inconsistent.  With Part 9's cell-scoped
+    RenameCell all nuclei in a chain share one assigned_id, so the
+    warning should only fire on abnormal inputs.
+
     This must run *before* _build_name_lookup() so the name dict
     reflects the forced name.
     """
@@ -396,17 +403,39 @@ def _apply_assigned_id_names(cells_by_hash: dict[str, Cell]) -> None:
             continue
         seen.add(cell_id)
 
-        for _t, nuc in cell.nuclei:
-            if nuc.assigned_id:
-                cell.name = nuc.assigned_id
-                break  # one assigned_id is enough
+        # Iterate in timepoint order, earliest first
+        sorted_nuclei = sorted(cell.nuclei, key=lambda tn: tn[0])
+        chosen: str | None = None
+        mismatches: list[str] = []
+        for _t, nuc in sorted_nuclei:
+            if not nuc.assigned_id:
+                continue
+            if chosen is None:
+                chosen = nuc.assigned_id
+            elif nuc.assigned_id != chosen:
+                mismatches.append(nuc.assigned_id)
+
+        if chosen is not None:
+            cell.name = chosen
+            if mismatches:
+                logger.warning(
+                    "Cell '%s' has inconsistent assigned_ids across its chain: "
+                    "chose earliest '%s', ignored %s",
+                    cell.name, chosen, sorted(set(mismatches)),
+                )
 
 
 def _build_name_lookup(
     cells_by_hash: dict[str, Cell],
     dummy_cells: dict[str, Cell],
 ) -> dict[str, Cell]:
-    """Build the cells_by_name lookup from all cells."""
+    """Build the cells_by_name lookup from all cells.
+
+    Handles name collisions by suffixing (`Name_2`, `Name_3`, ...) so
+    every cell is still reachable by a unique name.  The Part 9
+    validate_rename_cell() prevents user-driven collisions, but this is
+    a safety net for legacy saves, bulk imports, or non-RenameCell edits.
+    """
     by_name: dict[str, Cell] = {}
 
     # Add dummy cells first
@@ -415,17 +444,45 @@ def _build_name_lookup(
 
     # Add/override with real cells from the data
     polar_count = 0
+    # Iterate in a deterministic order so suffix assignment is reproducible
+    seen_cells: set[int] = set()
     for cell in cells_by_hash.values():
+        if id(cell) in seen_cells:
+            continue
+        seen_cells.add(id(cell))
+
         name = cell.name
         if not name:
             continue
 
-        # Handle duplicate polar body names
-        if "polar" in name.lower():
+        # Handle duplicate polar body names (pre-existing rule)
+        if "polar" in name.lower() and name in by_name:
             polar_count += 1
-            if name in by_name:
-                name = f"polar{polar_count}"
-                cell.name = name
+            name = f"polar{polar_count}"
+            cell.name = name
+
+        # General collision: same name already used by a *different* cell
+        if name in by_name and by_name[name] is not cell:
+            # Don't suffix when the existing entry is a dummy ancestor —
+            # real cells should supersede dummy ancestors (this preserves
+            # prior behavior where real P0/AB/... data replaces dummies).
+            existing = by_name[name]
+            existing_is_dummy = existing.start_time < 0
+            if existing_is_dummy:
+                by_name[name] = cell
+                continue
+
+            suffix = 2
+            while f"{name}_{suffix}" in by_name:
+                suffix += 1
+            new_name = f"{name}_{suffix}"
+            logger.warning(
+                "Name collision: '%s' already used by a different cell; "
+                "aliasing second cell as '%s'",
+                name, new_name,
+            )
+            name = new_name
+            cell.name = name
 
         by_name[name] = cell
 

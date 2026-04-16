@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import math
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..core.nucleus import NILLI, Nucleus
 
@@ -235,38 +235,122 @@ class MoveNucleus(EditCommand):
 
 @dataclass
 class RenameCell(EditCommand):
-    """Force a name on a nucleus (sets assigned_id).
+    """Force a name on a cell (sets assigned_id across continuation chain).
+
+    A cell in AceTree spans from birth (division or first appearance) to its
+    next division or disappearance — this is the *continuation chain* of a
+    tracked nucleus.  Renaming a cell therefore means writing the forced
+    name to every nucleus in that chain, not just the clicked one.  This
+    keeps `assigned_id` consistent across the cell's lifetime regardless
+    of which timepoint the user was viewing when they renamed it.
 
     The assigned_id survives the naming pipeline — it's a manual override.
+    Daughters of the renamed cell will still be named automatically (they
+    live in a separate continuation chain after division).
     """
 
-    time: int  # 1-based timepoint
-    index: int  # 1-based nucleus index
+    time: int  # 1-based timepoint where the rename was triggered
+    index: int  # 1-based nucleus index at that timepoint
     new_name: str
 
-    # Saved state for undo
-    _old_identity: str = ""
-    _old_assigned_id: str = ""
+    # Saved state for undo: (t_1based, index_1based, old_identity, old_assigned_id)
+    _touched: list[tuple[int, int, str, str]] = field(default_factory=list)
 
     def execute(self, nuclei_record: NucleiRecord) -> None:
-        nuc = _get_nucleus(nuclei_record, self.time, self.index)
-        self._old_identity = nuc.identity
-        self._old_assigned_id = nuc.assigned_id
-
-        nuc.assigned_id = self.new_name
-        nuc.identity = self.new_name
-        logger.info("Renamed nucleus at t=%d idx=%d to '%s' (was '%s')",
-                     self.time, self.index, self.new_name, self._old_identity)
+        chain = _walk_continuation_chain(nuclei_record, self.time - 1, self.index - 1)
+        self._touched = []
+        for t0, j0 in chain:
+            nuc = nuclei_record[t0][j0]
+            self._touched.append((t0 + 1, j0 + 1, nuc.identity, nuc.assigned_id))
+            nuc.assigned_id = self.new_name
+            nuc.identity = self.new_name
+        logger.info("Renamed cell to '%s': %d nuclei in continuation chain (t=%d idx=%d clicked)",
+                     self.new_name, len(self._touched), self.time, self.index)
 
     def undo(self, nuclei_record: NucleiRecord) -> None:
-        nuc = _get_nucleus(nuclei_record, self.time, self.index)
-        nuc.identity = self._old_identity
-        nuc.assigned_id = self._old_assigned_id
-        logger.info("Undid rename at t=%d idx=%d", self.time, self.index)
+        for t_1based, idx_1based, old_identity, old_assigned_id in self._touched:
+            nuc = _get_nucleus(nuclei_record, t_1based, idx_1based)
+            nuc.identity = old_identity
+            nuc.assigned_id = old_assigned_id
+        logger.info("Undid rename of %d nuclei (clicked at t=%d idx=%d)",
+                     len(self._touched), self.time, self.index)
+        self._touched = []
 
     @property
     def description(self) -> str:
-        return f"Rename nucleus at t={self.time} idx={self.index} to '{self.new_name}'"
+        return f"Rename cell at t={self.time} idx={self.index} to '{self.new_name}'"
+
+
+@dataclass
+class SwapCellNames(EditCommand):
+    """Atomically swap the forced names of two cells.
+
+    Each cell is identified by a (time, index) anchor — any nucleus in the
+    cell's continuation chain works.  The swap writes the *current*
+    effective name of cell B onto every nucleus in A's chain, and vice
+    versa.  If either cell currently has no effective name, its chain is
+    cleared (assigned_id + identity set to '') during the swap.
+
+    This is the UI's answer to the name-collision case: rather than
+    rejecting a rename to an already-used name and leaving the user
+    stuck, they can opt to swap the two cells' names atomically.
+    """
+
+    time_a: int   # 1-based timepoint anchor for cell A
+    index_a: int  # 1-based nucleus index at time_a
+    time_b: int   # 1-based timepoint anchor for cell B
+    index_b: int  # 1-based nucleus index at time_b
+
+    # Saved state for undo
+    _touched_a: list[tuple[int, int, str, str]] = field(default_factory=list)
+    _touched_b: list[tuple[int, int, str, str]] = field(default_factory=list)
+
+    def execute(self, nuclei_record: NucleiRecord) -> None:
+        # Read current effective names BEFORE mutating anything
+        nuc_a = _get_nucleus(nuclei_record, self.time_a, self.index_a)
+        nuc_b = _get_nucleus(nuclei_record, self.time_b, self.index_b)
+        name_a = nuc_a.effective_name
+        name_b = nuc_b.effective_name
+
+        chain_a = _walk_continuation_chain(nuclei_record, self.time_a - 1, self.index_a - 1)
+        chain_b = _walk_continuation_chain(nuclei_record, self.time_b - 1, self.index_b - 1)
+
+        self._touched_a = []
+        self._touched_b = []
+
+        for t0, j0 in chain_a:
+            nuc = nuclei_record[t0][j0]
+            self._touched_a.append((t0 + 1, j0 + 1, nuc.identity, nuc.assigned_id))
+            nuc.assigned_id = name_b
+            nuc.identity = name_b
+
+        for t0, j0 in chain_b:
+            nuc = nuclei_record[t0][j0]
+            self._touched_b.append((t0 + 1, j0 + 1, nuc.identity, nuc.assigned_id))
+            nuc.assigned_id = name_a
+            nuc.identity = name_a
+
+        logger.info("Swapped cell names: '%s' <-> '%s' (%d + %d nuclei)",
+                     name_a, name_b, len(self._touched_a), len(self._touched_b))
+
+    def undo(self, nuclei_record: NucleiRecord) -> None:
+        for t_1based, idx_1based, old_identity, old_assigned_id in self._touched_a:
+            nuc = _get_nucleus(nuclei_record, t_1based, idx_1based)
+            nuc.identity = old_identity
+            nuc.assigned_id = old_assigned_id
+        for t_1based, idx_1based, old_identity, old_assigned_id in self._touched_b:
+            nuc = _get_nucleus(nuclei_record, t_1based, idx_1based)
+            nuc.identity = old_identity
+            nuc.assigned_id = old_assigned_id
+        logger.info("Undid swap of %d + %d nuclei",
+                     len(self._touched_a), len(self._touched_b))
+        self._touched_a = []
+        self._touched_b = []
+
+    @property
+    def description(self) -> str:
+        return (f"Swap cell names: (t={self.time_a}, idx={self.index_a}) "
+                f"<-> (t={self.time_b}, idx={self.index_b})")
 
 
 @dataclass
@@ -605,3 +689,73 @@ def _add_successor(parent: Nucleus, child_index: int) -> None:
     else:
         logger.warning("Nucleus at idx=%d already has 2 successors; cannot add %d",
                         parent.index, child_index)
+
+
+def _walk_continuation_chain(
+    nuclei_record: NucleiRecord,
+    t0: int,
+    j0: int,
+) -> list[tuple[int, int]]:
+    """Walk the continuation chain of a nucleus and return every (t_0based, j_0based) in it.
+
+    A *continuation chain* is the sequence of nuclei that represent a single
+    Cell — from birth (the division event that created it, or its first
+    appearance) to its own next division or disappearance.  Concretely:
+
+      - Forward: follow `successor1` as long as the current nucleus has
+        exactly one successor (`successor2 == NILLI`).  Stop at divisions
+        (both daughters belong to new cells) and at dead ends.
+      - Backward: follow `predecessor` as long as the predecessor itself
+        has exactly one successor (we're continuing a cell, not coming
+        out of a division).  Stop when the predecessor has two successors
+        — that predecessor is the parent cell, not part of our chain.
+
+    The returned list is sorted by timepoint.  Returns [(t0, j0)] alone
+    if the anchor nucleus is invalid.
+    """
+    if t0 < 0 or t0 >= len(nuclei_record):
+        return [(t0, j0)]
+    if j0 < 0 or j0 >= len(nuclei_record[t0]):
+        return [(t0, j0)]
+
+    chain: list[tuple[int, int]] = [(t0, j0)]
+
+    # Walk forward from (t0, j0)
+    t, j = t0, j0
+    while True:
+        nuc = nuclei_record[t][j]
+        # Stop if this nucleus divides (has two successors) or has no successor
+        if nuc.successor1 == NILLI or nuc.successor2 != NILLI:
+            break
+        next_j_1based = nuc.successor1
+        next_t = t + 1
+        if next_t >= len(nuclei_record):
+            break
+        next_j = next_j_1based - 1
+        if next_j < 0 or next_j >= len(nuclei_record[next_t]):
+            break
+        chain.append((next_t, next_j))
+        t, j = next_t, next_j
+
+    # Walk backward from (t0, j0)
+    t, j = t0, j0
+    while True:
+        nuc = nuclei_record[t][j]
+        if nuc.predecessor == NILLI:
+            break
+        prev_t = t - 1
+        if prev_t < 0:
+            break
+        prev_j = nuc.predecessor - 1
+        if prev_j < 0 or prev_j >= len(nuclei_record[prev_t]):
+            break
+        prev_nuc = nuclei_record[prev_t][prev_j]
+        # Stop if the predecessor is a dividing cell — it's the parent,
+        # not part of this cell's chain.
+        if prev_nuc.successor2 != NILLI:
+            break
+        chain.append((prev_t, prev_j))
+        t, j = prev_t, prev_j
+
+    chain.sort()
+    return chain

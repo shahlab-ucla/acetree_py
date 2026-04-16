@@ -1429,24 +1429,36 @@ class AceTreeApp:
             if self._lineage_list:
                 self._lineage_list.rebuild()
 
-        # After a rename (or undo of rename), the tracked cell's name in the
-        # tree has changed.  Read the nucleus's current effective_name to get
-        # the correct post-rebuild name (works for both execute and undo).
-        from ..editing.commands import RenameCell
-        if isinstance(cmd, RenameCell) and self.current_cell_name:
-            # cmd.time is 1-based, nuclei_record is 0-indexed
-            t_idx = cmd.time - 1
-            n_idx = cmd.index - 1  # cmd.index is 1-based
+        # After a rename or swap (or undo of either), the tracked cell's
+        # name in the tree may have changed.  Read the nucleus's current
+        # effective_name to get the correct post-rebuild name (works for
+        # both execute and undo paths).
+        from ..editing.commands import RenameCell, SwapCellNames
+
+        anchors: list[tuple[int, int]] = []
+        if isinstance(cmd, RenameCell):
+            anchors = [(cmd.time, cmd.index)]
+        elif isinstance(cmd, SwapCellNames):
+            anchors = [(cmd.time_a, cmd.index_a), (cmd.time_b, cmd.index_b)]
+
+        if anchors and self.current_cell_name:
             nr = self.manager.nuclei_record
-            if 0 <= t_idx < len(nr) and 0 <= n_idx < len(nr[t_idx]):
-                nuc = nr[t_idx][n_idx]
-                new_name = nuc.effective_name
-                if new_name:
-                    old_name = self.current_cell_name
-                    self.current_cell_name = new_name
-                    if self._viewer_integration is not None:
-                        self._viewer_integration._shown_labels.discard(old_name)
-                        self._viewer_integration._shown_labels.add(new_name)
+            old_name = self.current_cell_name
+            for t_1based, idx_1based in anchors:
+                t_idx = t_1based - 1
+                n_idx = idx_1based - 1
+                if 0 <= t_idx < len(nr) and 0 <= n_idx < len(nr[t_idx]):
+                    nuc = nr[t_idx][n_idx]
+                    new_name = nuc.effective_name
+                    if new_name and self.manager.get_cell(new_name) is not None:
+                        # For a swap, pick whichever anchor's new name is
+                        # actually in the tree.  If neither matches the
+                        # old tracked name, the first valid anchor wins.
+                        self.current_cell_name = new_name
+                        if self._viewer_integration is not None:
+                            self._viewer_integration._shown_labels.discard(old_name)
+                            self._viewer_integration._shown_labels.add(new_name)
+                        break
 
         self.update_display()
 

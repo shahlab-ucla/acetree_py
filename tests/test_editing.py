@@ -19,9 +19,11 @@ from acetree_py.editing.commands import (
     RemoveNucleus,
     RenameCell,
     ResurrectCell,
+    SwapCellNames,
     _add_successor,
     _get_nucleus,
     _remove_successor,
+    _walk_continuation_chain,
 )
 from acetree_py.editing.history import EditHistory
 from acetree_py.editing.validators import (
@@ -30,6 +32,7 @@ from acetree_py.editing.validators import (
     validate_relink,
     validate_relink_interpolation,
     validate_remove_nucleus,
+    validate_rename_cell,
 )
 
 
@@ -253,20 +256,201 @@ class TestMoveNucleus:
 
 class TestRenameCell:
     def test_rename_and_undo(self):
+        """Renaming any nucleus in a continuation chain renames the whole chain."""
         record = _simple_record()
-        nuc = record[0][0]
-        assert nuc.identity == "A"
-        assert nuc.assigned_id == ""
+        # Chain A spans all 3 timepoints (A1 -> A2 -> A3)
+        for t_idx in range(3):
+            assert record[t_idx][0].identity == "A"
+            assert record[t_idx][0].assigned_id == ""
 
-        cmd = RenameCell(time=1, index=1, new_name="ABala")
+        # Rename by clicking nucleus at T2 idx=1 — whole chain should update
+        cmd = RenameCell(time=2, index=1, new_name="ABala")
         cmd.execute(record)
 
-        assert nuc.identity == "ABala"
-        assert nuc.assigned_id == "ABala"
+        for t_idx in range(3):
+            assert record[t_idx][0].identity == "ABala", f"t={t_idx + 1} not renamed"
+            assert record[t_idx][0].assigned_id == "ABala", f"t={t_idx + 1} assigned_id missing"
 
         cmd.undo(record)
-        assert nuc.identity == "A"
-        assert nuc.assigned_id == ""
+        for t_idx in range(3):
+            assert record[t_idx][0].identity == "A"
+            assert record[t_idx][0].assigned_id == ""
+
+    def test_rename_affects_entire_continuation(self):
+        """Rename at any timepoint updates every nucleus in the chain."""
+        record = _simple_record()
+        # Rename clicking the middle nucleus
+        cmd = RenameCell(time=2, index=1, new_name="MyCell")
+        cmd.execute(record)
+
+        names = [record[t][0].effective_name for t in range(3)]
+        assert names == ["MyCell", "MyCell", "MyCell"]
+
+    def test_rename_twice_custom_to_custom(self):
+        """Renaming twice (X -> Y -> Z) leaves the whole chain at Z."""
+        record = _simple_record()
+        RenameCell(time=1, index=1, new_name="X").execute(record)
+        RenameCell(time=2, index=1, new_name="Y").execute(record)
+        RenameCell(time=3, index=1, new_name="Z").execute(record)
+
+        for t_idx in range(3):
+            assert record[t_idx][0].effective_name == "Z"
+            assert record[t_idx][0].assigned_id == "Z"
+
+    def test_rename_roundtrip(self):
+        """Rename MyCell -> back to original sulston name: whole chain reflects it."""
+        record = _simple_record()
+        # Original identity is "A".  Rename to "MyCell", then back to "A".
+        cmd1 = RenameCell(time=1, index=1, new_name="MyCell")
+        cmd1.execute(record)
+        cmd2 = RenameCell(time=2, index=1, new_name="A")
+        cmd2.execute(record)
+
+        for t_idx in range(3):
+            assert record[t_idx][0].effective_name == "A"
+            assert record[t_idx][0].assigned_id == "A"
+
+    def test_rename_undo_reverts_full_chain(self):
+        """Undo restores every nucleus in the chain to its prior state."""
+        record = _simple_record()
+        # Seed some prior state: each nucleus has a different identity
+        record[0][0].identity = "first"
+        record[1][0].identity = "middle"
+        record[2][0].identity = "last"
+        record[1][0].assigned_id = "was-forced"
+
+        cmd = RenameCell(time=1, index=1, new_name="NewName")
+        cmd.execute(record)
+
+        # All three should now be NewName
+        for t_idx in range(3):
+            assert record[t_idx][0].effective_name == "NewName"
+
+        cmd.undo(record)
+
+        # Each nucleus returns to its exact prior state
+        assert record[0][0].identity == "first"
+        assert record[0][0].assigned_id == ""
+        assert record[1][0].identity == "middle"
+        assert record[1][0].assigned_id == "was-forced"
+        assert record[2][0].identity == "last"
+        assert record[2][0].assigned_id == ""
+
+    def test_rename_stops_at_division(self):
+        """Rename on a dividing parent only affects the parent's chain, not daughters."""
+        record = _dividing_record()
+        # Give P0 a single timepoint chain (T1 only); daughters at T2 are separate cells.
+        RenameCell(time=1, index=1, new_name="NewP0").execute(record)
+
+        assert record[0][0].effective_name == "NewP0"
+        # Daughters are NOT renamed
+        assert record[1][0].effective_name == "AB"
+        assert record[1][1].effective_name == "P1"
+
+
+class TestWalkContinuationChain:
+    def test_simple_chain(self):
+        """A 3-timepoint non-dividing cell: chain has 3 entries."""
+        record = _simple_record()
+        chain = _walk_continuation_chain(record, 1, 0)  # middle of A's chain
+        assert chain == [(0, 0), (1, 0), (2, 0)]
+
+    def test_chain_stops_at_division(self):
+        """Predecessor chain stops when parent has 2 successors."""
+        record = _dividing_record()
+        # AB at T2 idx=1 has predecessor=1 (P0).  P0.successor2 > 0, so chain
+        # should NOT include P0.
+        chain = _walk_continuation_chain(record, 1, 0)
+        assert chain == [(1, 0)]
+
+    def test_chain_from_anchor_idx_agnostic(self):
+        """Walking from any nucleus in the chain returns the same chain."""
+        record = _simple_record()
+        c0 = _walk_continuation_chain(record, 0, 0)
+        c1 = _walk_continuation_chain(record, 1, 0)
+        c2 = _walk_continuation_chain(record, 2, 0)
+        assert c0 == c1 == c2
+
+
+class TestSwapCellNames:
+    def test_swap_basic(self):
+        """Swap cell A (chain: T1-T3 idx=1) with cell B (chain: T1-T3 idx=2)."""
+        record = _simple_record()
+        for t_idx in range(3):
+            assert record[t_idx][0].effective_name == "A"
+            assert record[t_idx][1].effective_name == "B"
+
+        cmd = SwapCellNames(time_a=1, index_a=1, time_b=1, index_b=2)
+        cmd.execute(record)
+
+        for t_idx in range(3):
+            assert record[t_idx][0].effective_name == "B"
+            assert record[t_idx][1].effective_name == "A"
+
+    def test_swap_undo(self):
+        record = _simple_record()
+        cmd = SwapCellNames(time_a=1, index_a=1, time_b=1, index_b=2)
+        cmd.execute(record)
+        cmd.undo(record)
+
+        for t_idx in range(3):
+            assert record[t_idx][0].effective_name == "A"
+            assert record[t_idx][0].assigned_id == ""
+            assert record[t_idx][1].effective_name == "B"
+            assert record[t_idx][1].assigned_id == ""
+
+    def test_swap_preserves_forced_names(self):
+        """Swap writes assigned_id on both chains."""
+        record = _simple_record()
+        # First force-rename A to MyCell
+        RenameCell(time=1, index=1, new_name="MyCell").execute(record)
+        # Then swap MyCell <-> B
+        SwapCellNames(time_a=1, index_a=1, time_b=1, index_b=2).execute(record)
+
+        for t_idx in range(3):
+            assert record[t_idx][0].assigned_id == "B"
+            assert record[t_idx][1].assigned_id == "MyCell"
+
+
+class TestValidateRenameCell:
+    def test_valid_rename(self):
+        record = _simple_record()
+        errors, collision = validate_rename_cell(record, 1, 1, "Whatever")
+        assert errors == []
+        assert collision is None
+
+    def test_rename_to_same_name_is_noop(self):
+        record = _simple_record()
+        errors, collision = validate_rename_cell(record, 1, 1, "A")
+        assert errors == []
+        assert collision is None
+
+    def test_empty_new_name_rejected(self):
+        record = _simple_record()
+        errors, _ = validate_rename_cell(record, 1, 1, "")
+        assert errors
+        assert "empty" in errors[0].lower()
+
+    def test_collision_detected(self):
+        """Renaming A -> B (already used by another cell) returns collision anchor."""
+        record = _simple_record()
+        errors, collision = validate_rename_cell(record, 1, 1, "B")
+        assert errors
+        assert collision is not None
+        other_t, other_j = collision
+        # The conflicting cell is B, which lives at idx=2
+        assert other_j == 2
+
+    def test_collision_within_own_chain_is_allowed(self):
+        """Renaming to a name already in the same continuation chain is fine."""
+        record = _simple_record()
+        # Pre-set T2 and T3 of A's chain to "NewName" (simulating a partial edit)
+        record[1][0].assigned_id = "NewName"
+        record[2][0].assigned_id = "NewName"
+        # Renaming T1 to "NewName" should not be a collision — it's the same cell
+        errors, collision = validate_rename_cell(record, 1, 1, "NewName")
+        assert errors == []
+        assert collision is None
 
 
 # ── RelinkNucleus tests ─────────────────────────────────────────

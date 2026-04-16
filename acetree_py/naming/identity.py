@@ -394,8 +394,17 @@ class IdentityAssigner:
                 if not (0 <= s_idx < len(nr[t + 1])):
                     break
                 succ = nr[t + 1][s_idx]
+                # With cell-scoped RenameCell (Part 9), the entire chain
+                # is written atomically, so a differing assigned_id in the
+                # same continuation chain indicates a legacy save file or
+                # an edit that bypassed RenameCell.  In that case we still
+                # sweep the latest seed through — log it so inconsistencies
+                # are visible.
                 if succ.assigned_id and succ.assigned_id != forced_name:
-                    break  # Different forced name — don't overwrite
+                    logger.warning(
+                        "Propagation overwriting differing assigned_id at t=%d idx=%d: '%s' -> '%s'",
+                        t + 2, s_idx + 1, succ.assigned_id, forced_name,
+                    )
                 succ.assigned_id = forced_name
                 succ.identity = forced_name
                 t, idx = t + 1, s_idx
@@ -415,7 +424,10 @@ class IdentityAssigner:
                 if pred.successor2 > 0:
                     break
                 if pred.assigned_id and pred.assigned_id != forced_name:
-                    break  # Different forced name — don't overwrite
+                    logger.warning(
+                        "Propagation overwriting differing assigned_id at t=%d idx=%d: '%s' -> '%s'",
+                        t, p_idx + 1, pred.assigned_id, forced_name,
+                    )
                 pred.assigned_id = forced_name
                 pred.identity = forced_name
                 t, idx = t - 1, p_idx
