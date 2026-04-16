@@ -31,9 +31,14 @@ from .color_rules import ColorRuleEngine
 
 logger = logging.getLogger(__name__)
 
-# Nucleus z-index offset used by Java AceTree (nuc.z is 0-based internally
-# but 1-based in the display; Java adds this constant)
-NUCZINDEXOFFSET = 1
+# Java AceTree stored this constant as `NUCZINDEXOFFSET = 1`, but in our
+# Python port ``nuc.z`` and ``current_plane`` are in the *same* 1-based
+# coordinate system (see NucleiManager.find_closest_nucleus /
+# nucleus_diameter, which compare ``nuc.z - image_plane`` directly).
+# Adding +1 to the snap target therefore lands the viewer one plane above
+# the true centroid — visible symptom: the slice follows a selected cell
+# across time but stops one plane short of the nucleus.  Set to 0.
+NUCZINDEXOFFSET = 0
 
 
 class AceTreeApp:
@@ -734,17 +739,36 @@ class AceTreeApp:
         parent_end_time = None
         parent_end_index = None
 
-        # If a cell is selected, link to it
+        # If a cell is selected, link to it.  The user's intent when clicking
+        # Add with a parent selected is "extend this cell forward in time".
+        # If they happen to click at the parent's end_time (or earlier), auto-
+        # shift the new nucleus to end_time + 1 so the extension actually
+        # happens — matching the "Predecessor: <name>" hint shown in the
+        # status bar.  Also advance ``current_time`` so the user sees the
+        # newly placed nucleus.
         parent_name = self.current_cell_name
         if parent_name:
             cell = self.manager.get_cell(parent_name)
             if cell is not None:
                 parent_end_time = cell.end_time
-                gap = time - parent_end_time
-                if gap <= 0:
-                    # Same or earlier timepoint — treat as root
-                    parent_name = None
-                else:
+                if time <= parent_end_time:
+                    # Extend forward: place at the timepoint after the
+                    # parent's last known nucleus.
+                    new_time = parent_end_time + 1
+                    if new_time <= self.manager.num_timepoints:
+                        time = new_time
+                        self.current_time = new_time
+                        logger.info(
+                            "Add: auto-advanced to t=%d to extend cell '%s' "
+                            "(which ends at t=%d)",
+                            new_time, parent_name, parent_end_time,
+                        )
+                    else:
+                        # Parent ends at the last timepoint — no room to
+                        # extend; drop the link and place as a root.
+                        parent_name = None
+                gap = time - parent_end_time if parent_name else 0
+                if parent_name and gap > 0:
                     identity = parent_name
                     parent_nuc = cell.get_nucleus_at(parent_end_time)
                     if parent_nuc is not None:
@@ -1898,6 +1922,36 @@ class AceTreeApp:
         # Clear it so subsequent tracking/navigation doesn't chase a dead ref.
         self.current_cell_name = ""
 
+    def _exit_all_modes(self) -> None:
+        """Exit every interaction mode and reset every toolbar button.
+
+        Called from both the napari viewer keybinding and a global
+        ``QShortcut`` attached to the main window so Escape works
+        regardless of which widget has keyboard focus (see ``_bind_keys``).
+        """
+        changed = False
+        if self._add_mode:
+            self.exit_add_mode()
+            changed = True
+        if self._placement_mode:
+            self.exit_placement_mode()
+            changed = True
+        if self._relink_pick_mode:
+            self.exit_relink_pick_mode()
+            changed = True
+
+        if self._edit_panel:
+            try:
+                self._edit_panel._btn_add.setChecked(False)
+            except Exception:
+                pass
+            try:
+                self._edit_panel._btn_track.setChecked(False)
+            except Exception:
+                pass
+            if changed:
+                self._edit_panel._status_label.setText("Exited mode")
+
     def _bind_keys(self) -> None:
         """Bind keyboard shortcuts to the napari viewer."""
         if self.viewer is None:
@@ -1941,34 +1995,29 @@ class AceTreeApp:
 
         @self.viewer.bind_key("Escape")
         def _exit_modes(viewer):
-            # Defensively exit every interaction mode and reset every toolbar
-            # button, not just the currently-active one.  Mode flags and
-            # button checked-states can drift out of sync (e.g. focus stolen
-            # by a modal), and a single Escape press should always return
-            # the UI to a clean navigation state.
-            changed = False
-            if self._add_mode:
-                self.exit_add_mode()
-                changed = True
-            if self._placement_mode:
-                self.exit_placement_mode()
-                changed = True
-            if self._relink_pick_mode:
-                self.exit_relink_pick_mode()
-                changed = True
-
-            if self._edit_panel:
-                try:
-                    self._edit_panel._btn_add.setChecked(False)
-                except Exception:
-                    pass
-                try:
-                    self._edit_panel._btn_track.setChecked(False)
-                except Exception:
-                    pass
-                if changed:
-                    self._edit_panel._status_label.setText("Exited mode")
+            # Canvas-focused Escape path.  See _exit_all_modes() for the
+            # shared implementation used by both this handler and the
+            # application-wide QShortcut below.
+            self._exit_all_modes()
 
         @self.viewer.bind_key("Delete")
         def _delete_nucleus(viewer):
             self._delete_active_nucleus()
+
+        # ── Application-wide Escape shortcut ───────────────────────
+        # Napari's @viewer.bind_key("Escape") only fires when the canvas
+        # has keyboard focus.  Clicking a toolbar button (Add, Track)
+        # moves focus to the button, which absorbs or ignores Escape.
+        # Install a QShortcut on the main window with ApplicationShortcut
+        # context so Escape works regardless of which widget has focus.
+        try:
+            from qtpy.QtCore import Qt
+            from qtpy.QtGui import QKeySequence
+            from qtpy.QtWidgets import QShortcut
+
+            qt_window = self.viewer.window._qt_window  # type: ignore[attr-defined]
+            self._escape_shortcut = QShortcut(QKeySequence("Escape"), qt_window)
+            self._escape_shortcut.setContext(Qt.ApplicationShortcut)
+            self._escape_shortcut.activated.connect(self._exit_all_modes)
+        except Exception as e:
+            logger.warning("Could not install application-wide Escape shortcut: %s", e)

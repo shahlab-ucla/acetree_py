@@ -181,8 +181,25 @@ class TestTracking:
         app.tracking = True
         app.select_cell("AB")
         app.set_time(5)
-        # AB at T5 is at z=14.0, so plane should be ~ 14 + NUCZINDEXOFFSET = 15
+        # AB at T5 is at z=14.0, so plane should be 14 (+ 0 offset).
         assert app.current_plane == round(14.0 + NUCZINDEXOFFSET)
+
+    def test_tracking_lands_on_centroid_not_off_by_one(self):
+        """Regression: NUCZINDEXOFFSET used to be 1, which shifted the
+        displayed plane one above the nucleus centroid.  With the offset
+        fixed to 0, the slice must land exactly on the integer-rounded
+        nucleus z value."""
+        assert NUCZINDEXOFFSET == 0
+        app = _make_app()
+        app.tracking = True
+        app.select_cell("AB")
+        # AB at T5 lives at z=14.0 — the display must snap to plane 14.
+        app.set_time(5)
+        assert app.current_plane == 14
+        # P1 at T5 lives at z=16.0 — the display must snap to plane 16.
+        app.select_cell("P1")
+        app.set_time(5)
+        assert app.current_plane == 16
 
     def test_tracking_off_preserves_plane(self):
         app = _make_app()
@@ -200,6 +217,54 @@ class TestTracking:
         app.set_time(3)
         # Should have switched to AB (first daughter)
         assert app.current_cell_name in ("AB", "P1")
+
+
+# ── Add-mode auto-advance tests ──────────────────────────────────
+
+
+class TestAddModeAutoAdvance:
+    """_handle_add_click should extend the selected cell forward rather
+    than silently drop the parent link when the user clicks at the same
+    timepoint as the parent's end_time."""
+
+    def test_add_at_parent_end_time_auto_advances(self):
+        """User selects AB (ends at t=5) and clicks Add while viewing t=5.
+        The new nucleus should be placed at t=6 with AB as predecessor."""
+        app = _make_app()
+        app.enter_add_mode()
+        app.select_cell("AB")  # AB ends at t=5
+        app.current_time = 5   # same as parent end_time
+        # Extend the record to have a t=6 slot so num_timepoints allows it.
+        app.manager.nuclei_record.append([])
+        # Click at some (x, y).
+        app._handle_add_click(100.0, 150.0)
+
+        # current_time advanced to 6
+        assert app.current_time == 6
+        # New nucleus landed at t=6
+        assert len(app.manager.nuclei_record[5]) == 1
+        new_nuc = app.manager.nuclei_record[5][0]
+        # Linked to AB's nucleus at t=5 (idx 1)
+        assert new_nuc.predecessor == 1
+        # And inherited AB's name via assigned_id so the naming pipeline
+        # treats the chain as one cell.
+        assert new_nuc.assigned_id == "AB"
+
+    def test_add_without_selection_is_root(self):
+        """No cell selected → new nucleus is a root, no predecessor,
+        no auto-advance."""
+        app = _make_app()
+        app.enter_add_mode()
+        app.current_cell_name = ""
+        app.current_time = 3
+        t_before = app.current_time
+        before_len = len(app.manager.nuclei_record[2])
+        app._handle_add_click(300.0, 300.0)
+        assert app.current_time == t_before
+        assert len(app.manager.nuclei_record[2]) == before_len + 1
+        new_nuc = app.manager.nuclei_record[2][-1]
+        assert new_nuc.predecessor == -1  # NILLI
+        assert new_nuc.assigned_id == ""
 
 
 # ── Overlay data tests ───────────────────────────────────────────

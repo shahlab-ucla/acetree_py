@@ -62,8 +62,12 @@ def write_config_xml(config: AceTreeConfig, path: str | Path) -> None:
     # <end index="..."/>
     SubElement(root, "end", index=str(config.ending_index))
 
-    # <naming method="..."/>
-    SubElement(root, "naming", method=config.naming_method.name)
+    # <naming method="..."/> — Java AceTree parses this value with
+    # Integer.parseInt(), so we must write the numeric enum value
+    # (e.g. "3" for NEWCANONICAL), not the name.  Python's own parser
+    # (io/config.py::NamingMethod.from_string) accepts both names and
+    # numerics, so round-trip is preserved.
+    SubElement(root, "naming", method=str(int(config.naming_method)))
 
     # <axis axis="..."/>
     if config.axis_given:

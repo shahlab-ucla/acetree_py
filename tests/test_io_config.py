@@ -157,6 +157,30 @@ class TestJavaXMLCompat:
         assert loaded.split == 1
         assert loaded.flip == 1
 
+    def test_naming_method_written_as_numeric(self, tmp_path: Path):
+        """Java's NucleiConfig parses the naming method with Integer.parseInt,
+        so the written value must be numeric (the enum's int value), not the
+        enum name.  Python's parser accepts both."""
+        from acetree_py.io.config import AceTreeConfig, NamingMethod
+        from acetree_py.io.config_writer import write_config_xml
+
+        cfg_path = tmp_path / "cfg.xml"
+        src = AceTreeConfig(
+            config_file=cfg_path,
+            zip_file=tmp_path / "nuclei.zip",
+            image_file=tmp_path / "img.tif",
+            naming_method=NamingMethod.NEWCANONICAL,
+        )
+        write_config_xml(src, cfg_path)
+        text = cfg_path.read_text()
+        # Must emit the enum's numeric value, not the name.
+        assert '<naming method="3"' in text
+        assert '<naming method="NEWCANONICAL"' not in text
+
+        # And a round-trip must still restore the enum.
+        loaded = load_config(cfg_path)
+        assert loaded.naming_method == NamingMethod.NEWCANONICAL
+
     def test_parser_accepts_legacy_lowercase(self, tmp_path: Path):
         """Parser is case-insensitive, so old Python-generated configs
         with lowercase tags still load correctly."""
