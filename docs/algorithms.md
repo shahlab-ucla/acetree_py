@@ -498,11 +498,29 @@ After every `do`/`undo`/`redo`, the `on_edit` callback is invoked. In the GUI, t
 
 ### 8.4 RenameCell
 
-**Execute:** Save `(identity_0, assigned_id_0)`. Set both to `new_name` at the specified timepoint.
+**Execute:**
+1. Walk the cell's *continuation chain* starting at the clicked `(time, index)`: follow `predecessor` backward until it hits a division (predecessor has two successors) or disappears, and follow `successor1` forward under the same rule. This enumerates every nucleus belonging to the same cell.
+2. For each nucleus `(t_k, i_k)` in the chain, save `(t_k, i_k, identity_0, assigned_id_0)`. Set `identity ← new_name` and `assigned_id ← new_name` on that nucleus.
 
-**Undo:** Restore both.
+**Undo:** For each saved tuple, restore `identity` and `assigned_id`.
 
-**Note:** The `RenameCell` command sets `assigned_id` at a single timepoint. The naming pipeline (`_propagate_assigned_ids()`) then extends this forced name to the cell's entire lifetime via continuation chains when identities are reassigned (see Section 2.2).
+**Why cell-scoped?** A cell in AceTree is the continuation chain of a tracked nucleus — birth to next division or disappearance — not a single nucleus at one timepoint. Writing `assigned_id` on all chain members atomically keeps the manual override consistent across the cell's lifetime no matter which timepoint the user clicked, and makes a single undo/redo restore the full rename.
+
+**Interaction with the naming pipeline:** `_propagate_assigned_ids()` (Section 2.2) is now a safety net rather than the primary propagation mechanism — the command itself has already written the forced name end-to-end. Daughters beyond the next division are still named automatically by the division caller using the forced name as parent.
+
+### 8.4.5 SwapCellNames
+
+Used to resolve name collisions when the user tries to rename a cell to a name already in use by another cell.
+
+**Execute:**
+1. Resolve `nuc_a` at `(time_a, index_a)` and `nuc_b` at `(time_b, index_b)`. Read `name_a = nuc_a.effective_name` and `name_b = nuc_b.effective_name` *before mutating anything*.
+2. Walk the continuation chains `chain_a` and `chain_b` (same algorithm as RenameCell).
+3. For each nucleus in `chain_a`: save its `(t, i, identity_0, assigned_id_0)`, then set `identity = assigned_id = name_b`.
+4. For each nucleus in `chain_b`: save its state, then set `identity = assigned_id = name_a`.
+
+**Undo:** Restore all saved tuples from both chains.
+
+**Empty-name handling:** If either cell has no effective name (e.g. never got a Sulston name), that side of the swap writes the empty string, effectively clearing the other chain's forced name. This is intentional — the operation is "B now has A's name and vice versa," which means blank round-trips if A was blank.
 
 ### 8.5 RelinkNucleus
 

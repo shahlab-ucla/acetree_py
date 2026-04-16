@@ -55,7 +55,7 @@ acetree-py create
 acetree-py create path/to/images/ --output path/to/output/ --xy-res 0.1625 --z-res 0.65 --split
 ```
 
-See [Manual Tracking & Dataset Creation](docs/user_guide.md#13-manual-tracking--dataset-creation) in the User Guide for a full walkthrough.
+See [Manual Tracking & Dataset Creation](docs/user_guide.md#14-manual-tracking--dataset-creation) in the User Guide for a full walkthrough.
 
 ### CLI
 
@@ -96,8 +96,10 @@ acetree-py info config.xml --cell ABala
 - **Manual tracking** — click-to-add nuclei, D-pad nudge controls, create datasets from raw images
 - **Topology-based naming** — automatic Sulston name assignment from lineage structure, with rotation-invariant axis estimation robust to embryo rotations during imaging
 - **Interactive relink** — click-based predecessor editing with automatic interpolation
+- **Cell-scoped rename and atomic swap** — the Rename command writes a forced name across the cell's entire continuation chain in one undoable step; name collisions can be resolved with an atomic swap between two cells
 - **Full undo/redo** — up to 1000 edit commands with `Ctrl+Z` / `Ctrl+Y`
 - **Multi-panel lineage trees** — open multiple Sulston tree views with independent root cells, time ranges, expression ranges, and colormaps
+- **Pixel measurement (File → Measure…)** — port of the Java `AceBatch2` measure tool: samples fluorescence per nucleus in every image channel, writes one CSV per channel (cell × absolute time), updates `rwraw` / `rwcorr1` / `rweight` for the chosen AT channel so the lineage tree re-colors from live measurement
 - **Screenshot and recording** — capture single frames or export image sequences across timepoints
 - **Save/Save As** — persist edits to ZIP files compatible with Java AceTree
 - **Export** — cell tables, nucleus tables, expression time series, Newick trees

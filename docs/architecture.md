@@ -30,7 +30,7 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     lineage_axes.py            # Per-timepoint body axis estimation from lineage centroids + LR quality metric
     validation.py              # Post-naming validation
   editing/                     # Command-pattern edit system — no GUI deps
-    commands.py                # EditCommand ABC + 8 concrete commands
+    commands.py                # EditCommand ABC + 10 concrete commands
     history.py                 # EditHistory (undo/redo stacks)
     validators.py              # Pre-edit validation functions
   io/                          # File I/O — no GUI dependencies
@@ -53,9 +53,13 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     edit_panel.py              # EditPanel + dialog classes
     viewer_3d_window.py        # Viewer3DWindow (detached 3D viewer)
     dataset_dialog.py          # DatasetCreationDialog (4-page wizard)
+    measure_dialog.py          # MeasureDialog (channel + output picker)
   analysis/                    # Post-hoc analysis — no GUI dependencies
     expression.py              # Expression time series analysis
     export.py                  # CSV, Newick export functions
+    measure.py                 # Per-nucleus pixel sampling (port of ExtractRed)
+    measure_csv.py             # Measure CSV writer (per-channel, absolute time)
+    measure_runner.py          # Measure orchestrator (iterates channels/timepoints)
   utils/
     geometry.py                # 3D vector math helpers
   resources/
@@ -316,7 +320,8 @@ The `structural` property (default `True`) indicates whether the edit changes li
 | `AddNucleus`               | Create nucleus at position               | Added index                           |
 | `RemoveNucleus`            | Kill nucleus (status=-1)                  | Old status, identity, assigned_id     |
 | `MoveNucleus`              | Change position/size                      | Old x, y, z, size                     |
-| `RenameCell`               | Set identity + assigned_id                | Old identity, assigned_id             |
+| `RenameCell`               | Set identity + assigned_id across the cell's entire continuation chain (atomic, cell-scoped) | List of (time, idx, old identity, old assigned_id) tuples for every nucleus in the chain |
+| `SwapCellNames`            | Atomically swap the forced names of two cells (writes B's name onto all of A's chain and vice versa) | Two lists of (time, idx, old identity, old assigned_id) tuples, one per chain |
 | `RelinkNucleus`            | Change predecessor link                   | Old/new pred, both parents' successors|
 | `KillCell`                 | Kill all nuclei of a named cell           | List of (time, idx, old state) tuples |
 | `ResurrectCell`            | Restore dead nucleus                      | Old status, identity, assigned_id     |
@@ -419,6 +424,11 @@ Uses `_ClickableGraphicsView` subclass to handle single-click despite `ScrollHan
 - `add_lineage_panel()` creates a new panel with configurable parameters
 - All panels rebuild synchronously after edit operations
 - **Window > New Lineage Panel...** menu action opens a config dialog
+
+**Menu bar additions** (injected into napari's menu bar at launch):
+- **File → Measure…** — opens `MeasureDialog`, runs per-channel pixel measurement via `analysis.measure_runner.run_measure`, writes CSVs, refreshes tree colors (see §7.3).
+- **Window → \<panel toggles\>** — auto-generated `toggleViewAction()` entries for every dock widget.
+- **Window → New Lineage Panel…** — opens `LineagePanelConfigDialog`.
 
 ### 6.4 LineageLayout (`gui/lineage_layout.py`)
 
@@ -528,6 +538,39 @@ The `create` CLI command (`__main__.py`) provides both interactive (wizard dialo
 | `export_expression_csv()`     | Expression time series CSV      |
 | `export_newick()`             | Newick tree format              |
 
+### 7.3 Pixel Measurement (`analysis/measure.py`, `measure_csv.py`, `measure_runner.py`)
+
+Port of the Java `AceBatch2` measure routine (`org.rhwlab.analyze.ExtractRed` + `RedBkgComp2` + `NucleiMgr.computeRWeight`). Samples pixel intensity at every nucleus in every image channel, writes per-channel CSVs, and feeds the user-chosen channel's measurements back into `nuc.rwraw`/`rwcorr1` so the lineage tree re-colors from live measurement.
+
+**`measure.py` — pixel sampling:**
+
+| Function             | Purpose                                                             |
+|----------------------|---------------------------------------------------------------------|
+| `project_radius()`   | Projected XY radius of a spherical nucleus at a given Z-plane       |
+| `measure_nucleus()`  | Sum + count of pixels in the inner disk and outer annulus at every plane the nucleus touches |
+| `measure_timepoint()`| Map `measure_nucleus` across all nuclei at one timepoint            |
+
+Each nucleus is modelled as a sphere of diameter `nuc.size` centred at `(x, y, z)`; at each plane that the sphere intersects, a 2D disk (inner) and concentric annulus (`DEFAULT_ANNULUS_SCALE = 1.5`) are rasterised and pixel sums/counts accumulated. Dead nuclei (`status < 1`) return `(0, 0, 0, 0)`.
+
+**`measure_csv.py` — CSV writer:**
+
+`write_measure_csv(path, rows, n_timepoints)` produces one CSV per channel with absolute-time columns: `cell_name, start_time, end_time, t1, t2, …, tN`. Cells absent at a given timepoint get an empty cell in that column. The AT channel's file is named `measure_channel{n}_AT.csv`; other channels get `measure_channel{n}.csv`.
+
+**`measure_runner.py` — orchestrator:**
+
+`run_measure(manager, image_provider, output_dir, at_channel, progress_cb=None)`:
+
+1. Iterates every channel, every timepoint. For each `(t, channel)` it calls `image_provider.get_stack(t, channel)` and `measure_timepoint`, collecting `(sum_in, count_in, sum_ann, count_ann)` for every nucleus.
+2. For the chosen `at_channel` only: writes `rwraw = round(sum_in * 1000 / count_in)` and `rwcorr1 = round(sum_ann * 1000 / count_ann)` back onto each `Nucleus` (the `* 1000` SCALE matches Java `NucleiMgr.computeRWeight`). Leaves untouched nuclei (dead or unmeasured) unchanged so prior values aren't blown away.
+3. Recomputes `rweight` via `manager.compute_red_weights()` (under `correction = "none"`, falls back to copying `rwraw` directly).
+4. Writes one CSV per channel. The per-timepoint CSV value follows the session's current correction method — plain `rwraw` for `"none"`, `rwraw - rwcorr1` otherwise.
+
+**Cancellation:** `progress_cb(channel_idx, n_channels, t_1based, n_timepoints) -> bool | None` is fired after every timepoint. Returning `False` raises `RuntimeError("Measure cancelled by user")`.
+
+**Scope note:** Only `rwcorr1` (global background) is computed. `rwcorr2` / `rwcorr3` came from external MATLAB in the Java pipeline; `rwcorr4` (crosstalk) was deferred. `"local"` / `"blot"` / `"cross"` correction modes fall back to `rwraw - rwcorr1` for the CSV output.
+
+**GUI wiring:** `File → Measure…` (added in `gui/app.py::_add_file_menu_actions`) opens `MeasureDialog` (channel combo + output-dir picker), runs the orchestrator under a `QProgressDialog`, and rebuilds every lineage widget on completion so the fresh `rweight` values show up.
+
 ---
 
 ## 8. CLI
@@ -547,7 +590,7 @@ acetree-py info <config.xml> -c ABala           # Query cell details
 
 ## 9. Testing
 
-26 test files in `tests/` covering all modules: data model, I/O, naming, editing, GUI widgets, color rules, CLI, analysis, and integration tests. Run with `pytest tests/`.
+30 test files in `tests/` covering all modules: data model, I/O, naming, editing, GUI widgets, color rules, CLI, analysis (including pixel measurement), and integration tests. Run with `pytest tests/` (≥619 tests, napari-integration tests can be deselected with `--deselect tests/test_gui_widgets.py::TestNapariIntegration`).
 
 ---
 

@@ -263,7 +263,13 @@ Each button press executes immediately and is individually undoable with `Ctrl+Z
 ### 6.4 Cell Operations
 
 #### Rename
-Select a cell, then click **Rename**. Enter a new name. This sets the `assigned_id` field, which is a manual override that persists through automatic re-naming. The forced name is automatically propagated to all timepoints the cell exists (both forward and backward through continuation links). When the cell divides, the forced name is used as the parent name for Sulston daughter naming rules.
+Select a cell, then click **Rename**. Enter a new name.
+
+The rename is **cell-scoped**: the forced name (`assigned_id`) is written atomically onto *every nucleus in the cell's continuation chain* — from the cell's birth (previous division or first appearance) through its next division or disappearance. You don't need to rename at a specific timepoint; clicking at any point in the cell's lifetime produces the same result.
+
+The forced name persists through automatic re-naming on reload. When the cell divides, the forced name is used as the parent name for Sulston daughter naming rules. Undo restores the previous `identity` and `assigned_id` on every nucleus the rename touched.
+
+**Name collisions:** If the target name is already in use by a different cell, AceTree offers a **Swap** — pressing "Swap" runs the `SwapCellNames` command, which atomically exchanges the forced names of the two cells (writes cell B's effective name onto every nucleus in cell A's chain, and vice versa). This is the same one-step undo.
 
 #### Kill
 Select a cell, then click **Kill**. Choose a time range. All nuclei of that cell within the range are marked dead.
@@ -429,9 +435,60 @@ If `--output` is omitted, the output filename is automatically derived from the 
 
 ---
 
-## 10. Understanding Cell Names
+## 10. Measuring Expression from Image Pixels
 
-### 10.1 Automatic Naming
+The **Measure** tool re-derives per-nucleus expression values directly from the image data. It's a Python port of the Java `AceBatch2` measure routine — at every timepoint and every image channel it sums pixel intensities inside each nucleus (modelled as a sphere of diameter `size`) plus a surrounding annulus used as a local background estimate.
+
+Use Measure when:
+
+- Your `.nuclei` zip was loaded from StarryNite without pre-computed `rweight` values.
+- You want to re-measure the dataset against a *different* expression channel (the `.nuclei` format only stores one channel's expression).
+- You want per-cell time-series CSVs for downstream analysis.
+
+### 10.1 Running Measure
+
+1. Load a dataset with image data (File → config.xml / `acetree-py gui …`).
+2. Click **File → Measure…** in the menu bar.
+3. In the dialog:
+   - **AT channel** — the channel whose measurements will be written back onto each `Nucleus` as `rwraw` / `rwcorr1` and drive the lineage-tree coloring. All channels are still measured; this just picks which one becomes the "AT" channel.
+   - **Output folder** — where the per-channel CSVs go. Defaults to `<zip_dir>/measurements` when a nuclei zip is loaded.
+4. Click **OK**. A progress dialog shows `channel c/N, timepoint t/T…` and can be cancelled.
+5. When the run completes, every open lineage tree panel rebuilds to reflect the fresh `rweight` values. A status message reports how many CSVs were written.
+
+### 10.2 Output CSVs
+
+One CSV per image channel, with filenames like:
+
+- `measure_channel1_AT.csv` — the channel you selected as the AT channel.
+- `measure_channel2.csv`, `measure_channel3.csv`, … — every other channel.
+
+Each row is one cell, each column is one absolute timepoint:
+
+```
+cell_name, start_time, end_time, t1, t2, t3, …, tN
+ABa,       4,          12,       ,   ,   , 1234.5, 1256.2, …
+ABp,       4,          13,       ,   ,   , 987.3,  1002.1, …
+```
+
+Cells absent at a timepoint get an empty column value. The per-timepoint number is the same formula the lineage tree uses for color — plain `rwraw` when the session's correction is `"none"`, `rwraw - rwcorr1` otherwise.
+
+Cells are sorted by `start_time` then name. Start and end times are 1-based and inclusive.
+
+### 10.3 Effects on the Dataset
+
+- For the chosen AT channel, `nuc.rwraw`, `nuc.rwcorr1`, `nuc.rsum`, and `nuc.rcount` are **updated** on every live, measurable nucleus. Dead nuclei and nuclei that fall outside the image bounds are left untouched.
+- `compute_red_weights()` runs afterwards so `nuc.rweight` reflects the session's current correction mode.
+- **Save (`Ctrl+S`) to persist the new values** — Measure only changes the in-memory manager; the zip on disk is unchanged until you save.
+
+### 10.4 Correction Modes and Limitations
+
+The Python port computes `rwraw` (mean intensity inside the nucleus) and `rwcorr1` (mean intensity in the surrounding annulus — "global background"). It does *not* compute `rwcorr2` / `rwcorr3` / `rwcorr4`: the Java pipeline filled those via external MATLAB and crosstalk-solver code that is out of scope for this port. If your session uses `"local"`, `"blot"`, or `"cross"` correction, the CSV value falls back to `rwraw - rwcorr1` (global background) as a best-effort approximation.
+
+---
+
+## 11. Understanding Cell Names
+
+### 11.1 Automatic Naming
 
 When a dataset is loaded, the naming pipeline automatically identifies cells:
 
@@ -441,11 +498,11 @@ When a dataset is loaded, the naming pipeline automatically identifies cells:
 
 If AuxInfo orientation data is available (v1 or v2), it is used for higher-precision axis estimation. Without AuxInfo, the pipeline uses the rotation-invariant lineage centroid approach described above.
 
-### 10.2 Unnamed Cells
+### 11.2 Unnamed Cells
 
 Cells that can't be automatically named receive placeholder names like `Nuc042_15_200_300` (3-digit zero-padded timepoint, then z, x, y). These are typically polar bodies or cells at the edges of the tracked lineage.
 
-### 10.3 Manual Overrides
+### 11.3 Manual Overrides
 
 When you **Rename** a cell (Section 6.4), the name is stored as a permanent override (`assigned_id`). This name survives automatic re-naming — even if you save and reload the dataset, the override persists.
 
@@ -455,7 +512,7 @@ When you **Rename** a cell (Section 6.4), the name is stored as a permanent over
 
 ---
 
-## 11. Lineage Tree View
+## 12. Lineage Tree View
 
 The Sulston lineage tree at the bottom of the window shows the full cell lineage:
 
@@ -494,7 +551,7 @@ All open panels update synchronously when edits are committed (relink, kill, ren
 
 ---
 
-## 12. Tips and Workflow
+## 13. Tips and Workflow
 
 ### Correcting a tracking error
 1. Step through time until you see a cell jump or swap.
@@ -539,7 +596,7 @@ acetree-py export config.xml -f nucleus_csv -o my_nuclei.csv
 
 ---
 
-## 13. Manual Tracking & Dataset Creation
+## 14. Manual Tracking & Dataset Creation
 
 AceTree-Py can create new datasets from raw TIFF images and provides interactive tools for manually placing, tracking, and linking nuclei. This is useful when:
 
@@ -547,7 +604,7 @@ AceTree-Py can create new datasets from raw TIFF images and provides interactive
 - You want to manually annotate nuclei positions in a single frame (detection-only, no tracking).
 - You want to manually track a subset of cells across time.
 
-### 13.1 Creating a New Dataset
+### 14.1 Creating a New Dataset
 
 #### Interactive Wizard (GUI)
 
@@ -598,7 +655,7 @@ The `create` command:
 4. Writes the XML config file to the output directory.
 5. Launches the GUI for interactive annotation.
 
-### 13.2 Placing Nuclei (Add Mode)
+### 14.2 Placing Nuclei (Add Mode)
 
 Once the GUI is open on a new (empty) dataset:
 
@@ -614,7 +671,7 @@ Once the GUI is open on a new (empty) dataset:
 3. Click **Add**, then left-click to place. The new nucleus inherits the selected cell's identity, predecessor link, and diameter.
 4. If there is a gap > 1 timepoint, intermediate nuclei are automatically interpolated.
 
-### 13.3 Adjusting Nuclei (D-Pad Controls)
+### 14.3 Adjusting Nuclei (D-Pad Controls)
 
 After placing a nucleus, use the **Move / Resize** D-pad buttons to fine-tune:
 
@@ -624,7 +681,7 @@ After placing a nucleus, use the **Move / Resize** D-pad buttons to fine-tune:
 
 Each press is individually undoable. The cell stays selected between presses for rapid adjustment.
 
-### 13.4 Tracking Across Time
+### 14.4 Tracking Across Time
 
 For continuous tracking across many timepoints, use the **Track** button:
 
@@ -640,7 +697,7 @@ Track mode automatically handles:
 - **Predecessor linking**: direct link if adjacent, interpolation if there's a gap.
 - **Size inheritance**: the placed nucleus inherits the parent's diameter.
 
-### 13.5 Workflow for Single-Frame Annotation
+### 14.5 Workflow for Single-Frame Annotation
 
 For annotating nuclei in a single image (no tracking):
 
@@ -656,7 +713,7 @@ acetree-py create /data/single_frame/
 
 Each placed nucleus becomes an independent root cell. The Track button is not useful in single-frame mode (there are no future timepoints to track to).
 
-### 13.6 Saving and Reloading
+### 14.6 Saving and Reloading
 
 After annotation:
 
@@ -664,7 +721,7 @@ After annotation:
 - To reopen later: `acetree-py gui path/to/output/config.xml`
 - The automatic naming pipeline runs on load. If enough cells have been placed for the 4→8 cell transition to be detected, Sulston names will be assigned automatically.
 
-### 13.7 Tips for Manual Tracking
+### 14.7 Tips for Manual Tracking
 
 - **Use the 3D view** (Section 6.6) to verify nucleus positions in three dimensions.
 - **Place nuclei on the z-plane where the nucleus is brightest** for the most accurate position.
