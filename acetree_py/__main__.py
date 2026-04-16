@@ -212,6 +212,18 @@ def create(
     z_res: float = typer.Option(1.0, "--z-res", help="Z pixel resolution (µm)"),
     split: bool = typer.Option(False, "--split", help="Split side-by-side channels"),
     flip: bool = typer.Option(False, "--flip", help="Flip image left/right"),
+    interleaved: bool = typer.Option(
+        False, "--interleaved",
+        help="Single TIFF per timepoint contains interleaved multichannel pages",
+    ),
+    num_channels: int = typer.Option(
+        1, "--num-channels",
+        help="Number of channels (required with --interleaved, must be >= 2)",
+    ),
+    channel_order: str = typer.Option(
+        "CZ", "--channel-order",
+        help="Page order for interleaved stacks: 'CZ' (channel-fastest) or 'ZC' (planar)",
+    ),
 ):
     """Create a new dataset from raw images and launch the GUI for manual annotation."""
     from acetree_py.gui.app import AceTreeApp
@@ -241,14 +253,45 @@ def create(
             typer.echo(f"Error: No TIFF files found in '{directory}'.", err=True)
             raise typer.Exit(1)
 
-        # Probe first image for plane count
-        num_planes = 1
+        # Probe first image for page count
+        num_pages = 1
         try:
             import tifffile
             with tifffile.TiffFile(tiffs[0]) as tf:
-                num_planes = len(tf.pages)
+                num_pages = len(tf.pages)
         except Exception:
             pass
+
+        # Validate interleaved args and compute real Z-plane count
+        effective_channels = 1
+        effective_order = "CZ"
+        if interleaved:
+            if num_channels < 2:
+                typer.echo(
+                    "Error: --interleaved requires --num-channels >= 2.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            order = (channel_order or "CZ").strip().upper()
+            if order not in ("CZ", "ZC"):
+                typer.echo(
+                    f"Error: --channel-order must be 'CZ' or 'ZC' (got '{channel_order}').",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            effective_channels = num_channels
+            effective_order = order
+            # Interleaved bypasses the split/flip wrapper — warn if user set both
+            if split or flip:
+                typer.echo(
+                    "Warning: --split/--flip are ignored when --interleaved is set.",
+                    err=True,
+                )
+            split = False
+            flip = False
+            num_planes = max(1, num_pages // num_channels)
+        else:
+            num_planes = num_pages
 
         num_timepoints = len(tiffs)
         dataset_name = img_dir.name
@@ -259,6 +302,7 @@ def create(
             config_file=out_dir / f"{dataset_name}.xml",
             image_file=tiffs[0],
             zip_file=out_dir / f"{dataset_name}_nuclei.zip",
+            num_channels=effective_channels,
             xy_res=xy_res,
             z_res=z_res,
             plane_end=num_planes,
@@ -270,6 +314,8 @@ def create(
             use_stack=1 if num_planes > 1 else 0,
             split=1 if split else 0,
             flip=1 if flip else 0,
+            stack_interleaved=interleaved,
+            stack_channel_order=effective_order,
         )
         _derive_image_params(config)
 

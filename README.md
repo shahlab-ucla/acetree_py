@@ -90,6 +90,7 @@ acetree-py info config.xml --cell ABala
 
 - **Napari-based viewer** with nucleus overlay, z-plane navigation, cell tracking, and hover tooltips
 - **Multi-channel display** — per-channel contrast sliders, visibility toggles, green/magenta colormaps for dual-channel data
+- **Interleaved multichannel TIFFs** — single TIFF per timepoint with pages laid out as `Z1C1, Z1C2, Z2C1, Z2C2, …` (or planar `Z1C1..ZnC1, Z1C2..ZnC2`); supported by the XML config (`<image numChannels="N" channelOrder="CZ|ZC"/>`), the dataset-creation wizard, and the `acetree-py create --interleaved` CLI flag
 - **Rule-based visualization** — color nuclei by lineage depth, expression level, cell fate, name pattern, or custom rules with a full GUI rule editor
 - **3D volume view** — toggle 2D/3D in the main viewer, or open a detached 3D window with independent visualization controls
 - **Ghost trails** — visualize selected cell's movement history as a semi-transparent trail

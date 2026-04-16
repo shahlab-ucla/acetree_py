@@ -46,6 +46,23 @@ class NamingMethod(IntEnum):
 RED_CORRECTION_METHODS = ("none", "global", "local", "blot", "cross")
 
 
+def _normalize_channel_order(raw: str) -> str:
+    """Map user-facing channel-order strings to canonical ``"CZ"`` / ``"ZC"``.
+
+    Accepts case-insensitive aliases:
+        ``"CZ"``, ``"interleaved"`` -> ``"CZ"``
+        ``"ZC"``, ``"planar"``      -> ``"ZC"``
+    Unknown values fall back to ``"CZ"`` (the default interleaved order).
+    """
+    s = (raw or "").strip().lower()
+    if s in ("cz", "interleaved"):
+        return "CZ"
+    if s in ("zc", "planar"):
+        return "ZC"
+    logger.warning("Unknown channelOrder '%s'; defaulting to 'CZ'", raw)
+    return "CZ"
+
+
 @dataclass
 class AceTreeConfig:
     """Complete configuration for an AceTree dataset.
@@ -72,6 +89,12 @@ class AceTreeConfig:
         use_stack: Stack type (0=8-bit, 1=16-bit).
         split: Whether to split 16-bit channels.
         start_time: Starting timepoint from image name parsing.
+        stack_interleaved: When True, image_file is a single multi-page TIFF per
+            timepoint whose pages are laid out as interleaved multichannel
+            (either CZ or ZC order — see stack_channel_order).
+        stack_channel_order: Page ordering convention when stack_interleaved:
+            ``"CZ"`` means channel-fastest (Z1C1, Z1C2, Z2C1, Z2C2, ...),
+            ``"ZC"`` means plane-fastest / planar (Z1C1..ZnC1, Z1C2..ZnC2).
     """
 
     config_file: Path = Path()
@@ -95,6 +118,8 @@ class AceTreeConfig:
     flip: int = 1
     start_time: int = 1
     angle: float = -1.0
+    stack_interleaved: bool = False
+    stack_channel_order: str = "CZ"
 
     # Derived fields set after parsing
     tif_prefix: str = ""
@@ -175,19 +200,35 @@ def _parse_xml_config(path: Path, config: AceTreeConfig) -> None:
             config.zip_file = Path(elem.get("file", ""))
 
         elif tag == "image":
-            if "file" in elem.attrib:
-                config.image_file = Path(elem.get("file", ""))
-            elif "numchannels" in {k.lower(): k for k in elem.attrib}:
-                # Multi-channel image definition
-                nc_key = next(k for k in elem.attrib if k.lower() == "numchannels")
+            # Case-insensitive attribute lookup helper
+            attr_lookup = {k.lower(): k for k in elem.attrib}
+            has_file = "file" in attr_lookup
+            has_numchannels = "numchannels" in attr_lookup
+
+            if has_file:
+                config.image_file = Path(elem.get(attr_lookup["file"], ""))
+
+                # Single-file multichannel stack mode:
+                # <image file="..." numChannels="N" channelOrder="CZ"/>
+                if has_numchannels:
+                    nc = int(elem.get(attr_lookup["numchannels"], "1") or "1")
+                    if nc >= 2:
+                        config.num_channels = nc
+                        config.stack_interleaved = True
+                        if "channelorder" in attr_lookup:
+                            raw = elem.get(attr_lookup["channelorder"], "") or ""
+                            config.stack_channel_order = _normalize_channel_order(raw)
+
+            elif has_numchannels:
+                # Multi-channel-by-folder definition:
+                # <image numChannels="2" channel1="..." channel2="..."/>
+                nc_key = attr_lookup["numchannels"]
                 config.num_channels = int(elem.get(nc_key, "1"))
                 for i in range(1, config.num_channels + 1):
-                    ch_key = f"channel{i}"
-                    # Case-insensitive lookup
-                    for k in elem.attrib:
-                        if k.lower() == ch_key.lower():
-                            config.image_channels[i] = Path(elem.get(k, ""))
-                            break
+                    ch_key_lc = f"channel{i}"
+                    if ch_key_lc in attr_lookup:
+                        orig_key = attr_lookup[ch_key_lc]
+                        config.image_channels[i] = Path(elem.get(orig_key, ""))
 
         elif tag == "start":
             val = elem.get("index", "")

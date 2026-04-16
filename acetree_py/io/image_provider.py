@@ -319,6 +319,20 @@ class StackTiffProvider:
     Like Java AceTree, keeps the current TiffFile handle open so that
     switching z-planes within the same timepoint reads a single page
     without re-parsing the entire file.
+
+    Multichannel support
+    --------------------
+    When ``num_channels > 1`` the file's pages are assumed to carry
+    interleaved multichannel data.  ``channel_order`` selects the layout:
+
+    - ``"CZ"`` (channel-fastest, default): pages are ``Z1C1, Z1C2, Z2C1,
+      Z2C2, ...``. Page index for ``(plane, channel)`` (1-based plane,
+      0-based channel) is ``(plane-1)*num_channels + channel``.
+    - ``"ZC"`` (planar): pages are ``Z1C1, Z2C1, ..., ZnC1, Z1C2, ...,
+      ZnC2``. Page index is ``channel*num_planes + (plane-1)``.
+
+    For ``num_channels == 1`` the provider behaves as a plain multi-page
+    stack — each page is a distinct Z-plane.
     """
 
     def __init__(
@@ -326,16 +340,49 @@ class StackTiffProvider:
         directory: str | Path,
         pattern: str = "t{time:03d}.tif",
         num_channels: int = 1,
+        channel_order: str = "CZ",
     ) -> None:
         self.directory = Path(directory)
         self.pattern = pattern
-        self._num_channels = num_channels
+        self._num_channels = max(1, int(num_channels))
+        co = (channel_order or "CZ").upper()
+        if co not in ("CZ", "ZC"):
+            logger.warning("Unknown channel_order '%s'; falling back to 'CZ'",
+                           channel_order)
+            co = "CZ"
+        self._channel_order = co
         self._shape: tuple[int, int] | None = None
         self._num_planes_cached: int | None = None
         self._num_timepoints: int | None = None
         # Open file handle cache (like Java's persistent ZipFile)
         self._open_tif = None       # tifffile.TiffFile instance
         self._open_tif_time = None  # timepoint the handle is for
+
+    def _page_index(self, plane: int, channel: int, n_pages: int) -> int:
+        """Map (1-based plane, 0-based channel) to a 0-based TIFF page index.
+
+        Falls back to plane-1 when num_channels == 1 (pure Z stack).
+        Raises IndexError on out-of-range plane or channel.
+        """
+        if not (0 <= channel < self._num_channels):
+            raise IndexError(
+                f"Channel {channel} out of range [0, {self._num_channels})"
+            )
+        if self._num_channels == 1:
+            idx = plane - 1
+        elif self._channel_order == "CZ":
+            # Z1C1, Z1C2, Z2C1, Z2C2, ...
+            idx = (plane - 1) * self._num_channels + channel
+        else:  # "ZC"
+            # Z1C1..ZnC1, Z1C2..ZnC2, ...
+            num_planes = n_pages // self._num_channels if self._num_channels > 0 else n_pages
+            idx = channel * num_planes + (plane - 1)
+        if idx < 0 or idx >= n_pages:
+            raise IndexError(
+                f"Plane {plane} channel {channel} maps to page {idx} "
+                f"(file has {n_pages} pages)"
+            )
+        return idx
 
     def _get_tiff_handle(self, time: int):
         """Get (or reuse) an open TiffFile handle for the given timepoint."""
@@ -367,7 +414,11 @@ class StackTiffProvider:
             page = self._open_tif.pages[0]
             self._shape = (page.shape[-2], page.shape[-1])
         if self._num_planes_cached is None:
-            self._num_planes_cached = n_pages
+            # For interleaved multichannel, the true Z count is pages/channels.
+            if self._num_channels > 1:
+                self._num_planes_cached = n_pages // self._num_channels
+            else:
+                self._num_planes_cached = n_pages
 
         return self._open_tif
 
@@ -389,12 +440,9 @@ class StackTiffProvider:
             # Multi-dim single page (rare): fall through to full read
             return self._extract_plane_from_array(img, plane, channel)
 
-        # Multi-page: read single page directly (the key optimisation)
-        plane_idx = plane - 1
-        if plane_idx >= n_pages:
-            raise IndexError(f"Plane {plane} out of range (max {n_pages})")
-
-        result = tif.pages[plane_idx].asarray()
+        # Multi-page: map (plane, channel) to the correct TIFF page
+        page_idx = self._page_index(plane, channel, n_pages)
+        result = tif.pages[page_idx].asarray()
         self._update_shape(result)
         return result
 
@@ -426,7 +474,24 @@ class StackTiffProvider:
         if n_pages == 0:
             raise FileNotFoundError(f"Empty TIFF stack for time={time}")
 
-        # Read all pages into a stack
+        if self._num_channels > 1:
+            # De-interleave pages for the requested channel
+            if not (0 <= channel < self._num_channels):
+                raise IndexError(
+                    f"Channel {channel} out of range [0, {self._num_channels})"
+                )
+            num_planes = n_pages // self._num_channels
+            planes = []
+            for z in range(1, num_planes + 1):
+                page_idx = self._page_index(z, channel, n_pages)
+                planes.append(tif.pages[page_idx].asarray())
+            img = np.stack(planes) if planes else np.empty((0,))
+            self._num_planes_cached = num_planes
+            if num_planes > 0:
+                self._update_shape(img[0])
+            return img
+
+        # Single-channel: read all pages into a stack
         planes = []
         for page in tif.pages:
             planes.append(page.asarray())
@@ -829,17 +894,27 @@ def create_image_provider_from_config(config) -> ImageProvider | None:
     if base_provider is None:
         return None
 
-    # Wrap with SplitChannelProvider if split or flip is active
+    # Wrap with SplitChannelProvider if split or flip is active.
+    # Interleaved multichannel stacks already resolve channels at the page
+    # level, so do not double-wrap them with the horizontal split logic —
+    # that would halve a valid image and produce phantom channels.
     split_active = getattr(config, "split", 0) == 1
     flip_active = getattr(config, "flip", 0) == 1
+    interleaved = bool(getattr(config, "stack_interleaved", False))
 
-    if split_active or flip_active:
+    if (split_active or flip_active) and not interleaved:
         logger.info("Wrapping with SplitChannelProvider (split=%s, flip=%s)",
                     split_active, flip_active)
         return SplitChannelProvider(
             inner=base_provider,
             split=split_active,
             flip=flip_active,
+        )
+
+    if interleaved and (split_active or flip_active):
+        logger.info(
+            "Ignoring split=%s/flip=%s for interleaved multichannel stack",
+            split_active, flip_active,
         )
 
     return base_provider
@@ -896,21 +971,31 @@ def _create_base_provider(
         else:
             pattern = f"{prefix}{{time}}{ext}"
 
+        # Interleaved multichannel stack mode (single file, pages = Z*C)
+        interleaved = bool(getattr(config, "stack_interleaved", False))
+        stack_channels = int(getattr(config, "num_channels", 1) or 1) if interleaved else 1
+        channel_order = (getattr(config, "stack_channel_order", "CZ") or "CZ")
+
         # Probe the first file to determine actual plane count
-        actual_planes = _probe_stack_planes(image_path)
-        if actual_planes is not None:
+        actual_pages = _probe_stack_planes(image_path)
+        if actual_pages is not None:
+            actual_planes = actual_pages // stack_channels if stack_channels > 1 else actual_pages
             if actual_planes < num_planes:
                 logger.info("Stack has %d planes (config planeEnd=%d). "
                            "Using actual plane count.",
                            actual_planes, num_planes)
                 num_planes = actual_planes
 
-        logger.info("Creating StackTiffProvider: dir=%s, pattern='%s', planes=%d",
-                    tif_dir, pattern, num_planes)
+        logger.info(
+            "Creating StackTiffProvider: dir=%s, pattern='%s', planes=%d, "
+            "channels=%d, order=%s",
+            tif_dir, pattern, num_planes, stack_channels, channel_order,
+        )
         provider = StackTiffProvider(
             directory=tif_dir,
             pattern=pattern,
-            num_channels=1,  # Raw file channels; split handled by wrapper
+            num_channels=stack_channels,
+            channel_order=channel_order,
         )
         provider._num_planes_cached = num_planes
         return provider

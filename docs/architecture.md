@@ -181,7 +181,7 @@ Central orchestrator that owns `nuclei_record: list[list[Nucleus]]` (indexed `[t
 
 ### 3.1 Config (`io/config.py`)
 
-`AceTreeConfig` holds ~20 fields parsed from XML. Round-trip serialization is supported via `write_config_xml()` in `io/config_writer.py`, which produces XML using the exact same element and attribute names as the parser (case-sensitive: `SplitMode`, `FlipMode`, `xyRes`, `zRes`, `planeEnd`).
+`AceTreeConfig` holds ~20 fields parsed from XML. Round-trip serialization is supported via `write_config_xml()` in `io/config_writer.py`, which produces XML using the exact same element and attribute names as the parser (case-sensitive: `SplitMode`, `FlipMode`, `xyRes`, `zRes`, `planeEnd`, `numChannels`, `channelOrder`).
 
 ```xml
 <embryo>
@@ -194,6 +194,12 @@ Central orchestrator that owns `nuclei_record: list[list[Nucleus]]` (indexed `[t
     <exprCorr type="blot"/>
 </embryo>
 ```
+
+The `<image>` element supports three shapes:
+
+- `<image file="..."/>` — single-channel multi-page TIFF (or per-plane TIFFs if the filename contains `-p`).
+- `<image numChannels="N" channel1="..." channel2="..."/>` — one directory per channel; routed to `MultiChannelFolderProvider`.
+- `<image file="..." numChannels="N" channelOrder="CZ|ZC"/>` — single TIFF per timepoint whose pages are interleaved multichannel. Parsed into `config.stack_interleaved=True` and `config.num_channels=N`; routed to `StackTiffProvider` with native de-interleaving (see §3.3). `channelOrder` accepts aliases (`interleaved` → `CZ`, `planar` → `ZC`); unknown values log a warning and fall back to `CZ`.
 
 `NamingMethod` enum: `STANDARD=2`, `MANUAL=2` (skip naming), `NEWCANONICAL=3`.
 
@@ -219,15 +225,24 @@ nuclei/
 
 Seven concrete implementations:
 
-| Provider                    | Source                              |
-|----------------------------|-------------------------------------|
-| `ZipTiffProvider`           | TIFF images in ZIP files (Java fmt) |
-| `TiffDirectoryProvider`     | Loose TIFFs with pattern naming     |
-| `StackTiffProvider`         | Multi-page TIFF stacks              |
-| `OmeTiffProvider`           | OME-TIFF with metadata              |
-| `SplitChannelProvider`      | 16-bit TIFFs split into 2 channels  |
-| `MultiChannelFolderProvider`| Separate folders per channel        |
-| `NumpyProvider`             | In-memory NumPy arrays (testing)    |
+| Provider                    | Source                                                        |
+|-----------------------------|---------------------------------------------------------------|
+| `ZipTiffProvider`           | TIFF images in ZIP files (Java fmt)                           |
+| `TiffDirectoryProvider`     | Loose TIFFs with pattern naming                               |
+| `StackTiffProvider`         | Multi-page TIFF stacks, incl. interleaved multichannel (CZ/ZC)|
+| `OmeTiffProvider`           | OME-TIFF with metadata                                        |
+| `SplitChannelProvider`      | 16-bit TIFFs split into 2 channels                            |
+| `MultiChannelFolderProvider`| Separate folders per channel                                  |
+| `NumpyProvider`             | In-memory NumPy arrays (testing)                              |
+
+**Interleaved multichannel stacks:** `StackTiffProvider(num_channels=N, channel_order=...)` de-interleaves page sequences natively — no wrapper. Page index for a given `(plane, channel)` is computed by `_page_index()`:
+
+- `channel_order="CZ"` (channel-fastest; pages `Z1C1, Z1C2, Z2C1, …`): `page = (plane-1) * num_channels + channel`
+- `channel_order="ZC"` (planar; pages `Z1C1..ZnC1, Z1C2..ZnC2`): `page = channel * num_planes + (plane-1)`
+
+`num_planes` is derived as `n_pages // num_channels` when in multichannel mode. `get_stack(time, channel)` strides the pages for the requested channel only and returns shape `(Z, Y, X)` — downstream consumers (napari layers, `measure_runner`) don't need to know about the interleaving.
+
+The `create_image_provider_from_config()` factory routes `<image file="..." numChannels="N" channelOrder="CZ|ZC"/>` configs to this mode and **skips the `SplitChannelProvider` wrap** (interleaved channels are resolved at the page level; horizontal split would halve a valid image).
 
 ### 3.4 AuxInfo (`io/auxinfo.py`)
 
@@ -590,7 +605,7 @@ acetree-py info <config.xml> -c ABala           # Query cell details
 
 ## 9. Testing
 
-30 test files in `tests/` covering all modules: data model, I/O, naming, editing, GUI widgets, color rules, CLI, analysis (including pixel measurement), and integration tests. Run with `pytest tests/` (≥619 tests, napari-integration tests can be deselected with `--deselect tests/test_gui_widgets.py::TestNapariIntegration`).
+31 test files in `tests/` covering all modules: data model, I/O (including interleaved multichannel TIFFs), naming, editing, GUI widgets, color rules, CLI, analysis (including pixel measurement), and integration tests. Run with `pytest tests/` (≥646 tests, napari-integration tests can be deselected with `--deselect tests/test_gui_widgets.py::TestNapariIntegration`).
 
 ---
 

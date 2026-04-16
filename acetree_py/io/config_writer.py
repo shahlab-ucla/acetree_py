@@ -39,13 +39,22 @@ def write_config_xml(config: AceTreeConfig, path: str | Path) -> None:
         SubElement(root, "nuclei", file=_rel(config.zip_file))
 
     # <image file="..."/> or <image numChannels="..." channel1="..." .../>
+    # or <image file="..." numChannels="N" channelOrder="CZ"/> (interleaved)
     if config.image_channels and len(config.image_channels) > 1:
         attrs = {"numChannels": str(len(config.image_channels))}
         for ch_num, ch_path in sorted(config.image_channels.items()):
             attrs[f"channel{ch_num}"] = _rel(ch_path)
         SubElement(root, "image", **attrs)
     elif config.image_file and str(config.image_file) not in ("", "."):
-        SubElement(root, "image", file=_rel(config.image_file))
+        if config.stack_interleaved and config.num_channels > 1:
+            SubElement(
+                root, "image",
+                file=_rel(config.image_file),
+                numChannels=str(config.num_channels),
+                channelOrder=config.stack_channel_order or "CZ",
+            )
+        else:
+            SubElement(root, "image", file=_rel(config.image_file))
 
     # <start index="..."/>
     SubElement(root, "start", index=str(config.starting_index))

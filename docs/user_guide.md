@@ -615,8 +615,15 @@ acetree-py create
 This opens a 4-page wizard dialog:
 
 1. **Image directory** — select the folder containing your TIFF files. The wizard auto-detects the naming pattern and image dimensions.
-2. **Channel layout** — choose how channels are arranged: single channel, side-by-side (split), separate directories, or multichannel stack. Set flip if needed.
-3. **Voxel parameters** — set XY resolution (µm/pixel), Z resolution (µm/plane), number of timepoints and planes (auto-filled from detection).
+2. **Channel layout** — choose how channels are arranged:
+   - *Single channel* — one channel per TIFF page.
+   - *Side-by-side (split)* — one image per timepoint with two channels in left/right halves.
+   - *Separate directory per channel* — one directory per channel, each with its own per-timepoint TIFFs.
+   - *Multichannel TIFF stack* — one TIFF per timepoint with pages interleaved across channels. Pick the number of channels (2–8) and the page order:
+     - **Interleaved** (`Z1C1, Z1C2, Z2C1, Z2C2, …`) — channel-fastest; the common ImageJ / MicroManager default.
+     - **Planar** (all Z for channel 1, then all Z for channel 2) — plane-fastest.
+   Set the flip checkbox if your images are mirrored horizontally.
+3. **Voxel parameters** — set XY resolution (µm/pixel), Z resolution (µm/plane), number of timepoints and planes (auto-filled from detection; for interleaved stacks the Z count is automatically `pages / num_channels`).
 4. **Output** — choose where to save the dataset config XML and nuclei ZIP.
 
 #### CLI (Non-Interactive)
@@ -627,13 +634,16 @@ acetree-py create <image_directory> [OPTIONS]
 
 Options:
 
-| Option         | Default | Description                              |
-|----------------|---------|------------------------------------------|
-| `--output`     | auto    | Output directory for config + nuclei ZIP |
-| `--xy-res`     | 0.09    | XY pixel resolution in µm               |
-| `--z-res`      | 1.0     | Z plane spacing in µm                   |
-| `--split`      | off     | Split side-by-side dual-channel images   |
-| `--flip`       | off     | Flip images left/right                   |
+| Option             | Default | Description                                                         |
+|--------------------|---------|---------------------------------------------------------------------|
+| `--output`         | auto    | Output directory for config + nuclei ZIP                            |
+| `--xy-res`         | 0.09    | XY pixel resolution in µm                                           |
+| `--z-res`          | 1.0     | Z plane spacing in µm                                               |
+| `--split`          | off     | Split side-by-side dual-channel images                              |
+| `--flip`           | off     | Flip images left/right                                              |
+| `--interleaved`    | off     | Single TIFF per timepoint contains interleaved multichannel pages   |
+| `--num-channels`   | 1       | Number of channels (required with `--interleaved`, must be ≥ 2)    |
+| `--channel-order`  | `CZ`    | Page order for interleaved stacks: `CZ` (channel-fastest) or `ZC` |
 
 **Examples:**
 
@@ -644,9 +654,14 @@ acetree-py create /data/embryo/images/
 # With specific resolution and split channels:
 acetree-py create /data/embryo/SPIMA/ --output /data/embryo/manual_output/ --xy-res 0.1625 --z-res 0.65 --split
 
+# Interleaved 2-channel TIFF stacks (Z1C1, Z1C2, Z2C1, Z2C2, …):
+acetree-py create /data/embryo/multichannel/ --output /data/embryo/out/ --interleaved --num-channels 2 --channel-order CZ
+
 # Single-frame annotation (one TIFF file in the directory):
 acetree-py create /data/single_frame/
 ```
+
+> `--interleaved` bypasses `--split`/`--flip` — channels are already resolved at the page level, so the horizontal split wrapper would halve a valid image.
 
 The `create` command:
 1. Scans the image directory for TIFF files and probes the first image for z-plane count.

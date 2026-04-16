@@ -198,9 +198,16 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         # Multichannel stack ordering
         self._stack_group = QGroupBox("Stack Ordering")
         stack_layout = QFormLayout(self._stack_group)
+        self._n_channels_spin = QSpinBox()
+        self._n_channels_spin.setRange(2, 8)
+        self._n_channels_spin.setValue(2)
+        stack_layout.addRow("Number of channels:", self._n_channels_spin)
         self._ordering_combo = QComboBox()
-        self._ordering_combo.addItems(["XYZC (planes then channels)", "XYCZ (channels then planes)"])
-        stack_layout.addRow("Slice ordering:", self._ordering_combo)
+        self._ordering_combo.addItems([
+            "Interleaved (Z1C1, Z1C2, Z2C1, ...)",
+            "Planar (all Z for C1, then all Z for C2)",
+        ])
+        stack_layout.addRow("Page order:", self._ordering_combo)
         self._stack_group.setVisible(False)
         layout.addWidget(self._stack_group)
 
@@ -212,8 +219,35 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._radio_separate.toggled.connect(self._sep_group.setVisible)
         self._radio_multistack.toggled.connect(self._stack_group.setVisible)
 
+        # When the multistack config changes, recompute the z-plane count
+        # from the probed page count and the user-selected channel count.
+        self._radio_multistack.toggled.connect(self._recompute_planes)
+        self._n_channels_spin.valueChanged.connect(self._recompute_planes)
+
         layout.addStretch()
         return page
+
+    def _recompute_planes(self) -> None:
+        """Adjust the z-plane spinbox based on multistack channel count.
+
+        Auto-detection stores the raw TIFF page count in ``self._detected``;
+        when interleaved multichannel is selected, the true Z count is
+        ``pages / num_channels``.
+        """
+        d = self._detected
+        raw_pages = d.get("num_planes")
+        if raw_pages is None:
+            return
+        if self._radio_multistack.isChecked():
+            n_ch = self._n_channels_spin.value()
+            if n_ch > 1:
+                planes = max(1, raw_pages // n_ch)
+            else:
+                planes = raw_pages
+        else:
+            planes = raw_pages
+        # Avoid recursion if the user has already edited the value away
+        self._planes_spin.setValue(planes)
 
     def _browse_ch2_dir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select Channel 2 Directory")
@@ -342,8 +376,9 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         elif self._radio_separate.isChecked():
             return "Separate directory per channel"
         elif self._radio_multistack.isChecked():
-            ordering = self._ordering_combo.currentText()
-            return f"Multichannel TIFF stack ({ordering})"
+            n_ch = self._n_channels_spin.value()
+            ordering = "CZ" if self._ordering_combo.currentIndex() == 0 else "ZC"
+            return f"Interleaved multichannel TIFF stack ({n_ch} channels, order={ordering})"
         return "Single channel"
 
     # ── Results ───────────────────────────────────────────────────
@@ -372,6 +407,8 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         # Multi-channel config
         image_channels: dict[int, Path] = {}
         num_channels = 1
+        stack_interleaved = False
+        stack_channel_order = "CZ"
         if self._radio_separate.isChecked():
             num_channels = 2
             image_channels[1] = image_file
@@ -380,6 +417,15 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
                 ch2_tifs = sorted(ch2_dir.glob("*.tif")) + sorted(ch2_dir.glob("*.tiff"))
                 if ch2_tifs:
                     image_channels[2] = ch2_tifs[0]
+        elif self._radio_multistack.isChecked():
+            num_channels = self._n_channels_spin.value()
+            stack_interleaved = True
+            stack_channel_order = (
+                "CZ" if self._ordering_combo.currentIndex() == 0 else "ZC"
+            )
+            # Interleaved multichannel always reads channels from the pages;
+            # split/flip would halve the image again.
+            split = 0
 
         config = AceTreeConfig(
             image_file=image_file,
@@ -395,6 +441,8 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             use_zip=0,
             use_stack=0,
             naming_method=NamingMethod.NEWCANONICAL,
+            stack_interleaved=stack_interleaved,
+            stack_channel_order=stack_channel_order,
         )
 
         # Derive tif_directory and tif_prefix
