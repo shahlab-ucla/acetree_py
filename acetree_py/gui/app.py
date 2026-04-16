@@ -319,6 +319,8 @@ class AceTreeApp:
 
         # Add toggle actions to Window menu so closed panels can be reopened
         self._add_panel_menu_actions()
+        # Add File → Measure… action
+        self._add_file_menu_actions()
 
         # Keyboard shortcuts
         self._bind_keys()
@@ -1577,6 +1579,138 @@ class AceTreeApp:
                 expr_max=config["expr_max"],
                 cmap_name=config["cmap_name"],
             )
+
+    def _add_file_menu_actions(self) -> None:
+        """Add a 'Measure…' action under the File menu.
+
+        Walks the napari menubar for a File menu and appends the
+        Measure action.  Silently no-ops if the menubar isn't
+        available (e.g. when running headlessly under pytest).
+        """
+        try:
+            qt_window = self.viewer.window._qt_window
+            menu_bar = qt_window.menuBar()
+        except Exception:
+            return
+
+        file_menu = None
+        for action in menu_bar.actions():
+            if action.menu() and "file" in action.text().lower().replace("&", ""):
+                file_menu = action.menu()
+                break
+        if file_menu is None:
+            return
+
+        from qtpy.QtWidgets import QAction
+        file_menu.addSeparator()
+        measure_action = QAction("Measure…", qt_window)
+        measure_action.triggered.connect(self._on_measure)
+        file_menu.addAction(measure_action)
+
+    def _on_measure(self) -> None:
+        """Run the Measure orchestrator from a File → Measure… dialog.
+
+        Opens :class:`MeasureDialog`, shows a progress dialog while
+        :func:`run_measure` iterates every channel × timepoint, then
+        rebuilds every lineage panel so the refreshed ``rweight``
+        values show up in the tree colors.
+        """
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import (
+            QApplication,
+            QMessageBox,
+            QProgressDialog,
+        )
+
+        if self.image_provider is None:
+            QMessageBox.warning(
+                None,
+                "Measure",
+                "No image data loaded — cannot run Measure.",
+            )
+            return
+        if not self.manager.nuclei_record:
+            QMessageBox.warning(
+                None,
+                "Measure",
+                "No nuclei loaded — cannot run Measure.",
+            )
+            return
+
+        from .measure_dialog import MeasureDialog
+        qt_window = self.viewer.window._qt_window if self.viewer else None
+        dlg = MeasureDialog(self, parent=qt_window)
+        if not dlg.exec_():
+            return
+        values = dlg.get_values()
+        at_channel: int = values["at_channel"]
+        output_dir: Path = values["output_dir"]
+
+        n_channels = int(self.image_provider.num_channels)
+        n_timepoints = len(self.manager.nuclei_record)
+        total_steps = max(1, n_channels * n_timepoints)
+
+        progress = QProgressDialog(
+            "Measuring…", "Cancel", 0, total_steps, qt_window,
+        )
+        progress.setWindowTitle("Measure")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        def progress_cb(c_idx: int, n_ch: int, t_1based: int, n_tp: int) -> bool:
+            step = c_idx * n_tp + t_1based
+            progress.setValue(step)
+            progress.setLabelText(
+                f"Measuring channel {c_idx + 1}/{n_ch}, "
+                f"timepoint {t_1based}/{n_tp}…"
+            )
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        from ..analysis.measure_runner import run_measure
+        try:
+            written = run_measure(
+                self.manager,
+                self.image_provider,
+                output_dir,
+                at_channel,
+                progress_cb=progress_cb,
+            )
+        except RuntimeError as e:
+            # User-cancelled or orchestrator-raised runtime error
+            progress.close()
+            QMessageBox.information(None, "Measure", str(e))
+            return
+        except Exception as e:  # noqa: BLE001 — surface unknown errors
+            progress.close()
+            logger.exception("Measure failed")
+            QMessageBox.critical(
+                None,
+                "Measure failed",
+                f"Measure could not complete:\n{e}",
+            )
+            return
+        finally:
+            progress.setValue(total_steps)
+            progress.close()
+
+        # Re-color lineage trees with the fresh rweight values.
+        for lw in self._lineage_widgets:
+            try:
+                lw.rebuild_tree()
+            except Exception:
+                logger.exception("Failed to rebuild lineage widget")
+
+        msg = (
+            f"Measured {len(written)} channel(s); "
+            f"wrote CSV(s) to {output_dir}"
+        )
+        try:
+            self.viewer.status = msg
+        except Exception:
+            pass
+        QMessageBox.information(None, "Measure complete", msg)
 
     def _delete_active_nucleus(self) -> None:
         """Delete the active cell's nucleus at the current timepoint only."""
