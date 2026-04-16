@@ -749,7 +749,16 @@ class AceTreeApp:
         parent_name = self.current_cell_name
         if parent_name:
             cell = self.manager.get_cell(parent_name)
+            # Guard against phantom cells (created by the dummy-ancestor
+            # scaffold in lineage.py or by _track_cell_at_time following a
+            # phantom child).  If current_cell_name maps to a cell with no
+            # real nuclei, walk up the parent chain until we find an
+            # ancestor that actually has nuclei — that's the cell the user
+            # meant to extend.
+            while cell is not None and not cell.nuclei:
+                cell = cell.parent
             if cell is not None:
+                parent_name = cell.name
                 parent_end_time = cell.end_time
                 if time <= parent_end_time:
                     # Extend forward: place at the timepoint after the
@@ -1488,13 +1497,22 @@ class AceTreeApp:
             return
 
         # Handle time beyond cell lifetime: follow to a daughter / parent
-        # if the tree knows one, otherwise fall through to the chain walk.
+        # if the tree knows one with real nuclei.  IMPORTANT: skip phantom
+        # children/parents created by the dummy-ancestor scaffold in
+        # lineage.py (e.g. AB automatically gets ABa/ABp children even
+        # when the user hasn't placed any nuclei for them).  Following a
+        # phantom corrupts ``current_cell_name`` and breaks subsequent
+        # Add clicks, which then think the parent is the phantom and
+        # fail to link.
         if self.current_time > cell.end_time:
-            if cell.children:
-                self.current_cell_name = cell.children[0].name
-                cell = cell.children[0]
+            real_child = next(
+                (c for c in cell.children if c.nuclei), None
+            )
+            if real_child is not None:
+                self.current_cell_name = real_child.name
+                cell = real_child
         elif self.current_time < cell.start_time:
-            if cell.parent:
+            if cell.parent is not None and cell.parent.nuclei:
                 self.current_cell_name = cell.parent.name
                 cell = cell.parent
 

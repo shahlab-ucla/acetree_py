@@ -267,6 +267,86 @@ class TestAddModeAutoAdvance:
         assert new_nuc.assigned_id == ""
 
 
+# ── Phantom-cell scaffold handling ────────────────────────────────
+
+
+class TestPhantomAncestorAvoidance:
+    """lineage.build_lineage_tree attaches canonical phantom children
+    (ABa, ABp, EMS, P2, …) to any cell whose name matches the standard
+    lineage scaffold.  These phantoms have no nuclei and must not be
+    followed by time-tracking or treated as parents by Add clicks —
+    otherwise a user who renames their first cell to "AB" sees their
+    subsequent Add at t=2 produce an orphan (the code would point at
+    phantom "ABa" instead of real "AB").
+    """
+
+    @staticmethod
+    def _fresh_manual_app(num_timepoints: int = 10):
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.editing.commands import AddNucleus, RenameCell
+        from acetree_py.gui.app import AceTreeApp
+        from acetree_py.io.config import AceTreeConfig, NamingMethod
+
+        cfg = AceTreeConfig(
+            naming_method=NamingMethod.NEWCANONICAL,
+            plane_end=30, xy_res=0.1, z_res=1.0,
+        )
+        mgr = NucleiManager.new_empty(cfg, num_timepoints=num_timepoints)
+        mgr.process()
+        app = AceTreeApp(mgr, image_provider=None)
+        app.current_time = 1
+        app.current_plane = 5
+        # Add a cell at t=1
+        app.enter_add_mode()
+        app._handle_add_click(100.0, 100.0)
+        app.current_cell_name = mgr.nuclei_record[0][0].effective_name
+        # Rename to AB
+        app.edit_history.do(RenameCell(time=1, index=1, new_name="AB"))
+        return app
+
+    def test_tracking_does_not_follow_phantom_daughter(self):
+        """After renaming the single-timepoint cell to "AB", the tree
+        contains phantom ABa/ABp children.  Time-stepping to t=2 must
+        NOT switch current_cell_name to "ABa"."""
+        app = self._fresh_manual_app()
+        app.set_time(2)
+        assert app.current_cell_name == "AB"
+
+    def test_add_after_rename_and_advance_links_to_real_parent(self):
+        """Exactly the user-reported flow: add cell, rename to AB,
+        press Right (advance to t=2), click Add.  The new nucleus must
+        be linked to AB — not produce a Nuc_... orphan."""
+        app = self._fresh_manual_app()
+        app.set_time(2)
+        app._handle_add_click(102.0, 100.0)
+
+        t2 = app.manager.nuclei_record[1][0]
+        assert t2.predecessor == 1
+        assert t2.assigned_id == "AB"
+        assert t2.effective_name == "AB"
+
+        cell_ab = app.manager.get_cell("AB")
+        assert cell_ab is not None
+        assert cell_ab.start_time == 1
+        assert cell_ab.end_time == 2
+        assert len(cell_ab.nuclei) == 2
+
+    def test_add_walks_up_through_phantom_to_real_ancestor(self):
+        """Even if tracking or user action left current_cell_name
+        pointing at a phantom, _handle_add_click must walk up the parent
+        chain to find a real ancestor with nuclei."""
+        app = self._fresh_manual_app()
+        # Simulate a drift: user's tracker or tree-click lands on phantom ABa
+        app.current_cell_name = "ABa"
+        app.set_time(2)
+        app._handle_add_click(104.0, 100.0)
+
+        t2 = app.manager.nuclei_record[1][0]
+        # Should still have linked to real AB at t=1
+        assert t2.predecessor == 1
+        assert t2.assigned_id == "AB"
+
+
 # ── Overlay data tests ───────────────────────────────────────────
 
 
