@@ -182,6 +182,59 @@ class TestAddNucleus:
         assert "ABa" in cmd.description
         assert "t=3" in cmd.description
 
+    def test_add_with_assigned_id_writes_forced_name(self):
+        """AddNucleus stores assigned_id on the new nucleus so the naming
+        pipeline's _propagate_assigned_ids() treats it as a forced name."""
+        record = _simple_record()
+        cmd = AddNucleus(
+            time=2, x=50, y=50, z=3.0, size=15,
+            identity="ABa", assigned_id="ABa", predecessor=1,
+        )
+        cmd.execute(record)
+        added = record[1][-1]
+        assert added.assigned_id == "ABa"
+        assert added.identity == "ABa"
+        # effective_name returns assigned_id first
+        assert added.effective_name == "ABa"
+
+    def test_add_without_assigned_id_is_empty(self):
+        """Backward compat: omitting assigned_id still works (default '')."""
+        record = _simple_record()
+        cmd = AddNucleus(time=2, x=50, y=50, z=3.0, identity="ABa")
+        cmd.execute(record)
+        added = record[1][-1]
+        assert added.assigned_id == ""
+        assert added.identity == "ABa"
+
+    def test_add_with_assigned_id_propagates_backward(self):
+        """A forced name on a newly-added child should be swept backward
+        onto its predecessor by IdentityAssigner._propagate_assigned_ids,
+        unifying the continuation chain."""
+        from acetree_py.core.nucleus import Nucleus
+        from acetree_py.naming.identity import IdentityAssigner
+
+        # Build a clean two-timepoint record with a predecessor link
+        nuc_t1 = Nucleus(index=1, x=10, y=10, z=1.0, size=10, status=1)
+        record = [[nuc_t1], []]
+
+        cmd = AddNucleus(
+            time=2, x=10, y=11, z=1.0, size=10,
+            identity="ABa", assigned_id="ABa", predecessor=1,
+        )
+        cmd.execute(record)
+
+        assigner = IdentityAssigner(
+            nuclei_record=record,
+            auxinfo=None,
+            starting_index=0,
+            ending_index=len(record),
+        )
+        assigner._propagate_assigned_ids()
+
+        # Predecessor at t=1 should now carry the forced name too
+        assert record[0][0].assigned_id == "ABa"
+        assert record[0][0].identity == "ABa"
+
 
 # ── RemoveNucleus tests ─────────────────────────────────────────
 

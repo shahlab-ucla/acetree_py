@@ -85,3 +85,94 @@ class TestNamingMethod:
 
     def test_from_string_numeric(self):
         assert NamingMethod.from_string("3") == NamingMethod.NEWCANONICAL
+
+
+# ── Java AceTree XML compatibility ─────────────────────────────────
+
+
+class TestJavaXMLCompat:
+    """Python's config writer must emit element tags with the casing that
+    Java AceTree's case-sensitive XML reader expects:
+
+        <useZip>, <useStack>, <Split>, <Flip>
+
+    Python's parser is case-insensitive (normalised via ``tag.lower()``),
+    so this remains backward-compatible with existing lowercase files
+    on disk.
+    """
+
+    def test_casing_in_written_xml(self, tmp_path: Path):
+        from acetree_py.io.config import AceTreeConfig, NamingMethod
+        from acetree_py.io.config_writer import write_config_xml
+
+        cfg_path = tmp_path / "cfg.xml"
+        src = AceTreeConfig(
+            config_file=cfg_path,
+            zip_file=tmp_path / "nuclei.zip",
+            image_file=tmp_path / "img.tif",
+            naming_method=NamingMethod.NEWCANONICAL,
+            use_zip=0,
+            use_stack=1,
+            split=1,
+            flip=0,
+        )
+        write_config_xml(src, cfg_path)
+        text = cfg_path.read_text()
+
+        # Each expected tag must appear with Java's exact casing.
+        assert "<useZip " in text
+        assert "<useStack " in text
+        assert "<Split " in text
+        assert "<Flip " in text
+
+        # And the lowercase forms must NOT be emitted.
+        assert "<usezip " not in text
+        assert "<usestack " not in text
+        # Generic <split / <flip check would catch false positives inside
+        # other tokens; test on a word boundary via the full tag form.
+        assert "<split " not in text
+        assert "<flip " not in text
+
+    def test_roundtrip_preserves_flags(self, tmp_path: Path):
+        """Round-trip write -> load should preserve all flag values
+        regardless of the new casing."""
+        from acetree_py.io.config import AceTreeConfig, NamingMethod
+        from acetree_py.io.config_writer import write_config_xml
+
+        cfg_path = tmp_path / "cfg.xml"
+        src = AceTreeConfig(
+            config_file=cfg_path,
+            zip_file=tmp_path / "nuclei.zip",
+            image_file=tmp_path / "img.tif",
+            naming_method=NamingMethod.NEWCANONICAL,
+            use_zip=2,
+            use_stack=1,
+            split=1,
+            flip=1,
+        )
+        write_config_xml(src, cfg_path)
+        loaded = load_config(cfg_path)
+        assert loaded.use_zip == 2
+        assert loaded.use_stack == 1
+        assert loaded.split == 1
+        assert loaded.flip == 1
+
+    def test_parser_accepts_legacy_lowercase(self, tmp_path: Path):
+        """Parser is case-insensitive, so old Python-generated configs
+        with lowercase tags still load correctly."""
+        cfg = tmp_path / "legacy.xml"
+        cfg.write_text("""<?xml version='1.0' encoding='utf-8'?>
+<embryo>
+    <nuclei file="n.zip"/>
+    <image file="img.tif"/>
+    <usezip type="2"/>
+    <usestack type="1"/>
+    <split SplitMode="1"/>
+    <flip FlipMode="0"/>
+</embryo>
+""")
+        config = load_config(cfg)
+        assert config.use_zip == 2
+        assert config.use_stack == 1
+        assert config.split == 1
+        assert config.flip == 0

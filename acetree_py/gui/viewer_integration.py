@@ -90,6 +90,23 @@ class ViewerIntegration:
         # Connect mouse callback for click-to-select / label toggle
         self._shapes_layer.mouse_drag_callbacks.append(self._on_click)
 
+        # Override napari's built-in Shapes-layer Delete binding — without
+        # this, pressing Delete while this layer is active calls the
+        # layer's ``remove_selected`` which pops shapes from layer.data
+        # only, leaving ``nuclei_record`` untouched.  That makes the
+        # circle vanish visually but the nucleus reappears on the next
+        # display rebuild (e.g. after time scrub).  Delegate Delete to
+        # the app's RemoveNucleus path instead so it's persisted + undoable.
+        app = self.app
+
+        @self._shapes_layer.bind_key("Delete", overwrite=True)
+        def _delete(layer):  # noqa: ARG001 — napari binding signature
+            app._delete_active_nucleus()
+
+        @self._shapes_layer.bind_key("Backspace", overwrite=True)
+        def _delete_bs(layer):  # noqa: ARG001
+            app._delete_active_nucleus()
+
         # Division line layer (for Feature 3: daughter connection line)
         dummy_line = [np.array([[0, 0], [1, 1]])]
         self._division_line_layer = viewer.add_shapes(

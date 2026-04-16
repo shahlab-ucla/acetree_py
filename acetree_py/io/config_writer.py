@@ -85,17 +85,20 @@ def write_config_xml(config: AceTreeConfig, path: str | Path) -> None:
     if config.expr_corr and config.expr_corr != "none":
         SubElement(root, "exprCorr", type=config.expr_corr)
 
-    # <usezip type="..."/>
-    SubElement(root, "usezip", type=str(config.use_zip))
+    # <useZip type="..."/> — CamelCase for Java AceTree compatibility.
+    # Python's own parser lowercases tags, so this remains backward-compatible
+    # with lowercase files already on disk.
+    SubElement(root, "useZip", type=str(config.use_zip))
 
-    # <usestack type="..."/>
-    SubElement(root, "usestack", type=str(config.use_stack))
+    # <useStack type="..."/>
+    SubElement(root, "useStack", type=str(config.use_stack))
 
-    # <split SplitMode="..."/>
-    SubElement(root, "split", SplitMode=str(config.split))
+    # <Split SplitMode="..."/> — PascalCase tag required by Java's
+    # case-sensitive XML reader (see org.rhwlab.snight.XMLConfig).
+    SubElement(root, "Split", SplitMode=str(config.split))
 
-    # <flip FlipMode="..."/>
-    SubElement(root, "flip", FlipMode=str(config.flip))
+    # <Flip FlipMode="..."/>
+    SubElement(root, "Flip", FlipMode=str(config.flip))
 
     # <angle degrees="..."/>
     if config.angle != -1.0:

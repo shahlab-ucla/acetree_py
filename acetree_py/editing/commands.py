@@ -78,6 +78,13 @@ class AddNucleus(EditCommand):
 
     The nucleus is appended to the end of the timepoint's list.
     Its index is set to len(nuclei_at_time) + 1 (1-based).
+
+    When ``assigned_id`` is set, it becomes a "forced name" that survives the
+    naming pipeline (``IdentityAssigner._clear_all_names`` preserves it, and
+    ``_propagate_assigned_ids`` extends it forward/backward through the
+    predecessor chain).  This is how a newly-added nucleus inherits the
+    name of the cell it's extending: the caller passes the parent's
+    ``effective_name`` as ``assigned_id``.
     """
 
     time: int  # 1-based timepoint
@@ -87,6 +94,7 @@ class AddNucleus(EditCommand):
     size: int = 20
     identity: str = ""
     predecessor: int = NILLI
+    assigned_id: str = ""
 
     # Set after execute
     _added_index: int = 0
@@ -107,12 +115,14 @@ class AddNucleus(EditCommand):
             z=self.z,
             size=self.size,
             identity=self.identity,
+            assigned_id=self.assigned_id,
             status=1,
             predecessor=self.predecessor,
         )
         nuclei_list.append(nuc)
-        logger.info("Added nucleus at t=%d idx=%d pos=(%d,%d,%.1f)",
-                     self.time, self._added_index, self.x, self.y, self.z)
+        logger.info("Added nucleus at t=%d idx=%d pos=(%d,%d,%.1f) assigned_id=%r",
+                     self.time, self._added_index, self.x, self.y, self.z,
+                     self.assigned_id)
 
     def undo(self, nuclei_record: NucleiRecord) -> None:
         t_idx = self.time - 1

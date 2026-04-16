@@ -551,6 +551,10 @@ class AceTreeApp:
             return
 
         self.current_cell_name = name
+        # Explicitly selecting a cell re-enables follow-mode.  This undoes
+        # any prior ↑/↓ Z nudge that disabled tracking, so subsequent
+        # time-scrubbing snaps the slice back to the selected cell.
+        self.tracking = True
 
         if time is not None:
             self.current_time = max(cell.start_time, min(time, cell.end_time))
@@ -558,8 +562,7 @@ class AceTreeApp:
             self.current_time = cell.start_time
 
         # Track to cell's z-plane
-        if self.tracking:
-            self._track_cell_at_time()
+        self._track_cell_at_time()
 
         # Show label for the selected cell
         if self._viewer_integration is not None:
@@ -585,8 +588,12 @@ class AceTreeApp:
         if nuc and nuc.effective_name:
             self.select_cell(nuc.effective_name, self.current_time)
         elif nuc:
-            # Unnamed nucleus — just highlight it
+            # Unnamed nucleus — highlight it and re-enable tracking so
+            # subsequent time-scrubbing still snaps Z to follow it (via
+            # the predecessor/successor chain fallback in
+            # _track_cell_at_time).
             self.current_cell_name = nuc.effective_name or f"idx={nuc.index}"
+            self.tracking = True
             self.update_display()
 
     # ── Relink pick mode (Feature 4) ─────────────────────────────
@@ -602,6 +609,7 @@ class AceTreeApp:
         """
         self._relink_pick_mode = True
         self._relink_pick_callback = callback
+        self._focus_viewer_canvas()
 
     def exit_relink_pick_mode(self) -> None:
         """Exit pick mode without choosing a target."""
@@ -631,10 +639,41 @@ class AceTreeApp:
     def enter_add_mode(self) -> None:
         """Enter click-to-add mode. Left-click places a nucleus."""
         self._add_mode = True
+        self._focus_viewer_canvas()
 
     def exit_add_mode(self) -> None:
         """Exit click-to-add mode."""
         self._add_mode = False
+
+    def _focus_viewer_canvas(self) -> None:
+        """Return keyboard focus to the napari canvas.
+
+        The viewer-level key bindings registered via ``@viewer.bind_key(...)``
+        only fire when the canvas has focus.  After the user clicks a toolbar
+        button (Add, Track, Relink) focus moves to that button, which eats
+        Escape.  Calling this after entering any mode restores the canvas as
+        the active focus target so Escape, Delete, and arrow keys behave.
+
+        Guarded by try/except because the exact napari attribute path has
+        varied across versions.
+        """
+        if self.viewer is None:
+            return
+        try:
+            qt_viewer = self.viewer.window.qt_viewer  # type: ignore[attr-defined]
+        except Exception:
+            return
+        try:
+            canvas = qt_viewer.canvas.native  # type: ignore[attr-defined]
+        except Exception:
+            canvas = None
+        for target in (canvas, qt_viewer):
+            try:
+                if target is not None:
+                    target.setFocus()
+                    return
+            except Exception:
+                continue
 
     @property
     def _image_layer(self):
@@ -690,6 +729,7 @@ class AceTreeApp:
         size = self._placement_default_size  # fallback
 
         identity = ""
+        assigned_id = ""
         predecessor = -1  # NILLI
         parent_end_time = None
         parent_end_index = None
@@ -710,6 +750,14 @@ class AceTreeApp:
                     if parent_nuc is not None:
                         parent_end_index = parent_nuc.index
                         size = parent_nuc.size  # inherit diameter
+                        # Plant the parent's effective name as a forced name
+                        # (assigned_id) on the new nucleus.  The naming
+                        # pipeline's _propagate_assigned_ids will then sweep
+                        # this name forward/backward through the predecessor
+                        # chain, unifying the cell across timepoints.  Works
+                        # whether the parent was renamed (has assigned_id)
+                        # or still has only the auto-generated identity.
+                        assigned_id = parent_nuc.effective_name or parent_name
                         if gap == 1:
                             predecessor = parent_end_index
 
@@ -721,6 +769,7 @@ class AceTreeApp:
             size=size,
             identity=identity,
             predecessor=predecessor,
+            assigned_id=assigned_id,
         )
         self.edit_history.do(cmd)
         new_index = cmd._added_index
@@ -756,6 +805,7 @@ class AceTreeApp:
         self._placement_mode = True
         self._placement_parent_name = parent_name
         self._placement_default_size = default_size
+        self._focus_viewer_canvas()
 
     def exit_placement_mode(self) -> None:
         """Exit click-to-place mode."""
@@ -779,6 +829,7 @@ class AceTreeApp:
         size = self._placement_default_size
 
         identity = ""
+        assigned_id = ""
         predecessor = NILLI = -1
 
         # Determine linking if we have a parent
@@ -800,6 +851,10 @@ class AceTreeApp:
                     if parent_nuc is not None:
                         parent_end_index = parent_nuc.index
                         size = parent_nuc.size  # inherit diameter
+                        # Plant parent's effective name as a forced name on
+                        # the new nucleus so the naming pipeline propagates
+                        # it through the continuation chain (see bug 3).
+                        assigned_id = parent_nuc.effective_name or parent_name
                         if gap == 1:
                             # Adjacent: set predecessor directly
                             predecessor = parent_end_index
@@ -814,6 +869,7 @@ class AceTreeApp:
             size=size,
             identity=identity,
             predecessor=predecessor,
+            assigned_id=assigned_id,
         )
         self.edit_history.do(cmd)
         new_index = cmd._added_index
@@ -1388,7 +1444,18 @@ class AceTreeApp:
                 self._image_layers.append(layer)
 
     def _track_cell_at_time(self) -> None:
-        """Update current_plane to follow the tracked cell's z position."""
+        """Update current_plane to follow the tracked cell's z position.
+
+        Primary path: ``cell.get_nucleus_at(current_time)``.
+
+        Fallback: if the cell's in-memory nucleus dict doesn't have an entry
+        for the target timepoint (common for manually-added nuclei whose
+        continuation chain hasn't yet been stitched into one multi-timepoint
+        cell by the naming pipeline), walk the predecessor/successor chain
+        in ``nuclei_record`` starting from the cell's known nuclei.  This
+        keeps the slice snapping to the right Z across time even for cells
+        that aren't fully materialised in the lineage tree.
+        """
         if not self.current_cell_name:
             return
 
@@ -1396,24 +1463,80 @@ class AceTreeApp:
         if cell is None:
             return
 
-        # Handle time beyond cell lifetime
+        # Handle time beyond cell lifetime: follow to a daughter / parent
+        # if the tree knows one, otherwise fall through to the chain walk.
         if self.current_time > cell.end_time:
             if cell.children:
-                # Follow first daughter
                 self.current_cell_name = cell.children[0].name
                 cell = cell.children[0]
-            else:
-                return
         elif self.current_time < cell.start_time:
             if cell.parent:
                 self.current_cell_name = cell.parent.name
                 cell = cell.parent
-            else:
-                return
 
         nuc = cell.get_nucleus_at(self.current_time)
+        if nuc is None:
+            nuc = self._find_nucleus_via_chain(cell, self.current_time)
         if nuc:
             self.current_plane = max(1, round(nuc.z + NUCZINDEXOFFSET))
+
+    def _find_nucleus_via_chain(self, cell, target_time: int):
+        """Walk the predecessor / successor chain in ``nuclei_record``
+        starting from the cell's known nuclei, looking for a nucleus at
+        ``target_time``.  Returns the ``Nucleus`` or ``None``.
+
+        Used as a fallback when ``cell.get_nucleus_at(t)`` returns None —
+        e.g. a continuation chain added manually that hasn't been glued
+        into a single multi-timepoint cell yet.  Stops at divisions and
+        at dead nuclei.
+        """
+        nr = self.manager.nuclei_record
+        if not cell.nuclei or not nr:
+            return None
+        known = sorted(cell.nuclei, key=lambda tn: tn[0])
+
+        if target_time > known[-1][0]:
+            # Walk forward from the latest known nucleus via successor1
+            t, nuc = known[-1]
+            while t < target_time:
+                s = nuc.successor1
+                # Stop at divisions and on broken links
+                if s <= 0 or nuc.successor2 > 0:
+                    return None
+                t_next = t + 1
+                t_idx = t_next - 1
+                if not (0 <= t_idx < len(nr)):
+                    return None
+                idx = s - 1
+                if not (0 <= idx < len(nr[t_idx])):
+                    return None
+                nuc = nr[t_idx][idx]
+                if nuc.status < 1:
+                    return None
+                t = t_next
+                if t == target_time:
+                    return nuc
+        elif target_time < known[0][0]:
+            # Walk backward from the earliest known nucleus via predecessor
+            t, nuc = known[0]
+            while t > target_time:
+                p = nuc.predecessor
+                if p <= 0:
+                    return None
+                t_prev = t - 1
+                if t_prev < 1:
+                    return None
+                t_idx = t_prev - 1
+                idx = p - 1
+                if not (0 <= t_idx < len(nr)) or not (0 <= idx < len(nr[t_idx])):
+                    return None
+                nuc = nr[t_idx][idx]
+                if nuc.status < 1:
+                    return None
+                t = t_prev
+                if t == target_time:
+                    return nuc
+        return None
 
     def _on_edit(self) -> None:
         """Callback after any edit command — rebuild tree and refresh display."""
@@ -1713,30 +1836,67 @@ class AceTreeApp:
         QMessageBox.information(None, "Measure complete", msg)
 
     def _delete_active_nucleus(self) -> None:
-        """Delete the active cell's nucleus at the current timepoint only."""
+        """Delete the selected nucleus at the current timepoint.
+
+        Resolves the target nucleus in this priority order:
+
+        1. ``current_cell_name`` resolves to a real Cell → use that cell's
+           nucleus at the current timepoint.
+        2. ``current_cell_name`` has the ``idx=N`` fallback form (set by
+           ``select_cell_at_position`` for unnamed manually-added nuclei)
+           → parse N and delete that nucleus directly.
+
+        Surfaces a status message when nothing can be deleted so failures
+        aren't silent.
+        """
+        def _say(msg: str) -> None:
+            try:
+                if self.viewer is not None:
+                    self.viewer.status = msg
+            except Exception:
+                pass
+
         if not self.current_cell_name:
+            _say("No nucleus selected to delete")
             return
 
+        index: int | None = None
+
+        # Path 1: real named cell in the lineage tree
         cell = self.manager.get_cell(self.current_cell_name)
-        if cell is None:
-            return
+        if cell is not None:
+            nuc = cell.get_nucleus_at(self.current_time)
+            if nuc is not None:
+                index = nuc.index
 
-        nuc = cell.get_nucleus_at(self.current_time)
-        if nuc is None:
+        # Path 2: raw idx= fallback (unnamed manually-added nucleus)
+        if index is None and self.current_cell_name.startswith("idx="):
+            try:
+                index = int(self.current_cell_name[4:])
+            except ValueError:
+                index = None
+
+        if index is None:
+            _say(f"Cannot locate '{self.current_cell_name}' at t={self.current_time}")
             return
 
         from ..editing.validators import validate_remove_nucleus
 
         errors = validate_remove_nucleus(
-            self.edit_history.nuclei_record, self.current_time, nuc.index
+            self.edit_history.nuclei_record, self.current_time, index
         )
         if errors:
+            _say(f"Delete failed: {errors[0]}")
             return
 
         from ..editing.commands import RemoveNucleus
 
-        cmd = RemoveNucleus(time=self.current_time, index=nuc.index)
+        cmd = RemoveNucleus(time=self.current_time, index=index)
         self.edit_history.do(cmd)
+        _say(f"Removed nucleus at t={self.current_time} idx={index}")
+        # After a delete, the nucleus is no longer a valid selection anchor.
+        # Clear it so subsequent tracking/navigation doesn't chase a dead ref.
+        self.current_cell_name = ""
 
     def _bind_keys(self) -> None:
         """Bind keyboard shortcuts to the napari viewer."""
@@ -1781,18 +1941,33 @@ class AceTreeApp:
 
         @self.viewer.bind_key("Escape")
         def _exit_modes(viewer):
+            # Defensively exit every interaction mode and reset every toolbar
+            # button, not just the currently-active one.  Mode flags and
+            # button checked-states can drift out of sync (e.g. focus stolen
+            # by a modal), and a single Escape press should always return
+            # the UI to a clean navigation state.
+            changed = False
             if self._add_mode:
                 self.exit_add_mode()
-                if self._edit_panel:
-                    self._edit_panel._btn_add.setChecked(False)
-                    self._edit_panel._status_label.setText("Exited add mode")
-            elif self._placement_mode:
+                changed = True
+            if self._placement_mode:
                 self.exit_placement_mode()
-                if self._edit_panel:
-                    self._edit_panel._btn_track.setChecked(False)
-                    self._edit_panel._status_label.setText("Exited tracking mode")
-            elif self._relink_pick_mode:
+                changed = True
+            if self._relink_pick_mode:
                 self.exit_relink_pick_mode()
+                changed = True
+
+            if self._edit_panel:
+                try:
+                    self._edit_panel._btn_add.setChecked(False)
+                except Exception:
+                    pass
+                try:
+                    self._edit_panel._btn_track.setChecked(False)
+                except Exception:
+                    pass
+                if changed:
+                    self._edit_panel._status_label.setText("Exited mode")
 
         @self.viewer.bind_key("Delete")
         def _delete_nucleus(viewer):
