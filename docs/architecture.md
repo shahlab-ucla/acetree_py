@@ -578,11 +578,11 @@ Each nucleus is modelled as a sphere of diameter `nuc.size` centred at `(x, y, z
 1. Iterates every channel, every timepoint. For each `(t, channel)` it calls `image_provider.get_stack(t, channel)` and `measure_timepoint`, collecting `(sum_in, count_in, sum_ann, count_ann)` for every nucleus.
 2. For the chosen `at_channel` only: writes `rwraw = round(sum_in * 1000 / count_in)` and `rwcorr1 = round(sum_ann * 1000 / count_ann)` back onto each `Nucleus` (the `* 1000` SCALE matches Java `NucleiMgr.computeRWeight`). Leaves untouched nuclei (dead or unmeasured) unchanged so prior values aren't blown away.
 3. Recomputes `rweight` via `manager.compute_red_weights()` (under `correction = "none"`, falls back to copying `rwraw` directly).
-4. Writes one CSV per channel. The per-timepoint CSV value follows the session's current correction method — plain `rwraw` for `"none"`, `rwraw - rwcorr1` otherwise.
+4. Writes one CSV per channel. The per-timepoint CSV value follows the session's current correction method — plain `rwraw` for `"none"`, `rwraw - rwcorr1` for `"global"`, `rwraw - rwcorr3` for `"blot"`.
 
 **Cancellation:** `progress_cb(channel_idx, n_channels, t_1based, n_timepoints) -> bool | None` is fired after every timepoint. Returning `False` raises `RuntimeError("Measure cancelled by user")`.
 
-**Scope note:** Only `rwcorr1` (global background) is computed. `rwcorr2` / `rwcorr3` came from external MATLAB in the Java pipeline; `rwcorr4` (crosstalk) was deferred. `"local"` / `"blot"` / `"cross"` correction modes fall back to `rwraw - rwcorr1` for the CSV output.
+**Scope note:** The port computes `rwcorr1` (global annulus background) and `rwcorr3` (blot — annulus with every nucleus's projected inner disk masked out; see `measure_timepoint_with_blot` in `analysis/measure.py`). `rwcorr2` / `rwcorr4` are not computed (Java's pipeline filled them via external MATLAB and a crosstalk solver). The correction method is selected in the Measure dialog (`gui/measure_dialog.py::MeasureDialog`) and threaded through `run_measure(…, correction_method=…)`: `"none"` writes no subtraction, `"global"` writes `rwraw - rwcorr1`, `"blot"` writes `rwraw - rwcorr3`. Unknown / legacy modes (`"local"`, `"cross"`) fall back to `rwraw - rwcorr1`.
 
 **GUI wiring:** `File → Measure…` (added in `gui/app.py::_add_file_menu_actions`) opens `MeasureDialog` (channel combo + output-dir picker), runs the orchestrator under a `QProgressDialog`, and rebuilds every lineage widget on completion so the fresh `rweight` values show up.
 

@@ -1810,6 +1810,7 @@ class AceTreeApp:
         values = dlg.get_values()
         at_channel: int = values["at_channel"]
         output_dir: Path = values["output_dir"]
+        correction_method: str = values.get("correction_method", "global")
 
         n_channels = int(self.image_provider.num_channels)
         n_timepoints = len(self.manager.nuclei_record)
@@ -1841,6 +1842,7 @@ class AceTreeApp:
                 output_dir,
                 at_channel,
                 progress_cb=progress_cb,
+                correction_method=correction_method,
             )
         except RuntimeError as e:
             # User-cancelled or orchestrator-raised runtime error

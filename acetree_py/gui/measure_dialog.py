@@ -91,6 +91,40 @@ class MeasureDialog(QDialog):  # type: ignore[misc]
         self._channel_combo.setCurrentIndex(default_idx)
         form.addRow("AT channel:", self._channel_combo)
 
+        # Background-correction selector.  Values are internal strings
+        # matching the RED_CORRECTION_METHODS vocabulary (nucleus.py).
+        self._corr_combo = QComboBox()
+        self._corr_combo.addItem("None (raw intensity)", userData="none")
+        self._corr_combo.addItem(
+            "Global — annulus mean", userData="global",
+        )
+        self._corr_combo.addItem(
+            "Blot — annulus with neighbors masked (rwcorr3)",
+            userData="blot",
+        )
+        # Seed default from the session's current correction method so
+        # the dialog round-trips the user's prior choice.  Fall back to
+        # "global" which is the most useful single-click default.
+        default_corr = "global"
+        mgr = getattr(app, "manager", None)
+        prior = getattr(mgr, "_expr_corr", None) if mgr is not None else None
+        if prior in ("none", "global", "blot"):
+            default_corr = prior
+        for i in range(self._corr_combo.count()):
+            if self._corr_combo.itemData(i) == default_corr:
+                self._corr_combo.setCurrentIndex(i)
+                break
+        self._corr_combo.setToolTip(
+            "Background-correction applied to the measured values.\n\n"
+            "• None — CSV value is the raw mean intensity inside each nucleus.\n"
+            "• Global — subtract the mean of the surrounding annulus.\n"
+            "• Blot — same annulus, but every nucleus's projected disk is\n"
+            "    masked out of the background. Yields a cleaner\n"
+            "    background estimate when nuclei are crowded (other\n"
+            "    nuclei don't contaminate the annulus mean)."
+        )
+        form.addRow("Background correction:", self._corr_combo)
+
         # Output directory row
         default_dir = self._default_output_dir(app)
         self._dir_edit = QLineEdit(str(default_dir) if default_dir else "")
@@ -154,7 +188,16 @@ class MeasureDialog(QDialog):  # type: ignore[misc]
         Keys:
             at_channel: 0-based channel index for the AT expression channel.
             output_dir: :class:`pathlib.Path` of the chosen output folder.
+            correction_method: ``"none"``, ``"global"``, or ``"blot"`` —
+                matches the internal ``RED_CORRECTION_METHODS`` vocabulary
+                in ``nucleus.py``.  Passed through to
+                :func:`acetree_py.analysis.measure_runner.run_measure`.
         """
         at_channel = int(self._channel_combo.currentData())
         output_dir = Path(self._dir_edit.text().strip())
-        return {"at_channel": at_channel, "output_dir": output_dir}
+        correction_method = str(self._corr_combo.currentData())
+        return {
+            "at_channel": at_channel,
+            "output_dir": output_dir,
+            "correction_method": correction_method,
+        }

@@ -18,6 +18,7 @@ from acetree_py.analysis.measure import (
     DEFAULT_ANNULUS_SCALE,
     measure_nucleus,
     measure_timepoint,
+    measure_timepoint_with_blot,
     project_radius,
 )
 from acetree_py.analysis.measure_csv import write_measure_csv
@@ -197,6 +198,122 @@ class TestMeasureTimepoint:
         assert measure_timepoint(stack, [], 1.0) == []
 
 
+# ── measure_timepoint_with_blot ────────────────────────────────────
+
+
+class TestMeasureTimepointWithBlot:
+    """Blot correction = annulus with every nucleus's projected disk
+    masked out.  With no neighbors, blot == global annulus; with a
+    bright neighbor overlapping the annulus, blot drops (neighbor
+    bright pixels are excluded, leaving only true background)."""
+
+    def test_shape_and_alignment(self):
+        stack = np.ones((5, 32, 32), dtype=np.uint16) * 100
+        nuclei = [
+            _make_nucleus(index=1, x=16, y=16, z=2.0, size=8),
+            _make_nucleus(index=2, x=20, y=20, z=2.0, size=8, status=-1),
+        ]
+        out = measure_timepoint_with_blot(stack, nuclei, 1.0)
+        assert len(out) == 2
+        # Each tuple has 6 fields
+        assert all(len(t) == 6 for t in out)
+        # Dead nucleus: all zeros
+        assert out[1] == (0, 0, 0, 0, 0, 0)
+
+    def test_blot_matches_global_when_isolated(self):
+        """With only one nucleus (no neighbors), the blot annulus equals
+        the global annulus — the union-of-disks mask covers only self's
+        own disk, which is already excluded from the annulus."""
+        # Single isolated nucleus, bright interior, uniform background 50
+        stack = _make_sphere_stack(
+            shape=(11, 64, 64),
+            cx=32, cy=32, cz=5.0,
+            radius=8.0, z_pix_res=1.0,
+            value_in=1000, value_out=50,
+        )
+        nuc = _make_nucleus(index=1, x=32, y=32, z=5.0, size=16)
+        out = measure_timepoint_with_blot(stack, [nuc], 1.0)
+        sum_in, count_in, sum_ann, count_ann, sum_blot, count_blot = out[0]
+        # With one nucleus, blot annulus == global annulus
+        assert sum_ann == sum_blot
+        assert count_ann == count_blot
+        # Background of 50 dominates the annulus
+        assert count_ann > 0
+        assert sum_ann / count_ann == pytest.approx(50, rel=1e-6)
+
+    def test_blot_excludes_bright_neighbor_from_annulus(self):
+        """A bright neighbor overlapping the target's annulus must be
+        masked out: blot mean should be closer to true background than
+        the raw annulus mean (which is contaminated by the neighbor)."""
+        # Canvas: background 50.
+        nz, ny, nx = 11, 80, 80
+        stack = np.full((nz, ny, nx), 50, dtype=np.uint16)
+
+        # Target nucleus at (32, 40), radius 8
+        # Neighbor nucleus at (44, 40), radius 8 — 12 pixels apart.
+        # annulus_scale=1.5 → outer radius 12; target's annulus reaches
+        # x=44, and the neighbor's inner disk spans x=36..52, so the
+        # neighbor's disk overlaps the right half of the target's annulus.
+        for nuc_cx in (32, 44):
+            r = 8.0
+            for z in range(nz):
+                y_off = (z - 5.0) * 1.0
+                r2 = r * r - y_off * y_off
+                if r2 <= 0:
+                    continue
+                import math
+                rz = math.sqrt(r2)
+                y0 = max(0, int(40 - rz))
+                y1 = min(ny, int(40 + rz) + 1)
+                x0 = max(0, int(nuc_cx - rz))
+                x1 = min(nx, int(nuc_cx + rz) + 1)
+                ys = np.arange(y0, y1).reshape(-1, 1)
+                xs = np.arange(x0, x1).reshape(1, -1)
+                dx = xs - nuc_cx
+                dy = ys - 40
+                stack[z, y0:y1, x0:x1][(dx * dx + dy * dy) <= rz * rz] = 1000
+
+        target = _make_nucleus(index=1, x=32, y=40, z=5.0, size=16)
+        neighbor = _make_nucleus(index=2, x=44, y=40, z=5.0, size=16)
+
+        out = measure_timepoint_with_blot(stack, [target, neighbor], 1.0)
+        sum_in, count_in, sum_ann, count_ann, sum_blot, count_blot = out[0]
+
+        # Sanity: interior is bright
+        assert count_in > 0
+        assert sum_in / count_in == pytest.approx(1000, rel=1e-6)
+
+        # Global annulus is contaminated by the neighbor → mean > 50
+        assert count_ann > 0
+        ann_mean = sum_ann / count_ann
+        assert ann_mean > 100  # well above background thanks to neighbor
+
+        # Blot annulus masks the neighbor out → mean much closer to 50
+        assert count_blot > 0
+        blot_mean = sum_blot / count_blot
+        # Blot mean strictly lower than global annulus mean
+        assert blot_mean < ann_mean
+        # And within a few % of the true background
+        assert blot_mean == pytest.approx(50, rel=0.05)
+
+    def test_blot_count_le_annulus_count(self):
+        """The blot mask is always a subset of the annulus (we only
+        remove pixels).  So count_blot <= count_ann always."""
+        stack = _make_sphere_stack(
+            shape=(7, 48, 48),
+            cx=24, cy=24, cz=3.0,
+            radius=8.0, z_pix_res=1.0,
+            value_in=500, value_out=10,
+        )
+        # Two nuclei, same Z plane, annuli overlapping
+        n1 = _make_nucleus(index=1, x=20, y=24, z=3.0, size=16)
+        n2 = _make_nucleus(index=2, x=32, y=24, z=3.0, size=16)
+        out = measure_timepoint_with_blot(stack, [n1, n2], 1.0)
+        for row in out:
+            _, _, _, count_ann, _, count_blot = row
+            assert count_blot <= count_ann
+
+
 # ── CSV writer ─────────────────────────────────────────────────────
 
 
@@ -322,6 +439,94 @@ def test_run_measure_writes_csvs_and_updates_rwraw(
             assert abs(n.rwraw - 1000 * SCALE) / (1000 * SCALE) < 0.05
             # rweight = rwraw - rwcorr1 under "global"
             assert n.rweight == n.rwraw - n.rwcorr1
+
+
+def test_run_measure_blot_correction_writes_rwcorr3(tmp_path: Path):
+    """Blot correction should populate rwcorr3 on the AT channel and
+    switch the session expr_corr to 'blot' so compute_red_weights picks
+    the rwcorr3 term for rweight."""
+    mgr = NucleiManager()
+    mgr._expr_corr = "none"  # will be flipped to blot by run_measure
+    mgr.movie.xy_res = 1.0
+    mgr.movie.z_res = 1.0
+
+    # Two neighboring nuclei sharing a plane so their annuli overlap.
+    n1 = Nucleus(
+        index=1, x=32, y=40, z=5.0, size=16, status=1,
+        identity="A", predecessor=-1, successor1=-1, successor2=-1,
+    )
+    n2 = Nucleus(
+        index=2, x=44, y=40, z=5.0, size=16, status=1,
+        identity="B", predecessor=-1, successor1=-1, successor2=-1,
+    )
+    mgr.nuclei_record = [[n1, n2]]
+    mgr.set_all_successors()
+    mgr.process(do_identity=False)
+
+    # One-channel stack: bright nuclei, uniform background 50.
+    shape_3d = (11, 80, 80)
+    stack = np.full(shape_3d, 50, dtype=np.uint16)
+    # Burn bright spheres at each nucleus position.
+    for cx in (32, 44):
+        sphere = _make_sphere_stack(shape_3d, cx, 40, 5.0, 8.0, 1.0, 1000, 0)
+        stack = np.where(sphere > 0, sphere, stack).astype(np.uint16)
+    data = stack[np.newaxis, ...]  # (T=1, Z, Y, X)
+    provider = NumpyProvider(data)
+    assert provider.num_channels == 1
+
+    run_measure(
+        mgr,
+        provider,
+        tmp_path,
+        at_channel=0,
+        progress_cb=None,
+        correction_method="blot",
+    )
+
+    # Session expr_corr should now be "blot"
+    assert mgr._expr_corr == "blot"
+
+    # Both nuclei should have rwcorr3 populated (non-zero), and it should
+    # be lower than rwcorr1 because blot masks out the bright neighbor.
+    for n in (n1, n2):
+        assert n.rwraw > 0
+        assert n.rwcorr1 > 0
+        assert n.rwcorr3 > 0
+        # Blot < global because the bright neighbor inflates the raw annulus
+        assert n.rwcorr3 < n.rwcorr1
+
+    # rweight = rwraw - rwcorr3 in blot mode
+    for n in (n1, n2):
+        assert n.rweight == n.rwraw - n.rwcorr3
+
+
+def test_run_measure_blot_matches_global_when_isolated(tmp_path: Path):
+    """With a single isolated nucleus (no neighbors), blot == global.
+    rwcorr3 should equal rwcorr1, and rweight differs only by choice
+    of correction field."""
+    mgr = NucleiManager()
+    mgr.movie.xy_res = 1.0
+    mgr.movie.z_res = 1.0
+    n1 = Nucleus(
+        index=1, x=32, y=32, z=5.0, size=16, status=1,
+        identity="A", predecessor=-1, successor1=-1, successor2=-1,
+    )
+    mgr.nuclei_record = [[n1]]
+    mgr.set_all_successors()
+    mgr.process(do_identity=False)
+
+    shape_3d = (11, 64, 64)
+    stack = _make_sphere_stack(shape_3d, 32, 32, 5, 8.0, 1.0, 1000, 50)
+    data = stack[np.newaxis, ...]
+    provider = NumpyProvider(data)
+
+    run_measure(
+        mgr, provider, tmp_path,
+        at_channel=0, progress_cb=None,
+        correction_method="blot",
+    )
+    # With one nucleus, neighbor-masked annulus == full annulus
+    assert n1.rwcorr1 == n1.rwcorr3
 
 
 def test_run_measure_respects_correction_none(

@@ -482,7 +482,25 @@ Cells are sorted by `start_time` then name. Start and end times are 1-based and 
 
 ### 10.4 Correction Modes and Limitations
 
-The Python port computes `rwraw` (mean intensity inside the nucleus) and `rwcorr1` (mean intensity in the surrounding annulus — "global background"). It does *not* compute `rwcorr2` / `rwcorr3` / `rwcorr4`: the Java pipeline filled those via external MATLAB and crosstalk-solver code that is out of scope for this port. If your session uses `"local"`, `"blot"`, or `"cross"` correction, the CSV value falls back to `rwraw - rwcorr1` (global background) as a best-effort approximation.
+The Python port computes:
+
+- **`rwraw`** — mean intensity inside the nucleus.
+- **`rwcorr1`** — mean intensity in the surrounding annulus (classic "global background").
+- **`rwcorr3`** — "blot" correction: mean intensity of the annulus with *every nucleus's projected disk masked out* at that Z plane. When neighbouring nuclei intrude on the annulus, their bright pixels are excluded from the background estimate, giving a cleaner local background in crowded regions. With no neighbours nearby, blot equals the global annulus.
+
+`rwcorr2` / `rwcorr4` are not computed by this port (they came from external MATLAB and a crosstalk solver in the Java pipeline). If the session uses `"local"` or `"cross"` correction, the CSV value falls back to `rwraw - rwcorr1` as a best-effort approximation.
+
+### Choosing a correction
+
+The Measure dialog exposes three background-correction modes:
+
+| Mode | CSV value per timepoint | When to pick |
+|---|---|---|
+| **None** | `rwraw` | Raw intensity only. |
+| **Global — annulus mean** | `rwraw − rwcorr1` | Sparse embryos, isolated nuclei. Fastest. |
+| **Blot — annulus with neighbors masked (rwcorr3)** | `rwraw − rwcorr3` | Crowded embryos where neighbouring nuclei poke into the annulus and inflate the global background. |
+
+The dialog also writes the chosen mode back onto `manager._expr_corr`, so the lineage tree immediately re-colours using the corresponding correction field.
 
 ---
 

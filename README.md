@@ -100,7 +100,7 @@ acetree-py info config.xml --cell ABala
 - **Cell-scoped rename and atomic swap** — the Rename command writes a forced name across the cell's entire continuation chain in one undoable step; name collisions can be resolved with an atomic swap between two cells
 - **Full undo/redo** — up to 1000 edit commands with `Ctrl+Z` / `Ctrl+Y`
 - **Multi-panel lineage trees** — open multiple Sulston tree views with independent root cells, time ranges, expression ranges, and colormaps
-- **Pixel measurement (File → Measure…)** — port of the Java `AceBatch2` measure tool: samples fluorescence per nucleus in every image channel, writes one CSV per channel (cell × absolute time), updates `rwraw` / `rwcorr1` / `rweight` for the chosen AT channel so the lineage tree re-colors from live measurement
+- **Pixel measurement (File → Measure…)** — port of the Java `AceBatch2` measure tool: samples fluorescence per nucleus in every image channel, writes one CSV per channel (cell × absolute time), updates `rwraw` / `rwcorr1` / `rwcorr3` / `rweight` for the chosen AT channel so the lineage tree re-colors from live measurement. Background-correction selector in the dialog: *None*, *Global* (annulus mean), or *Blot* (annulus with every nucleus's projected disk masked out — cleaner estimate in crowded regions).
 - **Screenshot and recording** — capture single frames or export image sequences across timepoints
 - **Save/Save As** — persist edits to ZIP files compatible with Java AceTree
 - **Export** — cell tables, nucleus tables, expression time series, Newick trees

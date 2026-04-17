@@ -224,3 +224,142 @@ def measure_timepoint(
         measure_nucleus(stack, n, z_pix_res, annulus_scale)
         for n in nuclei
     ]
+
+
+def measure_timepoint_with_blot(
+    stack: np.ndarray,
+    nuclei: list[Nucleus],
+    z_pix_res: float,
+    annulus_scale: float = DEFAULT_ANNULUS_SCALE,
+) -> list[tuple[int, int, int, int, int, int]]:
+    """Like :func:`measure_timepoint` but also computes **blot-corrected**
+    annulus sums that exclude contaminating neighbor nuclei.
+
+    The global-annulus background (``rwcorr1``) over-estimates the true
+    background whenever another nucleus overlaps the annulus — the
+    neighbor's bright pixels get averaged in as if they were empty
+    space.  The "blot" variant, named after the historical Java
+    ``rwcorr3`` slot, builds the same annulus and then **masks out the
+    inner disks of every nucleus at that Z-plane** before summing.
+    The resulting background estimate reflects only pixels that belong
+    to no nucleus — a cleaner local-background measure in crowded
+    regions.  With no neighbors nearby, blot equals the global annulus.
+
+    Args:
+        stack: 3D image stack, shape ``(Z, Y, X)``.
+        nuclei: Nucleus list for this timepoint (index-aligned output).
+        z_pix_res: Z / XY pixel resolution ratio.
+        annulus_scale: Annulus outer-radius multiplier.
+
+    Returns:
+        Index-aligned list of
+        ``(sum_in, count_in, sum_ann, count_ann, sum_blot, count_blot)``
+        tuples.  ``sum_blot`` / ``count_blot`` are the neighbor-masked
+        annulus aggregations.  Dead nuclei yield six zeros.
+    """
+    if stack.ndim != 3:
+        raise ValueError(f"Expected 3D stack (Z,Y,X), got shape {stack.shape}")
+    nz, ny, nx = stack.shape
+
+    # Gather per-nucleus metadata once.  Dead / zero-size nuclei become
+    # None so their slot in the output is all zeros.
+    info: list[dict | None] = []
+    for nuc in nuclei:
+        if nuc.status < 1 or nuc.size <= 0:
+            info.append(None)
+            continue
+        r = nuc.size / 2.0
+        half_z = r / z_pix_res if z_pix_res > 0 else r
+        z_lo = max(0, int(math.floor(nuc.z - half_z)))
+        z_hi = min(nz - 1, int(math.ceil(nuc.z + half_z)))
+        info.append({
+            "nuc": nuc,
+            "radius": r,
+            "cx": int(round(nuc.x)),
+            "cy": int(round(nuc.y)),
+            "z_lo": z_lo,
+            "z_hi": z_hi,
+        })
+
+    # Union-of-inner-disks mask per Z plane, built lazily.  Any annulus
+    # pixel falling inside *any* nucleus's inner disk is excluded from
+    # the blot aggregation.  (A nucleus's own inner disk is already
+    # outside its annulus by construction, so the "exclude all"
+    # formulation naturally excludes only neighbors.)
+    plane_union_cache: dict[int, np.ndarray | None] = {}
+
+    def _union_mask(z: int) -> np.ndarray | None:
+        if z in plane_union_cache:
+            return plane_union_cache[z]
+        disks: list[tuple[int, int, float]] = []
+        for entry in info:
+            if entry is None or not (entry["z_lo"] <= z <= entry["z_hi"]):
+                continue
+            r_in = project_radius(
+                entry["nuc"].z, z, entry["radius"], z_pix_res,
+            )
+            if r_in > 0:
+                disks.append((entry["cx"], entry["cy"], r_in))
+        if not disks:
+            plane_union_cache[z] = None
+            return None
+        mask = np.zeros((ny, nx), dtype=bool)
+        for cx, cy, r in disks:
+            x0 = max(0, int(math.floor(cx - r)))
+            x1 = min(nx, int(math.ceil(cx + r)) + 1)
+            y0 = max(0, int(math.floor(cy - r)))
+            y1 = min(ny, int(math.ceil(cy + r)) + 1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            ys = np.arange(y0, y1).reshape(-1, 1)
+            xs = np.arange(x0, x1).reshape(1, -1)
+            dy = ys - cy
+            dx = xs - cx
+            mask[y0:y1, x0:x1] |= (dx * dx + dy * dy) <= r * r
+        plane_union_cache[z] = mask
+        return mask
+
+    results: list[tuple[int, int, int, int, int, int]] = []
+    for entry in info:
+        if entry is None:
+            results.append((0, 0, 0, 0, 0, 0))
+            continue
+
+        nuc = entry["nuc"]
+        cx, cy = entry["cx"], entry["cy"]
+        sum_in = count_in = sum_ann = count_ann = sum_blot = count_blot = 0
+
+        for z in range(entry["z_lo"], entry["z_hi"] + 1):
+            r_in = project_radius(nuc.z, z, entry["radius"], z_pix_res)
+            if r_in <= 0:
+                continue
+            r_out = r_in * annulus_scale
+
+            inner, annulus, (sy, sx) = _disk_masks(
+                (ny, nx), cx, cy, r_in, r_out,
+            )
+            if inner.size == 0:
+                continue
+
+            plane = stack[z, sy, sx]
+            if inner.any():
+                sum_in += int(plane[inner].sum())
+                count_in += int(inner.sum())
+            if annulus.any():
+                sum_ann += int(plane[annulus].sum())
+                count_ann += int(annulus.sum())
+
+                union = _union_mask(z)
+                if union is not None:
+                    blot_mask = annulus & ~union[sy, sx]
+                else:
+                    blot_mask = annulus
+                if blot_mask.any():
+                    sum_blot += int(plane[blot_mask].sum())
+                    count_blot += int(blot_mask.sum())
+
+        results.append(
+            (sum_in, count_in, sum_ann, count_ann, sum_blot, count_blot)
+        )
+
+    return results
