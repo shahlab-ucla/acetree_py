@@ -508,8 +508,14 @@ class AceTreeApp:
     def set_plane(self, plane: int) -> None:
         """Navigate to a specific z-plane.
 
-        Changing z-plane deselects the active cell (the user is manually
-        exploring, not following a tracked cell).
+        Manual Z navigation disables auto-tracking (the slice should stop
+        snapping to the selected cell's centroid on time-scrubs) but
+        keeps ``current_cell_name`` set.  Previously we cleared the cell
+        name entirely — which broke Add/Track modes where the user wants
+        to adjust the Z slice to place a new nucleus while still
+        inheriting the selected cell's name as the predecessor.  The
+        selection is only explicitly cleared by clicking empty space,
+        selecting a different cell, or pressing Escape.
 
         Args:
             plane: 1-based z-plane index.
@@ -519,10 +525,11 @@ class AceTreeApp:
         if plane == self.current_plane:
             return
         self.current_plane = plane
-        # Deselect active cell — user is manually navigating z
+        # Preserve current_cell_name so Add/Track modes keep their
+        # predecessor.  Just freeze auto-tracking so scrubbing time next
+        # doesn't yank Z back to the cell's centroid.
+        self.tracking = False
         if self.current_cell_name:
-            self.current_cell_name = ""
-            self.tracking = False
             self.update_display()
         else:
             self._update_display_plane_only()
@@ -1935,12 +1942,42 @@ class AceTreeApp:
 
         from ..editing.commands import RemoveNucleus
 
-        cmd = RemoveNucleus(time=self.current_time, index=index)
+        deleted_cell_name = self.current_cell_name
+        deleted_at_time = self.current_time
+
+        cmd = RemoveNucleus(time=deleted_at_time, index=index)
         self.edit_history.do(cmd)
-        _say(f"Removed nucleus at t={self.current_time} idx={index}")
-        # After a delete, the nucleus is no longer a valid selection anchor.
-        # Clear it so subsequent tracking/navigation doesn't chase a dead ref.
-        self.current_cell_name = ""
+        _say(f"Removed nucleus at t={deleted_at_time} idx={index}")
+
+        # Chain-delete UX: step the view back one timepoint and re-anchor
+        # on the cell if it still has any nuclei.  That way repeatedly
+        # pressing Delete walks backward along the cell's continuation
+        # chain, killing one timepoint per press.  If the cell is now
+        # empty (we just killed its last nucleus) OR the selection was
+        # an "idx=N" raw-nucleus fallback (no lineage entry), deselect.
+        if deleted_at_time > 1:
+            self.current_time = deleted_at_time - 1
+
+        if deleted_cell_name and not deleted_cell_name.startswith("idx="):
+            cell_after = self.manager.get_cell(deleted_cell_name)
+            if cell_after is not None and cell_after.nuclei:
+                # Cell still exists — stay selected, snap Z to its
+                # nucleus at the new (earlier) timepoint.
+                self.current_cell_name = deleted_cell_name
+                # _track_cell_at_time also runs from update_display via
+                # _on_edit, but that fires at the pre-step_back time;
+                # call it now with the updated current_time so the Z
+                # slice lands on the cell at t-1.
+                self._track_cell_at_time()
+            else:
+                self.current_cell_name = ""
+        else:
+            self.current_cell_name = ""
+
+        # Refresh the viewer to reflect the new time + selection.  The
+        # edit already triggered one update_display via _on_edit, but
+        # that ran before we stepped current_time back.
+        self.update_display()
 
     def _exit_all_modes(self) -> None:
         """Exit every interaction mode and reset every toolbar button.

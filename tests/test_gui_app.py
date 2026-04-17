@@ -209,6 +209,23 @@ class TestTracking:
         app.set_time(5)
         assert app.current_plane == 20  # Not changed
 
+    def test_z_nav_preserves_cell_selection(self):
+        """Regression: set_plane used to clear current_cell_name and
+        set tracking=False.  This broke Add/Track modes where the user
+        wants to nudge the Z slice to position the new nucleus while
+        still inheriting the selected cell as predecessor.  After the
+        fix, Z nav only disables auto-tracking — the cell stays
+        selected so the Add path still sees a parent."""
+        app = _make_app()
+        app.current_cell_name = "AB"
+        app.tracking = True
+        app.current_plane = 15
+        app.set_plane(20)
+        # Cell stays selected, tracking is frozen
+        assert app.current_cell_name == "AB"
+        assert app.tracking is False
+        assert app.current_plane == 20
+
     def test_tracking_follows_daughter(self):
         app = _make_app()
         app.tracking = True
@@ -345,6 +362,131 @@ class TestPhantomAncestorAvoidance:
         # Should still have linked to real AB at t=1
         assert t2.predecessor == 1
         assert t2.assigned_id == "AB"
+
+
+# ── Chain-delete tests ───────────────────────────────────────────
+
+
+class TestChainDelete:
+    """After pressing Delete on a cell's nucleus, the view should step
+    one timepoint back and keep the cell selected so pressing Delete
+    again kills that cell's previous-timepoint nucleus.  This makes it
+    easy to chain-delete a tracked cell backward without re-selecting
+    between each press."""
+
+    @staticmethod
+    def _build_chain_app():
+        """Build an app where cell "AB" is a forced-name continuation
+        chain across t=1..3.  Using assigned_id ensures the naming
+        pipeline's rebuild preserves the cell name across each delete,
+        so successive deletes can actually walk the same cell back."""
+        from acetree_py.core.lineage import build_lineage_tree
+        from acetree_py.core.movie import Movie
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.core.nucleus import Nucleus
+        from acetree_py.gui.app import AceTreeApp
+
+        mgr = NucleiManager()
+        mgr.movie = Movie(xy_res=0.1, z_res=1.0, num_planes=30)
+        mgr.nuclei_record = [
+            [Nucleus(index=1, x=100, y=100, z=5.0, size=10,
+                     identity="AB", assigned_id="AB", status=1,
+                     predecessor=-1)],
+            [Nucleus(index=1, x=100, y=100, z=5.0, size=10,
+                     identity="AB", assigned_id="AB", status=1,
+                     predecessor=1)],
+            [Nucleus(index=1, x=100, y=100, z=5.0, size=10,
+                     identity="AB", assigned_id="AB", status=1,
+                     predecessor=1)],
+        ]
+        mgr.set_all_successors()
+        mgr.lineage_tree = build_lineage_tree(
+            mgr.nuclei_record, starting_index=0, ending_index=3,
+            create_dummy_ancestors=False,
+        )
+        app = AceTreeApp(mgr, image_provider=None)
+        return app
+
+    def test_delete_steps_back_and_keeps_cell_selected(self):
+        """Select AB (assigned_id), jump to T3, Delete → current_time
+        drops to T2, AB remains selected."""
+        app = self._build_chain_app()
+        app.select_cell("AB")
+        app.current_time = 3
+        app._delete_active_nucleus()
+        assert app.current_time == 2
+        assert app.current_cell_name == "AB"
+        assert app.manager.nuclei_record[2][0].status < 0
+
+    def test_delete_chain_walks_backward(self):
+        """Repeatedly pressing Delete walks the cell backward, one
+        timepoint per press, while the cell keeps its forced name."""
+        app = self._build_chain_app()
+        app.select_cell("AB")
+        app.current_time = 3
+        # Delete T3
+        app._delete_active_nucleus()
+        assert app.current_time == 2
+        assert app.manager.nuclei_record[2][0].status < 0
+        assert app.current_cell_name == "AB"
+        # Delete T2
+        app._delete_active_nucleus()
+        assert app.current_time == 1
+        assert app.manager.nuclei_record[1][0].status < 0
+        assert app.current_cell_name == "AB"
+
+    def test_delete_last_nucleus_clears_selection(self):
+        """If a Delete removes the cell's only remaining nucleus, the
+        cell vanishes and current_cell_name is cleared so subsequent
+        navigation doesn't chase a dead reference."""
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.core.nucleus import Nucleus
+        from acetree_py.core.movie import Movie
+        from acetree_py.core.lineage import build_lineage_tree
+        from acetree_py.gui.app import AceTreeApp
+
+        mgr = NucleiManager()
+        mgr.movie = Movie(xy_res=0.1, z_res=1.0, num_planes=30)
+        mgr.nuclei_record = [
+            [Nucleus(index=1, x=100, y=100, z=5.0, size=10,
+                     identity="Solo", status=1)],
+            [],
+        ]
+        mgr.lineage_tree = build_lineage_tree(
+            mgr.nuclei_record, starting_index=0, ending_index=2,
+            create_dummy_ancestors=False,
+        )
+        app = AceTreeApp(mgr, image_provider=None)
+        app.current_time = 1
+        app.current_cell_name = "Solo"
+        app._delete_active_nucleus()
+        # Only nucleus gone → cell vanishes → selection cleared
+        assert app.current_cell_name == ""
+
+    def test_delete_at_t1_does_not_step_below_one(self):
+        """Guard: deleting at t=1 must not set current_time to 0."""
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.core.nucleus import Nucleus
+        from acetree_py.core.movie import Movie
+        from acetree_py.core.lineage import build_lineage_tree
+        from acetree_py.gui.app import AceTreeApp
+
+        mgr = NucleiManager()
+        mgr.movie = Movie(xy_res=0.1, z_res=1.0, num_planes=30)
+        # Two nuclei at t=1 so "Solo" exists in lineage_tree before delete
+        mgr.nuclei_record = [
+            [Nucleus(index=1, x=100, y=100, z=5.0, size=10,
+                     identity="A", status=1)],
+        ]
+        mgr.lineage_tree = build_lineage_tree(
+            mgr.nuclei_record, starting_index=0, ending_index=1,
+            create_dummy_ancestors=False,
+        )
+        app = AceTreeApp(mgr, image_provider=None)
+        app.current_time = 1
+        app.current_cell_name = "A"
+        app._delete_active_nucleus()
+        assert app.current_time == 1  # stayed at t=1, didn't go to 0
 
 
 # ── Overlay data tests ───────────────────────────────────────────
