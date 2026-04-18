@@ -364,6 +364,150 @@ class TestPhantomAncestorAvoidance:
         assert t2.assigned_id == "AB"
 
 
+# ── Manual division tests ────────────────────────────────────────
+
+
+class TestManualDivision:
+    """Pressing Add a second time on a cell that already has a first
+    daughter at the current timepoint creates a manual division.  The
+    two daughters get distinct ``+"a"`` / ``+"p"`` suffixes along the
+    embryo's AP axis so they don't collide on the parent's forced name
+    (and the lineage tree doesn't fall back to the ``_{n}`` alias)."""
+
+    @staticmethod
+    def _fresh_app(num_timepoints: int = 10):
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.editing.commands import RenameCell
+        from acetree_py.gui.app import AceTreeApp
+        from acetree_py.io.config import AceTreeConfig, NamingMethod
+
+        cfg = AceTreeConfig(
+            naming_method=NamingMethod.NEWCANONICAL,
+            plane_end=30, xy_res=0.1, z_res=1.0,
+        )
+        mgr = NucleiManager.new_empty(cfg, num_timepoints=num_timepoints)
+        mgr.process()
+        app = AceTreeApp(mgr, image_provider=None)
+        app.current_plane = 5
+        app.enter_add_mode()
+        # Seed P2 at t=1
+        app._handle_add_click(100.0, 100.0)
+        app.current_cell_name = mgr.nuclei_record[0][0].effective_name
+        app.edit_history.do(RenameCell(time=1, index=1, new_name="P2"))
+        # Extend to t=2
+        app.set_time(2)
+        app._handle_add_click(110.0, 100.0)
+        app.current_time = 2
+        return app
+
+    def test_second_add_creates_axis_aware_division(self):
+        """With the default AP direction (+X is anterior), clicking Add
+        at (x=50, y=100) — far from the existing first daughter at
+        (110, 100) — splits the cell into P2 + P2a (anterior) + P2p
+        (posterior), not P2 and P2_2."""
+        app = self._fresh_app()
+        app._handle_add_click(50.0, 100.0)
+        mgr = app.manager
+
+        # t=1 parent cell still named P2, now marked as dividing
+        assert mgr.nuclei_record[0][0].effective_name == "P2"
+        assert mgr.nuclei_record[0][0].successor1 != -1
+        assert mgr.nuclei_record[0][0].successor2 != -1
+
+        # t=2 has two daughters with P2a / P2p names
+        nucs = mgr.nuclei_record[1]
+        assert len(nucs) == 2
+        names = {n.effective_name for n in nucs}
+        assert names == {"P2a", "P2p"}
+
+        # Larger-X daughter is anterior (default AP = +X), so P2a is at x=110
+        for n in nucs:
+            if n.effective_name == "P2a":
+                assert n.x == 110
+            elif n.effective_name == "P2p":
+                assert n.x == 50
+
+        # No P2_2 collision cell in the tree
+        assert mgr.get_cell("P2_2") is None
+        assert mgr.get_cell("P2a") is not None
+        assert mgr.get_cell("P2p") is not None
+
+    def test_division_flips_when_ap_direction_flipped(self):
+        """If AuxInfo says ``axis[0] = "P"`` (canonical +X is posterior),
+        the daughter at larger X gets the ``"p"`` suffix instead."""
+        from acetree_py.io.auxinfo import AuxInfo
+
+        app = self._fresh_app()
+        # Force a v1 AuxInfo with P as first axis character.
+        app.manager.auxinfo = AuxInfo(version=1, data={"axis": "PDL"})
+        # Also clear the stored identity_assigner so get_ap_direction_at
+        # falls through to the AuxInfo path instead of the topology path.
+        app.manager.identity_assigner = None
+
+        app._handle_add_click(50.0, 100.0)
+        nucs = app.manager.nuclei_record[1]
+        for n in nucs:
+            if n.x == 110:
+                # Larger X is now posterior under PDL axis
+                assert n.effective_name == "P2p"
+            elif n.x == 50:
+                assert n.effective_name == "P2a"
+
+    def test_click_near_existing_extends_not_divides(self):
+        """Clicking Add ON (or very close to) the first daughter keeps
+        the old extension semantics — auto-advance to the next timepoint
+        rather than creating a sibling at the same time."""
+        app = self._fresh_app()
+        # First daughter is at (110, 100), size=20.  Click close to it.
+        app._handle_add_click(112.0, 101.0)
+        assert app.current_time == 3  # auto-advanced past the extension
+        # Only one nucleus still at t=2 (no division happened)
+        assert len(app.manager.nuclei_record[1]) == 1
+
+
+# ── Triple-successor rejection ───────────────────────────────────
+
+
+class TestTripleSuccessorRejection:
+    """Add / Placement viewer clicks must refuse to create a third
+    successor.  Previously they by-passed the validator and left a
+    floating nucleus when set_all_successors silently dropped the
+    third link."""
+
+    @staticmethod
+    def _app_with_dividing_parent():
+        """Build an app where P2 at t=1 already has two children at
+        t=2 (P2a, P2p) and user might click Add again with P2 still
+        selected."""
+        app = TestManualDivision._fresh_app()
+        app._handle_add_click(50.0, 100.0)  # create division
+        # Re-select the parent P2 (user clicks on the parent at t=1)
+        app.current_cell_name = "P2"
+        app.current_time = 1
+        return app
+
+    def test_add_click_rejects_third_successor(self):
+        app = self._app_with_dividing_parent()
+        app.enter_add_mode()
+        # Try to add another child at t=2 — P2 already has 2 kids
+        app.current_time = 2
+        before = [len(ts) for ts in app.manager.nuclei_record]
+        app._handle_add_click(200.0, 200.0)
+        after = [len(ts) for ts in app.manager.nuclei_record]
+        # Nothing added anywhere
+        assert before == after
+
+    def test_placement_click_rejects_third_successor(self):
+        app = self._app_with_dividing_parent()
+        app.exit_add_mode()
+        app.enter_placement_mode(parent_name="P2")
+        app.current_time = 2
+        before = [len(ts) for ts in app.manager.nuclei_record]
+        app._handle_placement_click(200.0, 200.0)
+        after = [len(ts) for ts in app.manager.nuclei_record]
+        assert before == after
+
+
 # ── Chain-delete tests ───────────────────────────────────────────
 
 

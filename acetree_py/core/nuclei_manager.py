@@ -19,6 +19,8 @@ import logging
 import math
 from pathlib import Path
 
+import numpy as np
+
 from ..io.auxinfo import AuxInfo, load_auxinfo
 from ..io.config import AceTreeConfig, NamingMethod
 from ..io.nuclei_reader import read_nuclei_zip
@@ -56,6 +58,12 @@ class NucleiManager:
         self._naming_method: int = NEWCANONICAL
         self._expr_corr: str = "none"
         self.naming_warnings: list[NamingWarning] = []
+        # The last-run IdentityAssigner is kept so the GUI can reach the
+        # topology-inferred per-timepoint axes (via
+        # ``identity_assigner.division_caller._get_local_axes``).  Used by
+        # ``get_ap_direction_at`` to resolve the AP unit vector for manual
+        # division-daughter naming.
+        self.identity_assigner: IdentityAssigner | None = None
         # Frame-level cache for alive_nuclei_at() — avoids recomputing
         # the same filter 3+ times per display update cycle.
         self._alive_cache_time: int = -1
@@ -480,7 +488,66 @@ class NucleiManager:
             z_pix_res=self.z_pix_res,
         )
         assigner.assign_identities()
+        # Keep the assigner around so the GUI's manual-division path can
+        # reach the topology-inferred per-timepoint AP axes via
+        # ``self.get_ap_direction_at``.
+        self.identity_assigner = assigner
         logger.info("Identity assignment complete")
+
+    def get_ap_direction_at(self, time: int) -> np.ndarray:
+        """Return the AP unit-ish direction vector in pixel space at ``time``.
+
+        Priority order (most-specific to fallback):
+
+        1. **Topology-inferred per-timepoint axes** computed by the naming
+           pipeline (``DivisionCaller._get_local_axes``) when the 4-cell
+           stage was identified.  These are the axes the division-calling
+           code itself uses, so daughter naming lines up with the canonical
+           pipeline when it succeeded.
+        2. **AuxInfo v2** — ``auxinfo.ap_orientation``.
+        3. **AuxInfo v1** — ``auxinfo.axis[0]`` as ``A`` or ``P``.
+        4. **Default** — ``+X`` (pixel-space) is anterior, matching Java
+           AceTree's out-of-the-box convention.
+
+        Used by the GUI to orient manual division-daughter naming ("a" vs
+        "p") for cells the user annotates by hand.
+
+        Args:
+            time: 1-based timepoint.
+
+        Returns:
+            A 3-element numpy array (x, y, z in pixel space).  Not
+            guaranteed to be unit length — callers should treat it as
+            a *direction* and use a dot-product sign check rather than
+            precise magnitude.
+        """
+        # 1. Topology-based local axes
+        if (self.identity_assigner is not None
+                and self.identity_assigner.division_caller is not None):
+            try:
+                axes = self.identity_assigner.division_caller._get_local_axes(time)
+            except Exception:
+                axes = None
+            if axes is not None:
+                ap = axes[0]
+                if ap is not None:
+                    return np.asarray(ap, dtype=float)
+
+        # 2. AuxInfo v2 AP orientation vector
+        if self.auxinfo is not None and self.auxinfo.is_v2:
+            ap = self.auxinfo.ap_orientation
+            if ap is not None:
+                return np.asarray(ap, dtype=float)
+
+        # 3. AuxInfo v1 axis string (first character is A or P)
+        if self.auxinfo is not None:
+            axis_str = self.auxinfo.axis or ""
+            if axis_str and axis_str[0] in ("A", "P"):
+                sign = 1.0 if axis_str[0] == "A" else -1.0
+                return np.array([sign, 0.0, 0.0])
+
+        # 4. Default: +X is anterior (Java AceTree convention)
+        return np.array([1.0, 0.0, 0.0])
 
     def _build_tree(self) -> None:
         """Build the lineage tree from the nuclei record."""

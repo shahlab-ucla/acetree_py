@@ -322,3 +322,70 @@ class TestLoadAndProcess:
         assert mgr2.num_timepoints == mgr.num_timepoints
         for t in range(1, mgr.num_timepoints + 1):
             assert len(mgr2.nuclei_at(t)) == len(mgr.nuclei_at(t))
+
+
+# ── get_ap_direction_at ──────────────────────────────────────────
+
+
+class TestGetApDirectionAt:
+    """``NucleiManager.get_ap_direction_at`` resolves the AP unit
+    direction from (in priority order) topology-inferred per-timepoint
+    axes, AuxInfo v2 orientation vector, AuxInfo v1 axis string, or a
+    default ``+X``.  Used by the manual-division daughter-naming path."""
+
+    def test_default_is_positive_x(self):
+        """No AuxInfo and no topology → +X axis."""
+        import numpy as np
+        from acetree_py.core.nuclei_manager import NucleiManager
+        mgr = NucleiManager()
+        mgr.auxinfo = None
+        mgr.identity_assigner = None
+        ap = mgr.get_ap_direction_at(1)
+        np.testing.assert_allclose(ap, [1.0, 0.0, 0.0])
+
+    def test_auxinfo_v1_axis_a_is_plus_x(self):
+        import numpy as np
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.io.auxinfo import AuxInfo
+        mgr = NucleiManager()
+        mgr.auxinfo = AuxInfo(version=1, data={"axis": "ADL"})
+        mgr.identity_assigner = None
+        ap = mgr.get_ap_direction_at(1)
+        np.testing.assert_allclose(ap, [1.0, 0.0, 0.0])
+
+    def test_auxinfo_v1_axis_p_is_minus_x(self):
+        import numpy as np
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.io.auxinfo import AuxInfo
+        mgr = NucleiManager()
+        mgr.auxinfo = AuxInfo(version=1, data={"axis": "PDL"})
+        mgr.identity_assigner = None
+        ap = mgr.get_ap_direction_at(1)
+        np.testing.assert_allclose(ap, [-1.0, 0.0, 0.0])
+
+    def test_auxinfo_v2_ap_orientation_overrides_v1(self):
+        """V2 AP orientation is an arbitrary 3D vector; it takes
+        precedence over the v1 axis character."""
+        import numpy as np
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.io.auxinfo import AuxInfo
+        mgr = NucleiManager()
+        mgr.auxinfo = AuxInfo(
+            version=2,
+            data={"AP_orientation": "0.0 1.0 0.0", "LR_orientation": "1.0 0.0 0.0"},
+        )
+        mgr.identity_assigner = None
+        ap = mgr.get_ap_direction_at(1)
+        np.testing.assert_allclose(ap, [0.0, 1.0, 0.0])
+
+    def test_auxinfo_xxx_axis_falls_back_to_default(self):
+        """V1 axis ``XXX`` (the default-when-missing) is not valid AP
+        info — falls through to the +X default."""
+        import numpy as np
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.io.auxinfo import AuxInfo
+        mgr = NucleiManager()
+        mgr.auxinfo = AuxInfo(version=1, data={"axis": "XXX"})
+        mgr.identity_assigner = None
+        ap = mgr.get_ap_direction_at(1)
+        np.testing.assert_allclose(ap, [1.0, 0.0, 0.0])

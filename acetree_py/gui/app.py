@@ -722,6 +722,46 @@ class AceTreeApp:
         self._3d_windows.append(win)
         win.show()
 
+    def _say(self, msg: str) -> None:
+        """Set a one-line status message on the napari status bar.
+
+        Silently no-ops when ``self.viewer`` is None (test / headless
+        contexts) or when napari's status attribute is unavailable.
+        """
+        try:
+            if self.viewer is not None:
+                self.viewer.status = msg
+        except Exception:
+            pass
+
+    def _division_suffixes(
+        self,
+        first_pos: tuple[float, float, float],
+        new_pos: tuple[float, float, float],
+        time: int,
+    ) -> tuple[str, str]:
+        """Decide which of two division daughters gets the ``"a"`` suffix.
+
+        Projects both daughter positions onto the embryo's AP direction
+        (resolved via ``NucleiManager.get_ap_direction_at``) and returns
+        ``(suffix_for_first_daughter, suffix_for_new_daughter)`` — always
+        one ``"a"`` and one ``"p"``.
+
+        Falls back to Java AceTree's "+X is anterior" convention when no
+        axis information is available — see ``get_ap_direction_at``'s
+        4-source priority order.
+        """
+        import numpy as np
+        ap = self.manager.get_ap_direction_at(time)
+        p1 = np.asarray(first_pos, dtype=float)
+        p2 = np.asarray(new_pos, dtype=float)
+        proj_first = float(np.dot(p1, ap))
+        proj_new = float(np.dot(p2, ap))
+        # Larger projection along AP = more anterior = "a".
+        if proj_first >= proj_new:
+            return ("a", "p")  # first_daughter is anterior
+        return ("p", "a")
+
     def _handle_add_click(self, x: float, y: float) -> bool:
         """Handle a left-click in add mode — place a nucleus at (x, y).
 
@@ -729,11 +769,18 @@ class AceTreeApp:
         For gap == 1, sets predecessor directly. For gap > 1, creates the
         nucleus then auto-interpolates to fill the gap. Inherits diameter
         from the parent cell's last nucleus when available.
+
+        Manual-division handling: if the click is the second successor of
+        the selected parent, the two daughters are named via the AP axis
+        (``parent_name + "a"`` / ``parent_name + "p"``) so they don't
+        collide on the parent's forced name.  Triple-successor attempts
+        are rejected with a status message.
         """
         if not self._add_mode:
             return False
 
-        from ..editing.commands import AddNucleus, RelinkWithInterpolation
+        from ..editing.commands import AddNucleus, RelinkWithInterpolation, RenameCell
+        from ..editing.validators import validate_add_nucleus
 
         ix, iy = round(x), round(y)
         iz = float(self.current_plane)
@@ -745,6 +792,7 @@ class AceTreeApp:
         predecessor = -1  # NILLI
         parent_end_time = None
         parent_end_index = None
+        parent_nuc_ref = None  # live ref to parent nucleus (for division detection)
 
         # If a cell is selected, link to it.  The user's intent when clicking
         # Add with a parent selected is "extend this cell forward in time".
@@ -766,41 +814,137 @@ class AceTreeApp:
                 cell = cell.parent
             if cell is not None:
                 parent_name = cell.name
-                parent_end_time = cell.end_time
-                if time <= parent_end_time:
-                    # Extend forward: place at the timepoint after the
-                    # parent's last known nucleus.
-                    new_time = parent_end_time + 1
-                    if new_time <= self.manager.num_timepoints:
-                        time = new_time
-                        self.current_time = new_time
-                        logger.info(
-                            "Add: auto-advanced to t=%d to extend cell '%s' "
-                            "(which ends at t=%d)",
-                            new_time, parent_name, parent_end_time,
-                        )
-                    else:
-                        # Parent ends at the last timepoint — no room to
-                        # extend; drop the link and place as a root.
-                        parent_name = None
-                gap = time - parent_end_time if parent_name else 0
-                if parent_name and gap > 0:
-                    identity = parent_name
-                    parent_nuc = cell.get_nucleus_at(parent_end_time)
-                    if parent_nuc is not None:
-                        parent_end_index = parent_nuc.index
-                        size = parent_nuc.size  # inherit diameter
-                        # Plant the parent's effective name as a forced name
-                        # (assigned_id) on the new nucleus.  The naming
-                        # pipeline's _propagate_assigned_ids will then sweep
-                        # this name forward/backward through the predecessor
-                        # chain, unifying the cell across timepoints.  Works
-                        # whether the parent was renamed (has assigned_id)
-                        # or still has only the auto-generated identity.
-                        assigned_id = parent_nuc.effective_name or parent_name
-                        if gap == 1:
-                            predecessor = parent_end_index
+                # Three modes, disambiguated by position:
+                #  (a) Division — a nucleus of this cell already lives at
+                #      the click time AND the click is FAR from it.  The
+                #      click is a second daughter; link to the shared
+                #      predecessor at click_time - 1.  Do NOT auto-advance.
+                #  (b) Extension with auto-advance — no nucleus of this
+                #      cell at click_time, OR the click is near the
+                #      existing one (implying user is clicking on/near
+                #      the cell intending to extend it forward).  Place
+                #      at cell.end_time + 1.
+                #  (c) Extension without auto-advance — click_time is
+                #      strictly after cell.end_time, i.e. there's a gap.
+                #      Link to cell.end_time's nucleus; RelinkWith-
+                #      Interpolation fills the gap.
+                existing_here = cell.get_nucleus_at(time)
+                # Division only if click is far enough from the existing
+                # nucleus that it's clearly a sibling, not a refinement.
+                # Threshold = nucleus diameter (size) so a click inside
+                # the circle reads as "on the nucleus".
+                is_division_click = False
+                if existing_here is not None:
+                    dx_ex = ix - existing_here.x
+                    dy_ex = iy - existing_here.y
+                    threshold_sq = float(existing_here.size) ** 2
+                    if (dx_ex * dx_ex + dy_ex * dy_ex) > threshold_sq:
+                        is_division_click = True
 
+                if is_division_click and existing_here is not None:
+                    # (a) Division mode: link to the shared predecessor.
+                    if existing_here.predecessor != -1 and time > 1:
+                        parent_end_time = time - 1
+                        parent_end_index = existing_here.predecessor
+                    # else: no shared predecessor — can't link; placement
+                    # goes through as a root at this timepoint.
+                else:
+                    # (b)/(c) Extension mode — possibly auto-advance.
+                    parent_end_time = cell.end_time
+                    if time <= parent_end_time:
+                        new_time = parent_end_time + 1
+                        if new_time <= self.manager.num_timepoints:
+                            time = new_time
+                            self.current_time = new_time
+                            logger.info(
+                                "Add: auto-advanced to t=%d to extend cell '%s' "
+                                "(which ends at t=%d)",
+                                new_time, parent_name, parent_end_time,
+                            )
+                        else:
+                            parent_name = None
+                    if parent_name:
+                        pnuc = cell.get_nucleus_at(parent_end_time)
+                        if pnuc is not None:
+                            parent_end_index = pnuc.index
+
+                gap = time - parent_end_time if (parent_name and parent_end_time) else 0
+                if parent_name and gap > 0 and parent_end_index is not None:
+                    identity = parent_name
+                    nr = self.manager.nuclei_record
+                    t_idx_p = parent_end_time - 1
+                    if 0 <= t_idx_p < len(nr):
+                        p_idx_p = parent_end_index - 1
+                        if 0 <= p_idx_p < len(nr[t_idx_p]):
+                            parent_nuc = nr[t_idx_p][p_idx_p]
+                            parent_nuc_ref = parent_nuc
+                            size = parent_nuc.size  # inherit diameter
+                            # Plant the parent's effective name as a forced
+                            # name (assigned_id) on the new nucleus.  The
+                            # naming pipeline's _propagate_assigned_ids
+                            # will sweep it backward/forward through the
+                            # continuation chain, unifying the cell across
+                            # timepoints.
+                            assigned_id = parent_nuc.effective_name or parent_name
+                            if gap == 1:
+                                predecessor = parent_end_index
+
+        # Validate BEFORE creating the command.  Blocks e.g. a third
+        # successor (the parent already has 2 children), which would
+        # otherwise leave a floating nucleus that set_all_successors
+        # silently drops during the post-edit rebuild.
+        errors = validate_add_nucleus(
+            self.edit_history.nuclei_record, time, predecessor,
+        )
+        if errors:
+            self._say(errors[0])
+            logger.info("Add rejected: %s", errors[0])
+            return False
+
+        # Manual-division detection.  If the click is making the parent
+        # dividing (parent already has exactly one successor and we're
+        # about to add a second), rename both daughters with "a"/"p"
+        # suffixes along the embryo's AP axis so they don't collide on
+        # the parent's forced name.
+        rename_first_to: str | None = None
+        if (parent_nuc_ref is not None
+                and predecessor != -1
+                and parent_nuc_ref.successor1 != -1
+                and parent_nuc_ref.successor2 == -1):
+            # The existing successor-1 is the first daughter.
+            nr = self.manager.nuclei_record
+            t_idx = time - 1
+            first_idx = parent_nuc_ref.successor1 - 1
+            if 0 <= t_idx < len(nr) and 0 <= first_idx < len(nr[t_idx]):
+                first_daughter = nr[t_idx][first_idx]
+                base = parent_nuc_ref.effective_name or parent_name
+                first_pos = (float(first_daughter.x), float(first_daughter.y),
+                             float(first_daughter.z))
+                new_pos = (float(ix), float(iy), float(iz))
+                first_sfx, new_sfx = self._division_suffixes(
+                    first_pos, new_pos, time,
+                )
+                # Only rename the first daughter if it's still carrying
+                # the naive "extension" name (same as the parent).  If
+                # the user has customised its name, respect that and
+                # only suffix the new daughter's name.
+                if first_daughter.assigned_id == base:
+                    rename_first_to = base + first_sfx
+                assigned_id = base + new_sfx
+                identity = assigned_id
+                self._say(
+                    f"Division: {base} \u2192 "
+                    f"{rename_first_to or first_daughter.effective_name} + {assigned_id}",
+                )
+
+        # Issue AddNucleus FIRST so that set_all_successors marks the
+        # parent as dividing (successor2 set to the new nucleus).  The
+        # subsequent RenameCell on the first daughter then walks only
+        # that daughter's continuation chain — the backward walk stops
+        # at the now-dividing parent instead of bleeding into the
+        # parent cell.  Issuing them in the opposite order would
+        # rename the parent too (it and the first daughter were a
+        # single continuation chain until the second daughter landed).
         cmd = AddNucleus(
             time=time,
             x=ix,
@@ -813,6 +957,12 @@ class AceTreeApp:
         )
         self.edit_history.do(cmd)
         new_index = cmd._added_index
+
+        if rename_first_to is not None:
+            self.edit_history.do(
+                RenameCell(time=time, index=first_idx + 1,
+                           new_name=rename_first_to),
+            )
 
         # Fill gap > 1 with interpolation
         if (parent_name and parent_end_time is not None
@@ -860,7 +1010,8 @@ class AceTreeApp:
         if not self._placement_mode:
             return False
 
-        from ..editing.commands import AddNucleus, RelinkWithInterpolation
+        from ..editing.commands import AddNucleus, RelinkWithInterpolation, RenameCell
+        from ..editing.validators import validate_add_nucleus
 
         ix, iy = round(x), round(y)
         iz = float(self.current_plane)
@@ -871,6 +1022,7 @@ class AceTreeApp:
         identity = ""
         assigned_id = ""
         predecessor = NILLI = -1
+        parent_nuc_ref = None
 
         # Determine linking if we have a parent
         parent_end_time = None
@@ -889,6 +1041,7 @@ class AceTreeApp:
                     identity = parent_name
                     parent_nuc = cell.get_nucleus_at(parent_end_time)
                     if parent_nuc is not None:
+                        parent_nuc_ref = parent_nuc
                         parent_end_index = parent_nuc.index
                         size = parent_nuc.size  # inherit diameter
                         # Plant parent's effective name as a forced name on
@@ -900,7 +1053,50 @@ class AceTreeApp:
                             predecessor = parent_end_index
                         # gap > 1 handled after AddNucleus via interpolation
 
-        # Create the nucleus
+        # Validate BEFORE creating the command — reject triple-successor
+        # attempts with a status message instead of silently letting
+        # set_all_successors drop the third link.
+        errors = validate_add_nucleus(
+            self.edit_history.nuclei_record, time, predecessor,
+        )
+        if errors:
+            self._say(errors[0])
+            logger.info("Placement rejected: %s", errors[0])
+            return False
+
+        # Manual-division detection (mirrors _handle_add_click).  If the
+        # new nucleus is the second successor of the parent, rename the
+        # first daughter and the new daughter with axis-aware "a"/"p"
+        # suffixes so they don't collide on the parent's forced name.
+        rename_first_to: str | None = None
+        first_idx = -1
+        if (parent_nuc_ref is not None
+                and predecessor != NILLI
+                and parent_nuc_ref.successor1 != NILLI
+                and parent_nuc_ref.successor2 == NILLI):
+            nr = self.manager.nuclei_record
+            t_idx = time - 1
+            first_idx = parent_nuc_ref.successor1 - 1
+            if 0 <= t_idx < len(nr) and 0 <= first_idx < len(nr[t_idx]):
+                first_daughter = nr[t_idx][first_idx]
+                base = parent_nuc_ref.effective_name or parent_name
+                first_pos = (float(first_daughter.x), float(first_daughter.y),
+                             float(first_daughter.z))
+                new_pos = (float(ix), float(iy), float(iz))
+                first_sfx, new_sfx = self._division_suffixes(
+                    first_pos, new_pos, time,
+                )
+                if first_daughter.assigned_id == base:
+                    rename_first_to = base + first_sfx
+                assigned_id = base + new_sfx
+                identity = assigned_id
+                self._say(
+                    f"Division: {base} \u2192 "
+                    f"{rename_first_to or first_daughter.effective_name} + {assigned_id}",
+                )
+
+        # AddNucleus first, RenameCell second — see _handle_add_click for
+        # why the ordering matters (parent-vs-daughter continuation chain).
         cmd = AddNucleus(
             time=time,
             x=ix,
@@ -913,6 +1109,12 @@ class AceTreeApp:
         )
         self.edit_history.do(cmd)
         new_index = cmd._added_index
+
+        if rename_first_to is not None:
+            self.edit_history.do(
+                RenameCell(time=time, index=first_idx + 1,
+                           new_name=rename_first_to),
+            )
 
         # Handle gap > 1 with interpolation
         if (parent_name and parent_end_time is not None
@@ -1900,12 +2102,7 @@ class AceTreeApp:
         Surfaces a status message when nothing can be deleted so failures
         aren't silent.
         """
-        def _say(msg: str) -> None:
-            try:
-                if self.viewer is not None:
-                    self.viewer.status = msg
-            except Exception:
-                pass
+        _say = self._say
 
         if not self.current_cell_name:
             _say("No nucleus selected to delete")
