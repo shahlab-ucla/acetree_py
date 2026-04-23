@@ -453,16 +453,40 @@ class TestManualDivision:
             elif n.x == 50:
                 assert n.effective_name == "P2a"
 
-    def test_click_near_existing_extends_not_divides(self):
-        """Clicking Add ON (or very close to) the first daughter keeps
-        the old extension semantics — auto-advance to the next timepoint
-        rather than creating a sibling at the same time."""
+    def test_click_near_existing_at_end_time_extends(self):
+        """At click_time == cell.end_time, a close click preserves the
+        extend-past-end workflow: auto-advance to end_time + 1 rather
+        than creating a division.  (At click_time < cell.end_time, by
+        contrast, any click creates a division — see
+        test_mid_life_close_click_creates_division.)"""
         app = self._fresh_app()
+        # P2 has nuclei at t=1 and t=2, so end_time=2 and current_time=2.
         # First daughter is at (110, 100), size=20.  Click close to it.
         app._handle_add_click(112.0, 101.0)
         assert app.current_time == 3  # auto-advanced past the extension
         # Only one nucleus still at t=2 (no division happened)
         assert len(app.manager.nuclei_record[1]) == 1
+
+    def test_mid_life_close_click_creates_division(self):
+        """At click_time < cell.end_time, clicking close to the existing
+        nucleus still creates a division.  The old XY-distance heuristic
+        used to route these close clicks into extension-with-auto-
+        advance, yanking the user to end_time + 1 — which was wrong
+        because the cell continues past click_time, so the only sensible
+        interpretation of a new nucleus at click_time is a sibling."""
+        app = self._fresh_app()
+        # Extend P2 one more frame so click_time=2 is mid-life.
+        app.set_time(3)
+        app._handle_add_click(115.0, 100.0)
+        # Now P2 exists at t=1, t=2, t=3 → end_time=3.
+        app.current_cell_name = "P2"
+        app.set_time(2)  # click at t=2, strictly mid-life
+        # P2's t=2 nucleus is at (110, 100), size=20.  Click CLOSE to it.
+        app._handle_add_click(112.0, 101.0)
+        # No auto-advance — we stay at t=2.
+        assert app.current_time == 2
+        # Two nuclei at t=2: the original P2 and the new sibling.
+        assert len(app.manager.nuclei_record[1]) == 2
 
 
 # ── Triple-successor rejection ───────────────────────────────────

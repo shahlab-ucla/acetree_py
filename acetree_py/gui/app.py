@@ -814,32 +814,43 @@ class AceTreeApp:
                 cell = cell.parent
             if cell is not None:
                 parent_name = cell.name
-                # Three modes, disambiguated by position:
-                #  (a) Division — a nucleus of this cell already lives at
-                #      the click time AND the click is FAR from it.  The
-                #      click is a second daughter; link to the shared
-                #      predecessor at click_time - 1.  Do NOT auto-advance.
-                #  (b) Extension with auto-advance — no nucleus of this
-                #      cell at click_time, OR the click is near the
-                #      existing one (implying user is clicking on/near
-                #      the cell intending to extend it forward).  Place
-                #      at cell.end_time + 1.
+                # Three modes, disambiguated by where click_time sits
+                # relative to the selected cell's lifetime:
+                #  (a) Division — a nucleus of this cell lives at click
+                #      time AND click_time < cell.end_time (mid-life).
+                #      The cell continues past this time, so placing a
+                #      sibling here unambiguously creates a division.
+                #      Link to the shared predecessor at click_time - 1.
+                #      Do NOT auto-advance.  Distance is NOT checked —
+                #      refinement of a mid-life nucleus is the Move/
+                #      Resize tool's job, not Add.
+                #  (b) Extension with auto-advance — no nucleus at
+                #      click_time, OR click_time == cell.end_time and
+                #      the click is near the existing terminal nucleus
+                #      (user extending the cell one frame forward).
+                #      Place at cell.end_time + 1.
                 #  (c) Extension without auto-advance — click_time is
                 #      strictly after cell.end_time, i.e. there's a gap.
                 #      Link to cell.end_time's nucleus; RelinkWith-
                 #      Interpolation fills the gap.
+                #
+                # At click_time == end_time, the distance heuristic is
+                # kept: a click FAR from the terminal nucleus is still
+                # treated as a terminal division.
                 existing_here = cell.get_nucleus_at(time)
-                # Division only if click is far enough from the existing
-                # nucleus that it's clearly a sibling, not a refinement.
-                # Threshold = nucleus diameter (size) so a click inside
-                # the circle reads as "on the nucleus".
                 is_division_click = False
                 if existing_here is not None:
-                    dx_ex = ix - existing_here.x
-                    dy_ex = iy - existing_here.y
-                    threshold_sq = float(existing_here.size) ** 2
-                    if (dx_ex * dx_ex + dy_ex * dy_ex) > threshold_sq:
+                    if time < cell.end_time:
                         is_division_click = True
+                    else:
+                        # time == end_time: fall back to distance
+                        # heuristic — far click = terminal division,
+                        # close click = extend past end_time.
+                        dx_ex = ix - existing_here.x
+                        dy_ex = iy - existing_here.y
+                        threshold_sq = float(existing_here.size) ** 2
+                        if (dx_ex * dx_ex + dy_ex * dy_ex) > threshold_sq:
+                            is_division_click = True
 
                 if is_division_click and existing_here is not None:
                     # (a) Division mode: link to the shared predecessor.
@@ -2225,6 +2236,26 @@ class AceTreeApp:
 
         @self.viewer.bind_key("Down")
         def _prev_plane(viewer):
+            self.prev_plane()
+
+        @self.viewer.bind_key("a")
+        def _prev_time_a(viewer):
+            self.prev_time()
+
+        @self.viewer.bind_key("z")
+        def _prev_time_z(viewer):
+            self.prev_time()
+
+        @self.viewer.bind_key("d")
+        def _next_time_d(viewer):
+            self.next_time()
+
+        @self.viewer.bind_key("w")
+        def _inc_z(viewer):
+            self.next_plane()
+
+        @self.viewer.bind_key("s")
+        def _dec_z(viewer):
             self.prev_plane()
 
         @self.viewer.bind_key("Control-s")

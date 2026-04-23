@@ -752,6 +752,12 @@ class EditPanel(QWidget):  # type: ignore[misc]
             new_size=new_size,
         )
         self.app.edit_history.do(cmd)
+
+        if dz:
+            new_plane = max(1, round(new_z))
+            if new_plane != self.app.current_plane:
+                self.app.set_plane(new_plane)
+
         parts = []
         if dx:
             parts.append(f"x{dx:+d}")
