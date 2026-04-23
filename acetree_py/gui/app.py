@@ -582,6 +582,12 @@ class AceTreeApp:
 
         self.update_display()
 
+    def deselect_cell(self) -> None:
+        """Clear the current cell selection and stop follow-mode."""
+        self.current_cell_name = ""
+        self.tracking = False
+        self.update_display()
+
     def select_cell_at_position(self, x: float, y: float) -> None:
         """Select the closest cell to an (x, y) position on the current image.
 
@@ -2297,6 +2303,7 @@ class AceTreeApp:
                 ("D", self.next_time),
                 ("W", self.next_plane),
                 ("S", self.prev_plane),
+                ("Space", self.deselect_cell),
             ]
             for key, handler in nav_bindings:
                 sc = QShortcut(QKeySequence(key), qt_window)

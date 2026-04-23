@@ -180,7 +180,7 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         plane_row.addWidget(self._btn_clear_labels)
 
         self._btn_deselect = QPushButton("Deselect")
-        self._btn_deselect.setToolTip("Clear cell selection (key: Escape)")
+        self._btn_deselect.setToolTip("Clear cell selection (key: Space)")
         self._btn_deselect.setFixedWidth(65)
         self._btn_deselect.clicked.connect(self._on_deselect)
         plane_row.addWidget(self._btn_deselect)
@@ -265,9 +265,7 @@ class PlayerControls(QWidget):  # type: ignore[misc]
 
     def _on_deselect(self) -> None:
         """Clear the current cell selection."""
-        self.app.current_cell_name = ""
-        self.app.tracking = False
-        self.app.update_display()
+        self.app.deselect_cell()
 
     def _on_open_3d_window(self) -> None:
         """Open a detached 3D viewer window."""
