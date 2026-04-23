@@ -2238,26 +2238,6 @@ class AceTreeApp:
         def _prev_plane(viewer):
             self.prev_plane()
 
-        @self.viewer.bind_key("a")
-        def _prev_time_a(viewer):
-            self.prev_time()
-
-        @self.viewer.bind_key("z")
-        def _prev_time_z(viewer):
-            self.prev_time()
-
-        @self.viewer.bind_key("d")
-        def _next_time_d(viewer):
-            self.next_time()
-
-        @self.viewer.bind_key("w")
-        def _inc_z(viewer):
-            self.next_plane()
-
-        @self.viewer.bind_key("s")
-        def _dec_z(viewer):
-            self.prev_plane()
-
         @self.viewer.bind_key("Control-s")
         def _save(viewer):
             self.save()
@@ -2289,12 +2269,17 @@ class AceTreeApp:
         def _delete_nucleus(viewer):
             self._delete_active_nucleus()
 
-        # ── Application-wide Escape shortcut ───────────────────────
+        # ── Application-wide Escape + WASD/Z shortcuts ─────────────
         # Napari's @viewer.bind_key("Escape") only fires when the canvas
         # has keyboard focus.  Clicking a toolbar button (Add, Track)
         # moves focus to the button, which absorbs or ignores Escape.
-        # Install a QShortcut on the main window with ApplicationShortcut
-        # context so Escape works regardless of which widget has focus.
+        # WASD/Z are additionally shadowed by napari's default layer
+        # bindings (Shapes/Points layers bind 'a', 's', 'd' to their own
+        # modes), so @viewer.bind_key never sees the letter at all.
+        # Install QShortcuts on the main window so these keys work
+        # regardless of which widget has focus.  WindowShortcut context
+        # still lets QLineEdit / QSpinBox inside dialogs consume the
+        # letter key first, so typing in text fields isn't hijacked.
         try:
             from qtpy.QtCore import Qt
             from qtpy.QtGui import QKeySequence
@@ -2304,5 +2289,19 @@ class AceTreeApp:
             self._escape_shortcut = QShortcut(QKeySequence("Escape"), qt_window)
             self._escape_shortcut.setContext(Qt.ApplicationShortcut)
             self._escape_shortcut.activated.connect(self._exit_all_modes)
+
+            self._nav_shortcuts = []
+            nav_bindings = [
+                ("A", self.prev_time),
+                ("Z", self.prev_time),
+                ("D", self.next_time),
+                ("W", self.next_plane),
+                ("S", self.prev_plane),
+            ]
+            for key, handler in nav_bindings:
+                sc = QShortcut(QKeySequence(key), qt_window)
+                sc.setContext(Qt.WindowShortcut)
+                sc.activated.connect(handler)
+                self._nav_shortcuts.append(sc)
         except Exception as e:
-            logger.warning("Could not install application-wide Escape shortcut: %s", e)
+            logger.warning("Could not install application-wide shortcuts: %s", e)
