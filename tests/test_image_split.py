@@ -371,3 +371,116 @@ class TestCreateProviderFromConfig:
         # After flip, the left-edge marker should be at the right edge
         assert plane[0, -1] == 999
         assert plane[0, 0] == 0
+
+
+# ── Time-index padding autodetection ────────────────────────────
+
+
+class TestTimePaddingAutodetect:
+    """Verify create_image_provider_from_config correctly autodetects
+    zero-padding in the time index of image filenames, even when the
+    example filename pointed to in the config doesn't itself contain a
+    leading-zero digit run (e.g. ``t100`` from a 3-digit padded set)."""
+
+    @staticmethod
+    def _make_stack_set(tmp_path, names, value_per_name=None):
+        """Create one-page TIFF files at the given names; return paths."""
+        import tifffile
+        paths = []
+        for i, name in enumerate(names):
+            img = np.full((8, 8), i + 1, dtype=np.uint16)
+            if value_per_name is not None:
+                img[:] = value_per_name(name)
+            p = tmp_path / name
+            tifffile.imwrite(str(p), img)
+            paths.append(p)
+        return paths
+
+    def _build_provider(self, tmp_path, image_filename):
+        xml_content = f"""<?xml version='1.0' encoding='utf-8'?>
+<embryo>
+    <nuclei file="test.zip"/>
+    <image file="{tmp_path / image_filename}"/>
+    <Split SplitMode="0"/>
+    <Flip FlipMode="0"/>
+</embryo>"""
+        config_file = tmp_path / "test.xml"
+        config_file.write_text(xml_content)
+        from acetree_py.io.config import load_config
+        from acetree_py.io.image_provider import create_image_provider_from_config
+        return create_image_provider_from_config(load_config(config_file))
+
+    def test_padded_3digit_example_with_leading_zero(self, tmp_path):
+        """Classic case: example file ``img_t001.tif`` from a padded set."""
+        self._make_stack_set(
+            tmp_path,
+            [f"img_t{t:03d}.tif" for t in (1, 2, 3, 100)],
+            value_per_name=lambda n: int(n[5:8]),
+        )
+        provider = self._build_provider(tmp_path, "img_t001.tif")
+        # All four timepoints should be loadable.
+        for t in (1, 2, 3, 100):
+            assert provider.get_plane(t, 1)[0, 0] == t
+
+    def test_padded_3digit_example_without_leading_zero(self, tmp_path):
+        """Bug-fix case: example file ``img_t100.tif`` from a padded set
+        (``t001..t100``).  Previously misdetected as unpadded because the
+        example digit run (``"100"``) has no leading zero."""
+        self._make_stack_set(
+            tmp_path,
+            [f"img_t{t:03d}.tif" for t in (1, 2, 3, 100)],
+            value_per_name=lambda n: int(n[5:8]),
+        )
+        # Hand the loader the high-time-index example.
+        provider = self._build_provider(tmp_path, "img_t100.tif")
+        # The padded low timepoints must still resolve.
+        for t in (1, 2, 3, 100):
+            assert provider.get_plane(t, 1)[0, 0] == t
+
+    def test_unpadded(self, tmp_path):
+        """Unpadded set: ``img_t1.tif, img_t2.tif, ..., img_t10.tif``."""
+        self._make_stack_set(
+            tmp_path,
+            [f"img_t{t}.tif" for t in (1, 2, 10)],
+            value_per_name=lambda n: int(n.split("_t")[1].split(".")[0]),
+        )
+        provider = self._build_provider(tmp_path, "img_t1.tif")
+        for t in (1, 2, 10):
+            assert provider.get_plane(t, 1)[0, 0] == t
+
+    def test_per_plane_padded_example_without_leading_zero(self, tmp_path):
+        """Per-plane loose TIFFs in a 3-digit-time / 2-digit-plane padded
+        set, where the example file is ``t100-p10.tif`` (no leading
+        zeros in either index).  ZipTiffProvider's ``_build_path`` must
+        produce the padded filenames for low time/plane indices."""
+        import tifffile
+        # Encode (t, p) as t*100+p so values stay within uint16 range
+        # for all (t<=100, p<=99).  Use a non-empty prefix so the config
+        # regex (which requires at least one char before the literal 't')
+        # picks up tif_prefix correctly.
+        for t, p in [(1, 1), (1, 5), (1, 10), (100, 10)]:
+            img = np.full((8, 8), t * 100 + p, dtype=np.uint16)
+            tifffile.imwrite(
+                str(tmp_path / f"img_t{t:03d}-p{p:02d}.tif"), img,
+            )
+
+        xml_content = f"""<?xml version='1.0' encoding='utf-8'?>
+<embryo>
+    <nuclei file="test.zip"/>
+    <image file="{tmp_path / 'img_t100-p10.tif'}"/>
+    <useZip useZip="1"/>
+    <Split SplitMode="0"/>
+    <Flip FlipMode="0"/>
+    <resolution planeEnd="10"/>
+</embryo>"""
+        config_file = tmp_path / "test.xml"
+        config_file.write_text(xml_content)
+        from acetree_py.io.config import load_config
+        from acetree_py.io.image_provider import create_image_provider_from_config
+        provider = create_image_provider_from_config(load_config(config_file))
+
+        assert provider is not None
+        # Padded indices must resolve.
+        assert provider.get_plane(1, 1)[0, 0] == 101
+        assert provider.get_plane(1, 5)[0, 0] == 105
+        assert provider.get_plane(100, 10)[0, 0] == 10010

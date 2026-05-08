@@ -105,11 +105,30 @@ class ZipTiffProvider:
         tif_prefix: str = "",
         num_planes: int = 30,
         use_zip: int = 2,
+        t_width: int = 3,
+        p_width: int = 2,
     ) -> None:
+        """Initialise.
+
+        Args:
+            tif_directory: Directory containing the per-plane files.
+            tif_prefix: Filename prefix before the ``t`` index.
+            num_planes: Number of Z planes per timepoint.
+            use_zip: 2 = each plane wrapped in a ``.zip``; 1 = loose ``.tif``.
+            t_width: Zero-pad width of the time index.  ``0`` means
+                unpadded (e.g. ``t1, t2, ..., t10``); ``3`` means
+                3-digit padded (e.g. ``t001, t002, ..., t100``).
+                Default ``3`` matches the historical Java AceTree
+                convention.
+            p_width: Zero-pad width of the plane index.  ``0`` means
+                unpadded.  Default ``2``.
+        """
         self.tif_directory = Path(tif_directory)
         self.tif_prefix = tif_prefix
         self._num_planes = num_planes
         self.use_zip = use_zip
+        self.t_width = t_width
+        self.p_width = p_width
         self._shape: tuple[int, int] | None = None
         self._num_timepoints: int | None = None
         # Keep the last-opened ZIP handle open (like Java's ZipImage)
@@ -189,10 +208,13 @@ class ZipTiffProvider:
 
     def _build_path(self, time: int, plane: int) -> Path:
         """Build the file path for a specific time/plane."""
-        if self.use_zip == 2:
-            filename = f"{self.tif_prefix}t{time:03d}-p{plane:02d}.zip"
-        else:
-            filename = f"{self.tif_prefix}t{time:03d}-p{plane:02d}.tif"
+        ext = ".zip" if self.use_zip == 2 else ".tif"
+        t_fmt = f"{{:0{self.t_width}d}}" if self.t_width > 0 else "{}"
+        p_fmt = f"{{:0{self.p_width}d}}" if self.p_width > 0 else "{}"
+        filename = (
+            f"{self.tif_prefix}t{t_fmt.format(time)}"
+            f"-p{p_fmt.format(plane)}{ext}"
+        )
         return self.tif_directory / filename
 
     def _read_from_zip(self, zip_path: Path, tifffile) -> np.ndarray:
@@ -934,22 +956,51 @@ def _create_base_provider(
     # Check if this is a per-plane file (contains '-p' in name)
     if "-p" in filename:
         # Per-plane format: {prefix}t{NNN}-p{NN}.tif or .zip
+        # Pull example widths to use as fallback if scan finds nothing.
+        time_match_example = re.search(r"t(\d+)", filename)
+        plane_match_example = re.search(r"-p(\d+)", filename)
+        t_width_example = (
+            len(time_match_example.group(1)) if time_match_example else 3
+        )
+        p_width_example = (
+            len(plane_match_example.group(1)) if plane_match_example else 2
+        )
+        # Detect both padding widths by scanning the directory.  This is
+        # robust against the example filename happening to land on a
+        # high time index (e.g. ``t100`` from a 3-digit padded set,
+        # which has no leading zero).
+        if time_match_example:
+            prefix_before_t = filename[: time_match_example.start()]
+        else:
+            prefix_before_t = prefix
+
+        zip_ext = ".zip" if config.use_zip == 2 else ".tif"
+        t_width, p_width = _detect_per_plane_padding(
+            tif_dir, prefix_before_t, zip_ext,
+            fallback=(t_width_example, p_width_example),
+        )
+
         if config.use_zip == 2:
-            logger.info("Creating ZipTiffProvider: dir=%s, prefix='%s', planes=%d",
-                        tif_dir, prefix, num_planes)
+            logger.info(
+                "Creating ZipTiffProvider: dir=%s, prefix='%s', planes=%d, "
+                "t_width=%d, p_width=%d",
+                tif_dir, prefix, num_planes, t_width, p_width,
+            )
             return ZipTiffProvider(
                 tif_directory=tif_dir,
                 tif_prefix=prefix,
                 num_planes=num_planes,
                 use_zip=2,
+                t_width=t_width,
+                p_width=p_width,
             )
         else:
-            time_match = re.search(r't(\d+)', filename)
-            plane_match = re.search(r'p(\d+)', filename)
-            t_width = len(time_match.group(1)) if time_match else 3
-            p_width = len(plane_match.group(1)) if plane_match else 2
-
-            pattern = f"{prefix}{{time:0{t_width}d}}-p{{plane:0{p_width}d}}.tif"
+            t_fmt = f"{{time:0{t_width}d}}" if t_width > 0 else "{time}"
+            p_fmt = f"{{plane:0{p_width}d}}" if p_width > 0 else "{plane}"
+            # ``prefix`` already includes the literal ``t`` separator
+            # (config.tif_prefix is canonically everything up to and
+            # including ``t``).  Don't prepend another ``t`` here.
+            pattern = f"{prefix}{t_fmt}-p{p_fmt}.tif"
             logger.info("Creating TiffDirectoryProvider: dir=%s, pattern='%s'",
                         tif_dir, pattern)
             return TiffDirectoryProvider(
@@ -962,12 +1013,24 @@ def _create_base_provider(
         ext = image_path.suffix
         time_match = re.search(r't(\d+)', stem)
         if time_match:
-            t_digits = time_match.group(1)
-            t_width = len(t_digits)
-            if t_width > 1 and t_digits.startswith("0"):
-                pattern = f"{prefix}{{time:0{t_width}d}}{ext}"
+            # Re-search on the full filename so the offsets match the
+            # directory-scan input exactly.
+            tm_in_filename = re.search(r"t(\d+)", filename)
+            if tm_in_filename:
+                # prefix_before_t excludes the literal 't' so the
+                # directory-scan regex (which adds its own 't<digits>')
+                # matches sibling files.
+                prefix_before_t = filename[: tm_in_filename.start()]
             else:
-                pattern = f"{prefix}{{time}}{ext}"
+                prefix_before_t = prefix
+            example_width = len(time_match.group(1))
+            t_width = _detect_time_padding(
+                tif_dir, prefix_before_t, ext, fallback_width=example_width,
+            )
+            t_fmt = f"{{time:0{t_width}d}}" if t_width > 0 else "{time}"
+            # ``prefix`` (config.tif_prefix) canonically includes the
+            # literal ``t``, so don't prepend another one here.
+            pattern = f"{prefix}{t_fmt}{ext}"
         else:
             pattern = f"{prefix}{{time}}{ext}"
 
@@ -1025,16 +1088,18 @@ def _create_multi_channel_provider(config) -> ImageProvider | None:
         # Parse the channel file pattern
         time_match = re.search(r't(\d+)', ch_stem)
         if time_match:
-            # Build prefix up to and including 't'
+            # Build prefix up to (not including) 't' so we can scan the
+            # directory for siblings matching the same shape.
             t_start = time_match.start()
-            t_digits = time_match.group(1)
-            prefix_part = ch_stem[:t_start + 1]  # includes 't'
-            t_width = len(t_digits)
-
-            if t_width > 1 and t_digits.startswith("0"):
-                pattern = f"{prefix_part}{{time:0{t_width}d}}{ch_ext}"
-            else:
-                pattern = f"{prefix_part}{{time}}{ch_ext}"
+            prefix_part_with_t = ch_stem[:t_start + 1]  # includes 't'
+            prefix_before_t = ch_stem[:t_start]         # excludes 't'
+            example_width = len(time_match.group(1))
+            t_width = _detect_time_padding(
+                ch_dir, prefix_before_t, ch_ext,
+                fallback_width=example_width,
+            )
+            t_fmt = f"{{time:0{t_width}d}}" if t_width > 0 else "{time}"
+            pattern = f"{prefix_part_with_t}{t_fmt}{ch_ext}"
         else:
             logger.warning("Could not parse time pattern from channel %d file: %s",
                           ch_num, ch_path.name)
@@ -1057,6 +1122,121 @@ def _create_multi_channel_provider(config) -> ImageProvider | None:
     logger.info("Creating MultiChannelFolderProvider: %d channels, flip=%s",
                 len(channel_providers), flip_active)
     return MultiChannelFolderProvider(channel_providers, flip=flip_active)
+
+
+def _detect_time_padding(
+    directory: Path,
+    prefix_before_t: str,
+    suffix_after_t: str,
+    fallback_width: int = 0,
+) -> int:
+    """Detect the zero-padding width of the time index in a directory of
+    image files matching ``{prefix_before_t}t{digits}{suffix_after_t}``.
+
+    Scans every file in ``directory``.  The presence of *any* file whose
+    digit run starts with ``0`` (and has more than one digit) proves
+    padding is in use; the width is taken from that file.  This works
+    even when the example filename happens to have a non-leading-zero
+    time index (e.g. ``t100.tif`` from a 3-digit padded set).
+
+    If no leading-zero example is found, the convention is unpadded
+    (``t1, t2, ..., t10, t100``).
+
+    Args:
+        directory: Directory to scan.
+        prefix_before_t: Filename portion before the literal ``t`` and
+            digit run (e.g. ``"image_"``).  Will be regex-escaped.
+        suffix_after_t: Filename portion after the digit run, including
+            extension (e.g. ``".tif"``, or ``"-p01.tif"`` for per-plane).
+            Will be regex-escaped.
+        fallback_width: Width to return if no matching files are found
+            in the directory.  Default ``0`` (unpadded).
+
+    Returns:
+        The detected pad width (``>= 1``), or ``0`` for unpadded.
+    """
+    if not directory.exists():
+        return fallback_width
+    pattern = re.compile(
+        re.escape(prefix_before_t) + r"t(\d+)" + re.escape(suffix_after_t) + r"$"
+    )
+    seen_widths = set()
+    leading_zero_widths = set()
+    for entry in directory.iterdir():
+        m = pattern.match(entry.name)
+        if not m:
+            continue
+        digits = m.group(1)
+        seen_widths.add(len(digits))
+        if len(digits) > 1 and digits[0] == "0":
+            leading_zero_widths.add(len(digits))
+    if not seen_widths:
+        return fallback_width
+    if leading_zero_widths:
+        # Padded set proven by the presence of at least one zero-prefix.
+        # If multiple widths somehow appear, prefer the longest (most
+        # likely the canonical pad width).
+        return max(leading_zero_widths)
+    if len(seen_widths) == 1:
+        # No leading zeros and a single uniform width — could be a
+        # single-file dataset or a small unpadded set.  Treat as
+        # unpadded; pad-vs-unpadded is indistinguishable for any single
+        # value, and the file we're about to load resolves either way.
+        return 0
+    # Mixed widths and no leading zeros → unpadded (e.g. t1, t2, ..., t100).
+    return 0
+
+
+def _detect_per_plane_padding(
+    directory: Path,
+    prefix_before_t: str,
+    ext: str,
+    fallback: tuple[int, int] = (3, 2),
+) -> tuple[int, int]:
+    """Detect (t_width, p_width) for per-plane filenames.
+
+    Scans ``directory`` for files matching
+    ``{prefix_before_t}t<digits>-p<digits>{ext}`` and returns the
+    detected pad widths for the time and plane indices.  A leading-zero
+    digit run in any matched file proves padding for that index;
+    otherwise the index is treated as unpadded (``0``).
+
+    Args:
+        directory: Directory to scan.
+        prefix_before_t: Filename portion before the ``t``.
+        ext: File extension including the leading dot.
+        fallback: ``(t_width, p_width)`` to return if no matching files
+            are found in the directory.
+
+    Returns:
+        ``(t_width, p_width)`` — each ``0`` for unpadded, ``>= 1`` for
+        the detected padded width.
+    """
+    if not directory.exists():
+        return fallback
+    pattern = re.compile(
+        re.escape(prefix_before_t) + r"t(\d+)-p(\d+)" + re.escape(ext) + r"$"
+    )
+    t_seen: set[int] = set()
+    p_seen: set[int] = set()
+    t_padded: set[int] = set()
+    p_padded: set[int] = set()
+    for entry in directory.iterdir():
+        m = pattern.match(entry.name)
+        if not m:
+            continue
+        td, pd = m.group(1), m.group(2)
+        t_seen.add(len(td))
+        p_seen.add(len(pd))
+        if len(td) > 1 and td[0] == "0":
+            t_padded.add(len(td))
+        if len(pd) > 1 and pd[0] == "0":
+            p_padded.add(len(pd))
+    if not t_seen:
+        return fallback
+    t_width = max(t_padded) if t_padded else 0
+    p_width = max(p_padded) if p_padded else 0
+    return t_width, p_width
 
 
 def _probe_stack_planes(path: Path) -> int | None:
