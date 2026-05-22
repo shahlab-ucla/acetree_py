@@ -484,3 +484,202 @@ class TestTimePaddingAutodetect:
         assert provider.get_plane(1, 1)[0, 0] == 101
         assert provider.get_plane(1, 5)[0, 0] == 105
         assert provider.get_plane(100, 10)[0, 0] == 10010
+
+
+# ── End-to-beginning filename parsing ───────────────────────────
+
+
+class TestParseTimeFromName:
+    """Direct tests for :func:`_parse_time_from_name`, the helper that
+    extracts the time index by scanning end-to-beginning.
+
+    The contract is:
+      1. Prefer the LAST ``_t<digits>`` substring.
+      2. Otherwise the LAST ``_<digits>`` substring.
+      3. Otherwise the LAST bare ``t<digits>`` substring.
+    """
+
+    def test_simple_underscore_t(self):
+        from acetree_py.io.image_provider import _parse_time_from_name
+        info = _parse_time_from_name("SPIMA_t1.tif")
+        assert info is not None
+        assert info.time == 1
+        assert info.digits == "1"
+        assert info.has_t is True
+        assert info.prefix_end == 6  # position of the 't' in 'SPIMA_t1.tif'
+
+    def test_picks_last_underscore_t_not_first(self):
+        """Bug repro: 'mutant_t30_image_t100.tif' must yield 100, not 30.
+
+        Previously ``re.search(r't(\\d+)', ...)`` returned the first
+        ``t<digits>`` it encountered, which made the parser pick the
+        wrong index whenever the prefix itself contained ``_t<digits>``.
+        """
+        from acetree_py.io.image_provider import _parse_time_from_name
+        info = _parse_time_from_name("mutant_t30_image_t100.tif")
+        assert info is not None
+        assert info.time == 100
+        assert info.digits == "100"
+        assert info.has_t is True
+
+    def test_underscore_fallback(self):
+        """When no '_t<digits>' is present, fall back to '_<digits>'."""
+        from acetree_py.io.image_provider import _parse_time_from_name
+        info = _parse_time_from_name("image_100.tif")
+        assert info is not None
+        assert info.time == 100
+        assert info.has_t is False
+        # prefix_end points to the first digit, not a 't'.
+        assert info.prefix_end == 6
+
+    def test_underscore_fallback_picks_last(self):
+        """The underscore fallback also scans end-to-beginning."""
+        from acetree_py.io.image_provider import _parse_time_from_name
+        info = _parse_time_from_name("series_42_frame_100.tif")
+        assert info is not None
+        assert info.time == 100  # last '_<digits>' wins
+
+    def test_bare_t_fallback(self):
+        """Backward-compat: filenames like 't001.tif' still parse."""
+        from acetree_py.io.image_provider import _parse_time_from_name
+        info = _parse_time_from_name("t001.tif")
+        assert info is not None
+        assert info.time == 1
+        assert info.digits == "001"
+        assert info.has_t is True
+
+    def test_no_match_returns_none(self):
+        from acetree_py.io.image_provider import _parse_time_from_name
+        assert _parse_time_from_name("no_digits_here.tif") is None
+
+    def test_zero_padding_preserved_in_digits(self):
+        """The original digit run (including leading zeros) is returned."""
+        from acetree_py.io.image_provider import _parse_time_from_name
+        info = _parse_time_from_name("img_t007.tif")
+        assert info is not None
+        assert info.time == 7
+        assert info.digits == "007"  # original spelling, not "7"
+
+    def test_per_plane_picks_time_not_plane(self):
+        """For per-plane shapes like 'img_t001-p05.tif', the time index
+        is 1, not 5 — the '-p<digits>' is not preceded by an underscore
+        so it cannot win either of the underscore-anchored rules."""
+        from acetree_py.io.image_provider import _parse_time_from_name
+        info = _parse_time_from_name("img_t001-p05.tif")
+        assert info is not None
+        assert info.time == 1
+
+    def test_picks_last_underscore_t_in_per_plane(self):
+        """Same bug class for per-plane: ``mutant_t30_img_t100-p05.tif``
+        must yield time=100, not 30."""
+        from acetree_py.io.image_provider import _parse_time_from_name
+        info = _parse_time_from_name("mutant_t30_img_t100-p05.tif")
+        assert info is not None
+        assert info.time == 100
+
+
+class TestEndToBeginningStackProvider:
+    """End-to-end: a directory whose example filename contains a stray
+    earlier ``_t<digits>`` must still resolve the right time index."""
+
+    def test_stack_with_misleading_prefix(self, tmp_path):
+        """File set 'mutant_t30_image_t<N>.tif' for N=1..3,100.
+
+        With the old left-to-right parser the loader would lock on to
+        'mutant_t30_image_t' as the prefix and 30 as the example width
+        (which is wrong — the real width is 3) and then fail.
+        """
+        import tifffile
+        for t in (1, 2, 3, 100):
+            img = np.full((8, 8), t, dtype=np.uint16)
+            tifffile.imwrite(
+                str(tmp_path / f"mutant_t30_image_t{t:03d}.tif"), img,
+            )
+
+        xml_content = f"""<?xml version='1.0' encoding='utf-8'?>
+<embryo>
+    <nuclei file="test.zip"/>
+    <image file="{tmp_path / 'mutant_t30_image_t001.tif'}"/>
+    <Split SplitMode="0"/>
+    <Flip FlipMode="0"/>
+</embryo>"""
+        config_file = tmp_path / "test.xml"
+        config_file.write_text(xml_content)
+        from acetree_py.io.config import load_config
+        from acetree_py.io.image_provider import create_image_provider_from_config
+        provider = create_image_provider_from_config(load_config(config_file))
+
+        assert provider is not None
+        for t in (1, 2, 3, 100):
+            assert provider.get_plane(t, 1)[0, 0] == t
+
+
+class TestDeriveImageParams:
+    """Config-level filename parsing.  ``_derive_image_params`` must
+    pick the LAST ``_t<digits>`` token in the filename, not the first."""
+
+    def _load(self, tmp_path, image_name):
+        # Create a placeholder file so resolve() works.
+        (tmp_path / image_name).write_bytes(b"")
+        xml = f"""<?xml version='1.0' encoding='utf-8'?>
+<embryo>
+    <nuclei file="test.zip"/>
+    <image file="{tmp_path / image_name}"/>
+</embryo>"""
+        cfg_file = tmp_path / "cfg.xml"
+        cfg_file.write_text(xml)
+        from acetree_py.io.config import load_config
+        return load_config(cfg_file)
+
+    def test_simple(self, tmp_path):
+        config = self._load(tmp_path, "SPIMA_t1.tif")
+        assert config.tif_prefix == "SPIMA_t"
+        assert config.start_time == 1
+
+    def test_misleading_prefix(self, tmp_path):
+        """Bug repro at the config layer.  The old non-greedy regex
+        worked because of a ``$`` anchor, but the new helper expresses
+        the end-to-beginning intent directly."""
+        config = self._load(tmp_path, "mutant_t30_image_t100.tif")
+        assert config.tif_prefix == "mutant_t30_image_t"
+        assert config.start_time == 100
+
+    def test_per_plane_misleading_prefix(self, tmp_path):
+        config = self._load(tmp_path, "mutant_t30_image_t100-p05.tif")
+        assert config.tif_prefix == "mutant_t30_image_t"
+        assert config.start_time == 100
+
+    def test_underscore_only_fallback(self, tmp_path):
+        config = self._load(tmp_path, "image_100.tif")
+        assert config.tif_prefix == "image_"
+        assert config.start_time == 100
+
+    def test_bare_t(self, tmp_path):
+        config = self._load(tmp_path, "t001.tif")
+        assert config.tif_prefix == "t"
+        assert config.start_time == 1
+
+
+class TestAutoDetectFormat:
+    """GUI helper ``_auto_detect_format`` should also use end-to-beginning
+    parsing so the detected timepoint range is correct even when the
+    dataset's filenames embed a stray ``_t<digits>`` token in the prefix.
+    """
+
+    def test_misleading_prefix(self, tmp_path):
+        import tifffile
+        for t in (1, 2, 3, 100):
+            img = np.full((8, 8), t, dtype=np.uint16)
+            tifffile.imwrite(
+                str(tmp_path / f"mutant_t30_image_t{t:03d}.tif"), img,
+            )
+
+        from acetree_py.gui.dataset_dialog import _auto_detect_format
+        info = _auto_detect_format(tmp_path)
+
+        # Without the fix: timepoints would all be 30 (or empty), and
+        # the prefix Counter would pick "mutant_t" instead of the
+        # canonical full prefix.
+        assert info["num_timepoints"] == 100  # max - min + 1 = 100 - 1 + 1
+        assert info["prefix"] == "mutant_t30_image_t"
+        assert info["pattern"].startswith("t{NNN} (range: 1-100)")

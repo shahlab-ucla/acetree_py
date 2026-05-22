@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import typing
 import zipfile
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -957,11 +958,9 @@ def _create_base_provider(
     if "-p" in filename:
         # Per-plane format: {prefix}t{NNN}-p{NN}.tif or .zip
         # Pull example widths to use as fallback if scan finds nothing.
-        time_match_example = re.search(r"t(\d+)", filename)
+        time_info = _parse_time_from_name(filename)
         plane_match_example = re.search(r"-p(\d+)", filename)
-        t_width_example = (
-            len(time_match_example.group(1)) if time_match_example else 3
-        )
+        t_width_example = len(time_info.digits) if time_info else 3
         p_width_example = (
             len(plane_match_example.group(1)) if plane_match_example else 2
         )
@@ -969,15 +968,21 @@ def _create_base_provider(
         # robust against the example filename happening to land on a
         # high time index (e.g. ``t100`` from a 3-digit padded set,
         # which has no leading zero).
-        if time_match_example:
-            prefix_before_t = filename[: time_match_example.start()]
+        if time_info is not None:
+            # prefix_before_t excludes the literal 't' (or the underscore
+            # when there is no 't' separator) so the scanner regex can
+            # add its own 't<digits>' or '<digits>' join.
+            prefix_before_t = filename[: time_info.prefix_end]
+            has_t_join = time_info.has_t
         else:
             prefix_before_t = prefix
+            has_t_join = True
 
         zip_ext = ".zip" if config.use_zip == 2 else ".tif"
         t_width, p_width = _detect_per_plane_padding(
             tif_dir, prefix_before_t, zip_ext,
             fallback=(t_width_example, p_width_example),
+            has_t_join=has_t_join,
         )
 
         if config.use_zip == 2:
@@ -1011,26 +1016,24 @@ def _create_base_provider(
     else:
         # Stack TIFF format: one multi-page TIFF per timepoint
         ext = image_path.suffix
-        time_match = re.search(r't(\d+)', stem)
-        if time_match:
-            # Re-search on the full filename so the offsets match the
-            # directory-scan input exactly.
-            tm_in_filename = re.search(r"t(\d+)", filename)
-            if tm_in_filename:
-                # prefix_before_t excludes the literal 't' so the
-                # directory-scan regex (which adds its own 't<digits>')
-                # matches sibling files.
-                prefix_before_t = filename[: tm_in_filename.start()]
-            else:
-                prefix_before_t = prefix
-            example_width = len(time_match.group(1))
+        time_info = _parse_time_from_name(filename)
+        if time_info is not None:
+            # Parse end-to-beginning so a stray earlier 't<digits>' in
+            # the prefix (e.g. 'mutant_t30_image_t100.tif') doesn't fool
+            # us into picking the wrong index.
+            prefix_before_t = filename[: time_info.prefix_end]
+            example_width = len(time_info.digits)
             t_width = _detect_time_padding(
-                tif_dir, prefix_before_t, ext, fallback_width=example_width,
+                tif_dir, prefix_before_t, ext,
+                fallback_width=example_width,
+                has_t_join=time_info.has_t,
             )
             t_fmt = f"{{time:0{t_width}d}}" if t_width > 0 else "{time}"
-            # ``prefix`` (config.tif_prefix) canonically includes the
-            # literal ``t``, so don't prepend another one here.
-            pattern = f"{prefix}{t_fmt}{ext}"
+            # When the dataset uses '_t<digits>' the canonical tif_prefix
+            # already includes the trailing 't'; for the bare '_<digits>'
+            # fallback it does not. Reconstruct the pattern from the
+            # filename offsets so both shapes work.
+            pattern = f"{filename[: time_info.prefix_end]}{'t' if time_info.has_t else ''}{t_fmt}{ext}"
         else:
             pattern = f"{prefix}{{time}}{ext}"
 
@@ -1082,24 +1085,23 @@ def _create_multi_channel_provider(config) -> ImageProvider | None:
             continue
 
         ch_dir = ch_path.parent
-        ch_stem = ch_path.stem
+        ch_name = ch_path.name
         ch_ext = ch_path.suffix
 
-        # Parse the channel file pattern
-        time_match = re.search(r't(\d+)', ch_stem)
-        if time_match:
-            # Build prefix up to (not including) 't' so we can scan the
-            # directory for siblings matching the same shape.
-            t_start = time_match.start()
-            prefix_part_with_t = ch_stem[:t_start + 1]  # includes 't'
-            prefix_before_t = ch_stem[:t_start]         # excludes 't'
-            example_width = len(time_match.group(1))
+        # Parse the channel file pattern end-to-beginning so a stray
+        # earlier 't<digits>' in the prefix doesn't pick the wrong index.
+        time_info = _parse_time_from_name(ch_name)
+        if time_info is not None:
+            prefix_before_t = ch_name[: time_info.prefix_end]
+            join = "t" if time_info.has_t else ""
+            example_width = len(time_info.digits)
             t_width = _detect_time_padding(
                 ch_dir, prefix_before_t, ch_ext,
                 fallback_width=example_width,
+                has_t_join=time_info.has_t,
             )
             t_fmt = f"{{time:0{t_width}d}}" if t_width > 0 else "{time}"
-            pattern = f"{prefix_part_with_t}{t_fmt}{ch_ext}"
+            pattern = f"{prefix_before_t}{join}{t_fmt}{ch_ext}"
         else:
             logger.warning("Could not parse time pattern from channel %d file: %s",
                           ch_num, ch_path.name)
@@ -1124,14 +1126,105 @@ def _create_multi_channel_provider(config) -> ImageProvider | None:
     return MultiChannelFolderProvider(channel_providers, flip=flip_active)
 
 
+class _TimeIndex(typing.NamedTuple):
+    """Parsed time-index info from an image filename.
+
+    Attributes:
+        time: The parsed integer time value.
+        digits: The original digit run as written in the filename
+            (preserves leading zeros, e.g. ``"001"`` vs ``"1"``).
+        digit_start: Position in the source string where the digit run
+            begins (inclusive).
+        digit_end: Position one past the last digit (exclusive).
+        has_t: True if the digit run was preceded by ``_t``; False if it
+            was matched via the ``_<digits>`` fallback (no ``t``).
+        prefix_end: Position where the prefix portion ends — i.e. the
+            position of the literal ``t`` when ``has_t`` is True, or
+            ``digit_start`` when False.  ``name[:prefix_end]`` is always
+            the portion *before* the ``t``/digits join.
+    """
+
+    time: int
+    digits: str
+    digit_start: int
+    digit_end: int
+    has_t: bool
+    prefix_end: int
+
+
+def _parse_time_from_name(name: str) -> _TimeIndex | None:
+    """Parse the time index from an image filename, end-to-beginning.
+
+    Algorithm (scans end-to-beginning, returning the first shape that
+    matches):
+      1. Prefer the LAST ``_t<digits>`` substring in ``name``.  This is
+         the canonical AceTree shape (``SPIMA_t100.tif``) and is robust
+         against stray earlier ``t<digits>`` patterns elsewhere in the
+         path (e.g. ``mutant_t30_image_t100.tif`` → 100).
+      2. Otherwise, fall back to the LAST ``_<digits>`` substring
+         (e.g. ``image_100.tif`` → 100).  Used when the dataset doesn't
+         encode the index with a literal ``t``.
+      3. Final fallback: the LAST ``t<digits>`` substring even without
+         a preceding underscore (e.g. ``t001.tif`` → 1).  This keeps
+         backward compatibility with bare ``t``-prefixed datasets.
+
+    The digit run may be any length and may or may not be zero-padded.
+
+    Args:
+        name: A filename (with or without extension).  The extension is
+            kept in place; the algorithm naturally ignores it because
+            the canonical time markers don't appear inside extensions
+            like ``.tif``.
+
+    Returns:
+        A :class:`_TimeIndex` describing the match, or ``None`` if no
+        time index could be located.
+    """
+    matches = list(re.finditer(r"_t(\d+)", name))
+    if matches:
+        m = matches[-1]
+        return _TimeIndex(
+            time=int(m.group(1)),
+            digits=m.group(1),
+            digit_start=m.start(1),
+            digit_end=m.end(1),
+            has_t=True,
+            prefix_end=m.start() + 1,  # position of the literal 't'
+        )
+    matches = list(re.finditer(r"_(\d+)", name))
+    if matches:
+        m = matches[-1]
+        return _TimeIndex(
+            time=int(m.group(1)),
+            digits=m.group(1),
+            digit_start=m.start(1),
+            digit_end=m.end(1),
+            has_t=False,
+            prefix_end=m.start(1),  # position of first digit
+        )
+    matches = list(re.finditer(r"t(\d+)", name))
+    if matches:
+        m = matches[-1]
+        return _TimeIndex(
+            time=int(m.group(1)),
+            digits=m.group(1),
+            digit_start=m.start(1),
+            digit_end=m.end(1),
+            has_t=True,
+            prefix_end=m.start(),  # position of the literal 't'
+        )
+    return None
+
+
 def _detect_time_padding(
     directory: Path,
     prefix_before_t: str,
     suffix_after_t: str,
     fallback_width: int = 0,
+    has_t_join: bool = True,
 ) -> int:
     """Detect the zero-padding width of the time index in a directory of
-    image files matching ``{prefix_before_t}t{digits}{suffix_after_t}``.
+    image files matching ``{prefix_before_t}[t]{digits}{suffix_after_t}``.
 
     Scans every file in ``directory``.  The presence of *any* file whose
     digit run starts with ``0`` (and has more than one digit) proves
@@ -1151,14 +1244,18 @@ def _detect_time_padding(
             Will be regex-escaped.
         fallback_width: Width to return if no matching files are found
             in the directory.  Default ``0`` (unpadded).
+        has_t_join: When True (default) the scanner expects a literal
+            ``t`` between the prefix and digit run. Set False for the
+            ``_<digits>`` fallback shape that has no ``t`` separator.
 
     Returns:
         The detected pad width (``>= 1``), or ``0`` for unpadded.
     """
     if not directory.exists():
         return fallback_width
+    join = "t" if has_t_join else ""
     pattern = re.compile(
-        re.escape(prefix_before_t) + r"t(\d+)" + re.escape(suffix_after_t) + r"$"
+        re.escape(prefix_before_t) + join + r"(\d+)" + re.escape(suffix_after_t) + r"$"
     )
     seen_widths = set()
     leading_zero_widths = set()
@@ -1192,11 +1289,12 @@ def _detect_per_plane_padding(
     prefix_before_t: str,
     ext: str,
     fallback: tuple[int, int] = (3, 2),
+    has_t_join: bool = True,
 ) -> tuple[int, int]:
     """Detect (t_width, p_width) for per-plane filenames.
 
     Scans ``directory`` for files matching
-    ``{prefix_before_t}t<digits>-p<digits>{ext}`` and returns the
+    ``{prefix_before_t}[t]<digits>-p<digits>{ext}`` and returns the
     detected pad widths for the time and plane indices.  A leading-zero
     digit run in any matched file proves padding for that index;
     otherwise the index is treated as unpadded (``0``).
@@ -1207,6 +1305,9 @@ def _detect_per_plane_padding(
         ext: File extension including the leading dot.
         fallback: ``(t_width, p_width)`` to return if no matching files
             are found in the directory.
+        has_t_join: When True (default) the scanner expects a literal
+            ``t`` between the prefix and time digit run.  Set False for
+            the ``_<digits>-p<digits>`` fallback shape.
 
     Returns:
         ``(t_width, p_width)`` — each ``0`` for unpadded, ``>= 1`` for
@@ -1214,8 +1315,9 @@ def _detect_per_plane_padding(
     """
     if not directory.exists():
         return fallback
+    join = "t" if has_t_join else ""
     pattern = re.compile(
-        re.escape(prefix_before_t) + r"t(\d+)-p(\d+)" + re.escape(ext) + r"$"
+        re.escape(prefix_before_t) + join + r"(\d+)-p(\d+)" + re.escape(ext) + r"$"
     )
     t_seen: set[int] = set()
     p_seen: set[int] = set()

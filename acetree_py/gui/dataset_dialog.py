@@ -495,18 +495,21 @@ def _auto_detect_format(directory: Path) -> dict:
     per_plane_files = [f for f in tifs if re.search(r'-p\d+', f.stem, re.IGNORECASE)]
     result["per_plane"] = len(per_plane_files) > len(tifs) * 0.5
 
-    # Try to extract timepoint numbers
-    time_pattern = re.compile(r't(\d+)', re.IGNORECASE)
+    # Try to extract timepoint numbers — scan end-to-beginning so a
+    # stray earlier 't<digits>' in the prefix doesn't fool the detector.
+    from acetree_py.io.image_provider import _parse_time_from_name
+
     timepoints = set()
     prefix_candidates = []
     for f in tifs:
-        m = time_pattern.search(f.stem)
-        if m:
-            timepoints.add(int(m.group(1)))
-            # Extract prefix (everything before 't' + digits)
-            pm = re.match(r'^(.+?t)\d+', f.stem, re.IGNORECASE)
-            if pm:
-                prefix_candidates.append(pm.group(1))
+        info = _parse_time_from_name(f.name)
+        if info is None:
+            continue
+        timepoints.add(info.time)
+        # Everything before the digit-bearing token (incl. trailing 't'
+        # when present) is the dataset prefix candidate.
+        prefix_end = info.prefix_end + 1 if info.has_t else info.prefix_end
+        prefix_candidates.append(f.name[:prefix_end])
 
     if timepoints:
         result["num_timepoints"] = max(timepoints) - min(timepoints) + 1

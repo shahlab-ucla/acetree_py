@@ -377,8 +377,15 @@ def _derive_image_params(config: AceTreeConfig) -> None:
     - {prefix}t{N}.tif  (stack TIFFs, e.g. SPIMA_t1.tif)
     - {prefix}t{NNN}-p{NN}.tif  (per-plane TIFFs)
     - {prefix}t{NNN}-p{NN}.zip  (per-plane ZIPs)
+    - {prefix}_{NNN}.tif  (datasets without a literal 't' separator)
+
+    Parsing scans the filename end-to-beginning so that a stray earlier
+    ``t<digits>`` token in the prefix (e.g. ``mutant_t30_image_t100.tif``)
+    doesn't make us lock onto the wrong index.
     """
     import re
+
+    from acetree_py.io.image_provider import _parse_time_from_name
 
     image_path = config.image_file
     config.tif_directory = image_path.parent
@@ -386,16 +393,21 @@ def _derive_image_params(config: AceTreeConfig) -> None:
     filename = image_path.name
     stem = image_path.stem  # Without extension
 
-    # Try to find a time number in the filename
-    # Pattern: something ending in 't' followed by digits, optionally followed by '-p' + digits
-    match = re.match(r'^(.+?t)(\d+)(?:-p(\d+))?$', stem, re.IGNORECASE)
-    if match:
-        config.tif_prefix = match.group(1)  # e.g. "SPIMA_t"
-        config.start_time = int(match.group(2))  # e.g. 1
+    time_info = _parse_time_from_name(filename)
+    if time_info is not None:
+        # For the canonical '_t<digits>' / bare 't<digits>' shapes, the
+        # tif_prefix conventionally ends with the literal 't'.  For the
+        # '_<digits>' fallback (no 't' separator) it ends with '_'.
+        if time_info.has_t:
+            config.tif_prefix = filename[: time_info.prefix_end + 1]
+        else:
+            config.tif_prefix = filename[: time_info.prefix_end]
+        config.start_time = time_info.time
         logger.info("Derived image params: dir=%s, prefix='%s', start_time=%d",
                      config.tif_directory, config.tif_prefix, config.start_time)
     else:
-        # Fallback: use filename without digits at the end
+        # Last-ditch fallback for filenames that don't fit any of the
+        # canonical shapes: just snap to the trailing digit run.
         match2 = re.match(r'^(.+?)(\d+)$', stem)
         if match2:
             config.tif_prefix = match2.group(1)
