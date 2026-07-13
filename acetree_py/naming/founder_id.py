@@ -121,6 +121,7 @@ def identify_founders(
     starting_index: int = 0,
     ending_index: int = -1,
     z_pix_res: float = 11.1,
+    ap_hint: np.ndarray | None = None,
 ) -> FounderAssignment:
     """Identify founder cells using topology and division timing.
 
@@ -132,6 +133,9 @@ def identify_founders(
         starting_index: 0-based starting timepoint.
         ending_index: Ending timepoint (-1 for all).
         z_pix_res: Z pixel resolution for physical distance calculations.
+        ap_hint: Optional posterior-to-anterior direction in physical XYZ
+            coordinates.  A curator-provided body axis takes precedence over
+            inferring the ABa/ABp ordering from the four-cell geometry.
 
     Returns:
         FounderAssignment with identification results.
@@ -159,7 +163,7 @@ def identify_founders(
     for first_four, last_four in windows:
         candidate = _try_identify_from_window(
             nuclei_record, first_four, last_four,
-            starting_index, ending_index, z_pix_res,
+            starting_index, ending_index, z_pix_res, ap_hint,
         )
         if candidate.success and candidate.confidence > best_score:
             best_result = candidate
@@ -243,6 +247,7 @@ def _try_identify_from_window(
     starting_index: int,
     ending_index: int,
     z_pix_res: float,
+    ap_hint: np.ndarray | None,
 ) -> FounderAssignment:
     """Try to identify founders from a specific 4-cell stage window.
 
@@ -253,6 +258,7 @@ def _try_identify_from_window(
         starting_index: Dataset start.
         ending_index: Dataset end.
         z_pix_res: Z pixel resolution.
+        ap_hint: Optional posterior-to-anterior direction in physical XYZ.
 
     Returns:
         FounderAssignment (success=True if identification worked).
@@ -365,7 +371,7 @@ def _try_identify_from_window(
     aba_idx, aba_nuc, abp_idx, abp_nuc = _distinguish_aba_abp(
         nuclei_record, ab_d1_idx, ab_d1, ab_d2_idx, ab_d2,
         ems_idx, ems_nuc, p2_idx, p2_nuc,
-        first_four, last_four, z_pix_res, result,
+        first_four, last_four, z_pix_res, result, ap_hint,
     )
 
     # Step 5: Assign names to nuclei
@@ -401,6 +407,14 @@ def _try_identify_from_window(
     axis_confidence = _compute_axis_confidence(
         aba_nuc, abp_nuc, ems_nuc, p2_nuc, z_pix_res,
     )
+    used_coordinate_fallback = any(
+        "x-coordinate heuristic" in warning for warning in result.warnings
+    )
+    if used_coordinate_fallback:
+        # Raw microscope X is not anatomy.  Keep the deterministic candidate
+        # for diagnostics, but force the composite confidence below the
+        # automatic-commit threshold so a curator/orientation anchor is needed.
+        axis_confidence = min(axis_confidence, 0.1)
     if result.ap_vector is None:
         axis_confidence = 0.0
         result.warnings.append("Could not determine embryo axes from founder positions")
@@ -410,10 +424,22 @@ def _try_identify_from_window(
     result.size_confidence = size_confidence
     result.axis_confidence = axis_confidence
 
+    # Topology/timing identifies the biological founder cells independently
+    # of how well this particular frame spans all three anatomical axes.  A
+    # flat or compressed acquisition should lower downstream geometry trust,
+    # but must not discard an otherwise sound P0/AB/P1/EMS/P2 assignment.
+    # Keep axis quality as a bounded modifier and expose it separately.
     result.confidence = max(
         0.0,
-        timing_confidence * size_confidence * axis_confidence - confidence_penalty,
+        timing_confidence
+        * size_confidence
+        * (0.5 + 0.5 * axis_confidence)
+        - confidence_penalty,
     )
+    if used_coordinate_fallback:
+        # Raw microscope X has no intrinsic anatomical meaning.  Never allow
+        # that last-resort ordering to cross the automatic-commit threshold.
+        result.confidence = min(result.confidence, 0.1)
     result.success = True
 
     logger.info(
@@ -506,6 +532,7 @@ def _distinguish_aba_abp(
     last_four: int,
     z_pix_res: float,
     result: FounderAssignment,
+    ap_hint: np.ndarray | None = None,
 ) -> tuple[int, Nucleus, int, Nucleus]:
     """Distinguish ABa from ABp within the AB-daughter pair.
 
@@ -555,7 +582,6 @@ def _distinguish_aba_abp(
                             mapping[t - 1] = pred
 
     # Compute projection at each available timepoint
-    use_pc1 = False
     for t in range(first_four, last_four + 1):
         if not (t in d1_at_t and t in d2_at_t and t in p2_at_t):
             continue
@@ -568,7 +594,11 @@ def _distinguish_aba_abp(
                              float(p2_at_t[t].z) * z_pix_res])
 
         ab_center = (pos1 + pos2) / 2.0
-        ap_raw = ab_center - pos_p2_t
+        ap_raw = (
+            np.asarray(ap_hint, dtype=float)
+            if ap_hint is not None
+            else ab_center - pos_p2_t
+        )
         ap_norm = np.linalg.norm(ap_raw)
 
         if ap_norm > 1e-6:
@@ -581,6 +611,8 @@ def _distinguish_aba_abp(
         # Averaged projection — more anterior = ABa
         avg_proj_d1 = proj_sum_d1 / n_valid_frames
         avg_proj_d2 = proj_sum_d2 / n_valid_frames
+        if ap_hint is not None:
+            result.warnings.append("ABa/ABp ordered using explicit AP orientation")
         if avg_proj_d1 >= avg_proj_d2:
             return d1_idx, d1, d2_idx, d2
         else:
@@ -589,8 +621,6 @@ def _distinguish_aba_abp(
     # Fallback: PC1 of the 4-cell point cloud as the long axis.
     # This handles datasets where the 2-cell stage is absent (AP degenerate).
     logger.info("AP axis degenerate — using PC1 of 4-cell point cloud for ABa/ABp")
-    use_pc1 = True
-
     # Collect all 4-cell positions across the window
     all_positions = []
     for t in range(first_four, last_four + 1):
@@ -648,11 +678,12 @@ def _compute_axis_confidence(
 ) -> float:
     """Compute confidence in axis determination from spatial separation.
 
-    Higher confidence when the 4 founder cells are well-separated in 3D.
-    Lower confidence when cells are tightly clustered.
+    Combines cell separation with the actual anatomical frame condition:
+    P2→ABa must be non-zero and EMS→ABp must retain a substantial component
+    perpendicular to AP.
 
     Returns:
-        Confidence score between 0.3 and 1.0.
+        Confidence score between 0 and 1.
     """
     positions = [
         np.array([float(n.x), float(n.y), float(n.z) * z_pix_res])
@@ -666,7 +697,7 @@ def _compute_axis_confidence(
             dists.append(np.linalg.norm(positions[i] - positions[j]))
 
     if not dists:
-        return 0.3
+        return 0.0
 
     min_dist = min(dists)
     median_dist = sorted(dists)[len(dists) // 2]
@@ -674,13 +705,24 @@ def _compute_axis_confidence(
     # If minimum pairwise distance is very small relative to median,
     # cells are poorly separated
     if median_dist < 1e-6:
-        return 0.3
+        return 0.0
 
     separation_ratio = min_dist / median_dist
     # Map separation_ratio to confidence: 0 -> 0.3, 0.3+ -> 1.0
-    confidence = min(1.0, 0.3 + separation_ratio * 2.33)
+    separation_confidence = min(1.0, separation_ratio / 0.3)
 
-    return confidence
+    ap_raw = positions[0] - positions[3]  # P2 -> ABa
+    dv_raw = positions[1] - positions[2]  # EMS -> ABp
+    ap_norm = float(np.linalg.norm(ap_raw))
+    dv_norm = float(np.linalg.norm(dv_raw))
+    if ap_norm < 1e-6 or dv_norm < 1e-6:
+        return 0.0
+    ap = ap_raw / ap_norm
+    dv_perp_fraction = float(
+        np.linalg.norm(dv_raw - np.dot(dv_raw, ap) * ap) / dv_norm
+    )
+
+    return float(min(separation_confidence, dv_perp_fraction))
 
 
 def _find_sister_pairs(
@@ -1111,13 +1153,16 @@ def _axes_from_founders(
 ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     """Determine embryo axes from the 4 founder cell positions.
 
-    Derives AP, LR, DV axes directly from cell geometry without
+    Derives AP and DV axes directly from cell geometry without
     requiring AuxInfo or external orientation measurements.
 
     The biological basis:
-    - AP axis: P2 (posterior) -> AB centroid (anterior)
-    - LR axis: perpendicular to AP, in the ABa-ABp separation plane
-    - DV axis: cross(AP, LR)
+    - AP axis: P2 (posterior) -> ABa (anterior)
+    - DV axis: EMS (ventral) -> ABp (dorsal), perpendicularized to AP
+    - LR axis: completes the right-handed anatomical frame
+
+    ABa--ABp is not a left/right landmark pair.  Treating it as one swaps
+    the secondary axes and produces systematic l/r versus d/v name errors.
 
     Args:
         aba, abp, ems, p2: The four identified founder cells.
@@ -1133,47 +1178,25 @@ def _axes_from_founders(
     pos_ems = np.array([float(ems.x), float(ems.y), float(ems.z) * z_pix_res])
     pos_p2 = np.array([float(p2.x), float(p2.y), float(p2.z) * z_pix_res])
 
-    # AP axis: posterior (P2) -> anterior (AB midpoint)
-    ab_center = (pos_aba + pos_abp) / 2.0
-    ap_raw = ab_center - pos_p2
+    # AP axis: posterior (P2) -> anterior (ABa)
+    ap_raw = pos_aba - pos_p2
     ap_norm = np.linalg.norm(ap_raw)
 
     if ap_norm < 1e-6:
-        logger.warning("AP axis degenerate (P2 and AB centroid coincide)")
+        logger.warning("AP axis degenerate (P2 and ABa coincide)")
         return None, None, None
 
     ap_vector = ap_raw / ap_norm
 
-    # ABa-ABp separation vector
-    ab_sep = pos_aba - pos_abp
-    # Project out the AP component to get the component in the LR+DV plane
-    ab_sep_perp = ab_sep - np.dot(ab_sep, ap_vector) * ap_vector
-    ab_sep_norm = np.linalg.norm(ab_sep_perp)
-
-    if ab_sep_norm < 1e-6:
-        # ABa and ABp have the same projection perpendicular to AP
-        # Fall back to EMS-P2 separation for LR determination
-        ep_sep = pos_ems - pos_p2
-        ep_sep_perp = ep_sep - np.dot(ep_sep, ap_vector) * ap_vector
-        ab_sep_perp = ep_sep_perp
-        ab_sep_norm = np.linalg.norm(ab_sep_perp)
-
-        if ab_sep_norm < 1e-6:
-            logger.warning("Cannot determine LR axis — cells are collinear")
-            return ap_vector, None, None
-
-    # LR axis: we define it as perpendicular to AP in the ABa-ABp plane
-    # Convention: ABa is on the left. The LR vector points from right to left.
-    # cross(AP, ab_sep_perp) gives DV, then cross(AP, DV) gives LR
-    # Or equivalently: normalize ab_sep_perp → that's a proxy for LR
-    # But we need to ensure right-handedness.
-    dv_vector = np.cross(ap_vector, ab_sep_perp)
-    dv_norm = np.linalg.norm(dv_vector)
+    # DV axis: ventral (EMS) -> dorsal (ABp), with the AP component removed.
+    dv_raw = pos_abp - pos_ems
+    dv_perp = dv_raw - np.dot(dv_raw, ap_vector) * ap_vector
+    dv_norm = np.linalg.norm(dv_perp)
     if dv_norm < 1e-6:
-        logger.warning("DV axis degenerate")
+        logger.warning("Cannot determine DV axis — ABp/EMS are collinear with AP")
         return ap_vector, None, None
 
-    dv_vector = dv_vector / dv_norm
+    dv_vector = dv_perp / dv_norm
 
     # LR is the remaining axis
     lr_vector = np.cross(dv_vector, ap_vector)
@@ -1183,12 +1206,6 @@ def _axes_from_founders(
         return ap_vector, None, None
 
     lr_vector = lr_vector / lr_norm
-
-    # Ensure ABa is on the "left" side (positive LR projection)
-    aba_lr = np.dot(pos_aba - ab_center, lr_vector)
-    if aba_lr < 0:
-        lr_vector = -lr_vector
-        dv_vector = -dv_vector  # Maintain right-handedness
 
     logger.info(
         "Axes from founders: AP=%s, LR=%s, DV=%s",

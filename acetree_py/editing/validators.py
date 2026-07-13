@@ -9,9 +9,60 @@ the Java code did ad-hoc null checks scattered across dialog code.
 
 from __future__ import annotations
 
-from ..core.nucleus import NILLI, Nucleus
+from ..core.nucleus import NILLI, Nucleus, validate_storable_name
 
 NucleiRecord = list[list[Nucleus]]
+
+
+def _validate_name_text(name: str) -> list[str]:
+    """Validate a cell name against the delimiter-based persistence format."""
+    error = validate_storable_name(name, allow_empty=False)
+    return [error] if error else []
+
+
+def _forced_ids_on_chain_side(
+    nuclei_record: NucleiRecord,
+    t0: int,
+    j0: int,
+    *,
+    backward: bool,
+) -> set[str]:
+    """Collect forced IDs up to, or forward from, a continuation anchor."""
+    from .commands import _walk_continuation_chain
+
+    chain = _walk_continuation_chain(nuclei_record, t0, j0)
+    if backward:
+        chain = [(t, j) for t, j in chain if t <= t0]
+    else:
+        chain = [(t, j) for t, j in chain if t >= t0]
+    return {
+        nuclei_record[t][j].assigned_id
+        for t, j in chain
+        if nuclei_record[t][j].assigned_id
+    }
+
+
+def _validate_forced_id_merge(
+    nuclei_record: NucleiRecord,
+    parent_t0: int,
+    parent_j0: int,
+    child_t0: int,
+    child_j0: int,
+) -> list[str]:
+    """Reject a continuation that would silently reconcile two forced names."""
+    parent_ids = _forced_ids_on_chain_side(
+        nuclei_record, parent_t0, parent_j0, backward=True
+    )
+    child_ids = _forced_ids_on_chain_side(
+        nuclei_record, child_t0, child_j0, backward=False
+    )
+    if parent_ids and child_ids and len(parent_ids | child_ids) > 1:
+        names = ", ".join(sorted(parent_ids | child_ids))
+        return [
+            "Cannot merge continuation components with different forced "
+            f"names ({names}); clear or reconcile an override first"
+        ]
+    return []
 
 
 def validate_add_nucleus(
@@ -139,6 +190,24 @@ def validate_relink(
                                 f"already has 2 successors"
                             )
 
+                    # If no other daughter remains, the prospective edge is
+                    # a continuation and its manual naming state must be
+                    # unambiguous.  A second, different successor is a
+                    # division boundary, so daughter overrides may differ.
+                    other_successors = {
+                        successor
+                        for successor in (parent.successor1, parent.successor2)
+                        if successor not in (NILLI, index)
+                    }
+                    if not other_successors:
+                        errors.extend(_validate_forced_id_merge(
+                            nuclei_record,
+                            prev_t_idx,
+                            p_idx,
+                            t_idx,
+                            n_idx,
+                        ))
+
     return errors
 
 
@@ -173,7 +242,10 @@ def validate_kill_cell(
 
     # Check that the cell exists at the start time
     t_idx = start_time - 1
-    found = any(n.identity == cell_name and n.is_alive for n in nuclei_record[t_idx])
+    found = any(
+        n.effective_name == cell_name and n.is_alive
+        for n in nuclei_record[t_idx]
+    )
     if not found:
         errors.append(f"Cell '{cell_name}' not found alive at t={start_time}")
 
@@ -210,9 +282,10 @@ def validate_rename_cell(
 
     errors: list[str] = []
 
-    # Basic validation
-    if not new_name or not new_name.strip():
-        errors.append("New name cannot be empty")
+    # Basic validation.  Validate before trimming so hidden control
+    # characters cannot be normalized away and written to the CSV record.
+    errors.extend(_validate_name_text(new_name))
+    if errors:
         return errors, None
 
     new_name = new_name.strip()
@@ -272,6 +345,10 @@ def validate_relink_interpolation(
         List of error messages (empty if valid).
     """
     errors = []
+    start_nuc: Nucleus | None = None
+    end_nuc: Nucleus | None = None
+    si = start_index - 1
+    ei = end_index - 1
 
     if end_time <= start_time:
         errors.append(f"End time ({end_time}) must be after start time ({start_time})")
@@ -283,12 +360,11 @@ def validate_relink_interpolation(
         errors.append(f"Start timepoint {start_time} out of range")
     else:
         nuclei = nuclei_record[st_idx]
-        si = start_index - 1
         if si < 0 or si >= len(nuclei):
             errors.append(f"Start index {start_index} out of range at t={start_time}")
         else:
-            parent = nuclei[si]
-            if parent.successor1 != NILLI and parent.successor2 != NILLI:
+            start_nuc = nuclei[si]
+            if start_nuc.successor1 != NILLI and start_nuc.successor2 != NILLI:
                 errors.append(f"Start nucleus at t={start_time} idx={start_index} already has 2 successors")
 
     # Check end nucleus exists
@@ -297,8 +373,26 @@ def validate_relink_interpolation(
         errors.append(f"End timepoint {end_time} out of range")
     else:
         nuclei = nuclei_record[et_idx]
-        ei = end_index - 1
         if ei < 0 or ei >= len(nuclei):
             errors.append(f"End index {end_index} out of range at t={end_time}")
+        else:
+            end_nuc = nuclei[ei]
+
+    if start_nuc is not None and end_nuc is not None:
+        successors = {
+            successor
+            for successor in (start_nuc.successor1, start_nuc.successor2)
+            if successor != NILLI
+        }
+        if end_time == start_time + 1:
+            successors.discard(end_index)
+        if not successors:
+            errors.extend(_validate_forced_id_merge(
+                nuclei_record,
+                st_idx,
+                si,
+                et_idx,
+                ei,
+            ))
 
     return errors

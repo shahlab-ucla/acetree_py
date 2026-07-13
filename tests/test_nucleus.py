@@ -125,7 +125,6 @@ class TestNucleusToTextLine:
 
     def test_round_trip(self):
         """Parse a line, serialize it, parse again — should match."""
-        original = "1, 1, -1, 1, -1, 300, 250, 15.0, 20, ABa, , 5000, 100, 120, 10, 15, 12, 8"
         nuc = Nucleus.from_text_line(
             "1, 1, -1, 1, -1, 300, 250, 15.0, 20, ABa, 5000, 100, 50, 25, , 120, 10, 15, 12, 8"
         )
@@ -149,6 +148,15 @@ class TestNucleusToTextLine:
         assert nuc2.rwcorr2 == nuc.rwcorr2
         assert nuc2.rwcorr3 == nuc.rwcorr3
         assert nuc2.rwcorr4 == nuc.rwcorr4
+
+    @pytest.mark.parametrize("unsafe", ["AB,a", "AB\nline", "AB\tcell"])
+    @pytest.mark.parametrize("field", ["identity", "assigned_id"])
+    def test_rejects_names_that_would_corrupt_record_format(self, unsafe, field):
+        nucleus = Nucleus(index=1, status=1)
+        setattr(nucleus, field, unsafe)
+
+        with pytest.raises(ValueError):
+            nucleus.to_text_line()
 
 
 class TestNucleusCorrectedRed:

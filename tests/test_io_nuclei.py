@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
 
-from acetree_py.core.nucleus import NILLI, Nucleus
+from acetree_py.core.nucleus import Nucleus
 from acetree_py.io.nuclei_reader import read_nuclei_zip
 from acetree_py.io.nuclei_writer import write_nuclei_zip
 
@@ -92,6 +94,44 @@ class TestWriteNucleiZip:
         assert len(read_back[1]) == 2
         names = {n.identity for n in read_back[1]}
         assert names == {"AB", "P1"}
+
+    def test_failed_write_preserves_last_good_archive(self, tmp_path: Path, monkeypatch):
+        zip_path = tmp_path / "output.zip"
+        old_contents = b"last known good archive"
+        zip_path.write_bytes(old_contents)
+        nucleus = Nucleus(index=1, status=1)
+
+        def fail_serialization():
+            raise RuntimeError("simulated serialization failure")
+
+        monkeypatch.setattr(nucleus, "to_text_line", fail_serialization)
+
+        with pytest.raises(RuntimeError, match="simulated"):
+            write_nuclei_zip([[nucleus]], zip_path)
+
+        assert zip_path.read_bytes() == old_contents
+        assert list(tmp_path.glob(".output.zip.*.tmp")) == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file mode semantics")
+    def test_atomic_replace_preserves_existing_file_mode(self, tmp_path: Path):
+        zip_path = tmp_path / "output.zip"
+        zip_path.write_bytes(b"old")
+        zip_path.chmod(0o640)
+
+        write_nuclei_zip([[Nucleus(index=1, status=1)]], zip_path)
+
+        assert stat.S_IMODE(zip_path.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file mode semantics")
+    def test_new_archive_uses_normal_umask_mode(self, tmp_path: Path):
+        zip_path = tmp_path / "output.zip"
+        previous = os.umask(0o027)
+        try:
+            write_nuclei_zip([[Nucleus(index=1, status=1)]], zip_path)
+        finally:
+            os.umask(previous)
+
+        assert stat.S_IMODE(zip_path.stat().st_mode) == 0o640
 
 
 class TestRoundTrip:

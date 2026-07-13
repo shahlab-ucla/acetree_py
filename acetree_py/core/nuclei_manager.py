@@ -17,15 +17,27 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from ..io.auxinfo import AuxInfo, load_auxinfo
-from ..io.config import AceTreeConfig, NamingMethod
+from ..io.auxinfo import (
+    AuxInfo,
+    auxinfo_from_axes,
+    auxinfo_v2_path,
+    is_manual_auxinfo_v2,
+    load_auxinfo,
+    stage_auxinfo_v2,
+)
+from ..io.config import AceTreeConfig
 from ..io.nuclei_reader import read_nuclei_zip
-from ..io.nuclei_writer import write_nuclei_zip
-from ..naming.identity import MANUAL, NEWCANONICAL, IdentityAssigner
+from ..io.nuclei_writer import stage_nuclei_zip
+from ..naming.identity import NEWCANONICAL, IdentityAssigner
+from ..naming.division_caller import DivisionCaller
+from ..naming.rules import RuleManager
 from ..naming.validation import NamingWarning, validate_naming
 from .cell import Cell
 from .lineage import LineageTree, build_lineage_tree
@@ -33,6 +45,41 @@ from .movie import Movie
 from .nucleus import NILLI, Nucleus
 
 logger = logging.getLogger(__name__)
+
+
+def _unused_sibling_path(destination: Path, *, suffix: str) -> Path:
+    """Reserve an unused sibling name for a same-filesystem rollback rename."""
+    fd, name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=suffix,
+    )
+    os.close(fd)
+    path = Path(name)
+    path.unlink()
+    return path
+
+
+def _discard_staged_file(path: Path | None) -> None:
+    """Remove a private staged file without masking the save result."""
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove staged save file: %s", path, exc_info=True)
+
+
+@dataclass(frozen=True)
+class DivisionSuggestion:
+    """Preview of a geometry-based daughter assignment for a manual edit."""
+
+    first_name: str
+    second_name: str
+    confidence: float
+    axis_label: str
+    source: str
+    ambiguous: bool = False
 
 
 class NucleiManager:
@@ -90,6 +137,13 @@ class NucleiManager:
         mgr._naming_method = config.naming_method.value
         mgr._expr_corr = config.expr_corr
         mgr.nuclei_record = [[] for _ in range(num_timepoints)]
+        if config.axis_given:
+            candidate = AuxInfo(
+                version=1,
+                data={"axis": config.axis_given.upper(), "ang": "0"},
+            )
+            if candidate.has_orientation:
+                mgr.auxinfo = candidate
         return mgr
 
     @classmethod
@@ -126,9 +180,18 @@ class NucleiManager:
             config.config_file.parent / config.zip_file.with_suffix("").name,
         ):
             ai = load_auxinfo(candidate)
-            if ai.axis or ai.is_v2:
+            if ai.has_orientation:
                 mgr.auxinfo = ai
                 break
+
+        # Legacy XML orientation is the final explicit-metadata fallback.
+        if mgr.auxinfo is None and config.axis_given:
+            candidate = AuxInfo(
+                version=1,
+                data={"axis": config.axis_given.upper(), "ang": "0"},
+            )
+            if candidate.has_orientation:
+                mgr.auxinfo = candidate
 
         return mgr
 
@@ -183,13 +246,88 @@ class NucleiManager:
         )
 
     def save(self, zip_path: Path, start_time: int = 1) -> None:
-        """Save nuclei back to a ZIP archive.
+        """Save the nuclei archive and orientation sidecar as one transaction.
 
         Args:
             zip_path: Output path for the ZIP file.
             start_time: Starting timepoint number for file naming.
         """
-        write_nuclei_zip(self.nuclei_record, zip_path, start_time=start_time)
+        zip_path = Path(zip_path)
+        aux_base = zip_path.with_suffix("")
+
+        # Prepare every new byte before changing either user-visible file.
+        # The archive is committed last.  If that final atomic replacement
+        # fails, the sidecar change is rolled back to its exact prior file.
+        archive_stage = stage_nuclei_zip(
+            self.nuclei_record,
+            zip_path,
+            start_time=start_time,
+        )
+        sidecar_path = auxinfo_v2_path(aux_base)
+        sidecar_stage: Path | None = None
+        sidecar_operation = False
+        sidecar_backup: Path | None = None
+        sidecar_changed = False
+
+        try:
+            if (
+                self.auxinfo is not None
+                and self.auxinfo.is_v2
+                and self.auxinfo.has_orientation
+            ):
+                sidecar_path, sidecar_stage = stage_auxinfo_v2(
+                    self.auxinfo,
+                    aux_base,
+                )
+                sidecar_operation = True
+            elif is_manual_auxinfo_v2(aux_base):
+                # Undoing a manual orientation removes only the sidecar that
+                # AceTree created; acquisition metadata is never deleted.
+                sidecar_operation = True
+
+            if sidecar_operation:
+                if sidecar_path.exists():
+                    sidecar_backup = _unused_sibling_path(
+                        sidecar_path,
+                        suffix=".rollback",
+                    )
+                    os.replace(sidecar_path, sidecar_backup)
+                if sidecar_stage is not None:
+                    os.replace(sidecar_stage, sidecar_path)
+                sidecar_changed = True
+
+            os.replace(archive_stage, zip_path)
+        except BaseException:
+            try:
+                if sidecar_changed:
+                    sidecar_path.unlink(missing_ok=True)
+                if sidecar_backup is not None and sidecar_backup.exists():
+                    os.replace(sidecar_backup, sidecar_path)
+            except BaseException as rollback_error:
+                logger.exception(
+                    "Save failed and the AuxInfo rollback also failed for %s",
+                    zip_path,
+                )
+                raise RuntimeError(
+                    "Save failed and the previous AuxInfo sidecar could not "
+                    "be restored"
+                ) from rollback_error
+            raise
+        finally:
+            _discard_staged_file(archive_stage)
+            _discard_staged_file(sidecar_stage)
+
+        if sidecar_backup is not None:
+            try:
+                sidecar_backup.unlink(missing_ok=True)
+            except OSError:
+                # Both committed files are already valid.  A hidden backup is
+                # safer than reporting a failed save after durable commit.
+                logger.warning(
+                    "Could not remove completed-save backup: %s",
+                    sidecar_backup,
+                    exc_info=True,
+                )
         logger.info("Saved nuclei to %s", zip_path)
 
     # ── Data access ────────────────────────────────────────────────
@@ -448,6 +586,13 @@ class NucleiManager:
                     continue
 
                 parent = current[pred_idx]
+                if not parent.is_alive:
+                    logger.warning(
+                        "Live nucleus at t=%d idx=%d references dead predecessor "
+                        "at t=%d idx=%d; link ignored",
+                        t + 2, j + 1, t + 1, pred_idx + 1,
+                    )
+                    continue
                 next_idx_1based = j + 1
 
                 if parent.successor1 == NILLI:
@@ -494,7 +639,7 @@ class NucleiManager:
         self.identity_assigner = assigner
         logger.info("Identity assignment complete")
 
-    def get_ap_direction_at(self, time: int) -> np.ndarray:
+    def _legacy_get_ap_direction_at(self, time: int) -> np.ndarray:
         """Return the AP unit-ish direction vector in pixel space at ``time``.
 
         Priority order (most-specific to fallback):
@@ -548,6 +693,171 @@ class NucleiManager:
 
         # 4. Default: +X is anterior (Java AceTree convention)
         return np.array([1.0, 0.0, 0.0])
+
+    def get_body_axes_at(
+        self, time: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Return anatomical ``(AP, LR, DV)`` axes at a 1-based timepoint.
+
+        Explicit AuxInfo/manual vectors take precedence. Otherwise the last
+        naming run's inferred frame is used. The one-based/zero-based
+        conversion is centralised here so GUI edits cannot use the following
+        frame's geometry by accident.
+        """
+        if time < 1:
+            return None
+
+        if self.auxinfo is not None and self.auxinfo.is_v2 and self.auxinfo.has_orientation:
+            from ..naming.body_axes import BodyAxisFrame, BodyAxisValidationError
+
+            try:
+                frame = BodyAxisFrame.from_auxinfo_vectors(
+                    self.auxinfo.ap_orientation,
+                    self.auxinfo.lr_orientation,
+                    provenance=("manual" if self.auxinfo.is_manual else "auxinfo_v2"),
+                    reference_time=self.auxinfo.reference_time or None,
+                )
+                return frame.ap.copy(), frame.lr.copy(), frame.dv.copy()
+            except BodyAxisValidationError:
+                logger.warning("Ignoring invalid AuxInfo v2 body axes", exc_info=True)
+
+        caller = self.identity_assigner.division_caller if self.identity_assigner else None
+        if caller is not None:
+            if caller.is_lineage_mode:
+                try:
+                    axes = caller._get_local_axes(time - 1)
+                except Exception:
+                    axes = None
+                if axes is not None:
+                    ap, lr, dv = axes
+                    return (
+                        np.asarray(ap, dtype=float),
+                        np.asarray(lr, dtype=float),
+                        np.asarray(dv, dtype=float),
+                    )
+            if (
+                caller.founder_ap is not None
+                and caller.founder_lr is not None
+                and caller.founder_dv is not None
+            ):
+                return (
+                    np.asarray(caller.founder_ap, dtype=float),
+                    np.asarray(caller.founder_lr, dtype=float),
+                    np.asarray(caller.founder_dv, dtype=float),
+                )
+
+        # Invert the sign/angle transform used for legacy v1 classification
+        # so previews and automatic naming share exactly one convention.
+        if self.auxinfo is not None and self.auxinfo.has_orientation and not self.auxinfo.is_v2:
+            axis = self.auxinfo.axis.upper()
+            signs = np.array([
+                1.0 if axis[0] == "A" else -1.0,
+                1.0 if axis[1] == "D" else -1.0,
+                1.0 if axis[2] == "L" else -1.0,
+            ])
+            angle = math.radians(self.auxinfo.angle)
+            rotation = np.array([
+                [math.cos(angle), -math.sin(angle), 0.0],
+                [math.sin(angle), math.cos(angle), 0.0],
+                [0.0, 0.0, 1.0],
+            ])
+            ap = rotation @ np.array([signs[0], 0.0, 0.0])
+            dv = rotation @ np.array([0.0, signs[1], 0.0])
+            lr = rotation @ np.array([0.0, 0.0, signs[2]])
+            return ap, lr, dv
+
+        return None
+
+    def get_ap_direction_at(self, time: int) -> np.ndarray:
+        """Return AP at a 1-based time; use +X only when orientation is unknown."""
+        axes = self.get_body_axes_at(time)
+        return axes[0] if axes is not None else np.array([1.0, 0.0, 0.0])
+
+    def suggest_division_names(
+        self,
+        parent: Nucleus,
+        first_pos: tuple[float, float, float],
+        second_pos: tuple[float, float, float],
+        time: int,
+    ) -> DivisionSuggestion:
+        """Use the same rule and body frame as automation for a manual division."""
+        rule_manager = RuleManager()
+        rule = rule_manager.get_rule(parent.effective_name)
+        # Founder daughters such as E/MS and C/P3 do not expose a directional
+        # suffix.  Report the dominant component of the actual rule vector,
+        # which is also what the classifier dots against.
+        dominant = int(np.argmax(np.abs(rule.axis_vector)))
+        axis_label = ("AP", "DV", "LR")[dominant]
+        first = Nucleus(
+            x=round(first_pos[0]), y=round(first_pos[1]), z=float(first_pos[2]), status=1,
+        )
+        second = Nucleus(
+            x=round(second_pos[0]), y=round(second_pos[1]), z=float(second_pos[2]), status=1,
+        )
+
+        caller = self.identity_assigner.division_caller if self.identity_assigner else None
+        source = "unknown"
+        if caller is not None:
+            if caller.is_v2:
+                source = "manual axes" if (self.auxinfo and self.auxinfo.is_manual) else "AuxInfo v2"
+            elif caller.is_lineage_mode:
+                source = "inferred body frame"
+            elif caller.is_founder_mode:
+                source = "four-cell frame"
+            else:
+                source = "AuxInfo v1"
+        else:
+            axes = self.get_body_axes_at(time)
+            if axes is not None:
+                ap, lr, dv = axes
+                caller = DivisionCaller(
+                    rule_manager=rule_manager,
+                    z_pix_res=self.z_pix_res,
+                    founder_ap=ap,
+                    founder_lr=lr,
+                    founder_dv=dv,
+                )
+                source = (
+                    "manual axes"
+                    if self.auxinfo is not None and self.auxinfo.is_manual
+                    else "body frame"
+                )
+
+        if caller is None:
+            return DivisionSuggestion(
+                first_name="",
+                second_name="",
+                confidence=0.0,
+                axis_label=axis_label,
+                source=source,
+                ambiguous=True,
+            )
+
+        before = len(caller.classifications)
+        name1, name2 = caller.assign_names(parent, first, second, timepoint=time - 1)
+        classification = caller.classifications[-1] if len(caller.classifications) > before else None
+        confidence = classification.confidence if classification is not None else 0.0
+        return DivisionSuggestion(
+            first_name=name1,
+            second_name=name2,
+            confidence=confidence,
+            axis_label=axis_label,
+            source=source,
+            ambiguous=not name1 or not name2 or confidence < 0.3,
+        )
+
+    def set_manual_body_axes(self, frame) -> None:
+        """Install a validated BodyAxisFrame for subsequent naming and saving."""
+        ap, lr = frame.to_auxinfo_vectors()
+        self.auxinfo = auxinfo_from_axes(
+            ap,
+            lr,
+            z_pix_res=self.z_pix_res,
+            reference_time=frame.reference_time or 0,
+            quality=frame.quality,
+            series_name=(self.config.config_file.stem if self.config else "manual"),
+        )
+        self.identity_assigner = None
 
     def _build_tree(self) -> None:
         """Build the lineage tree from the nuclei record."""

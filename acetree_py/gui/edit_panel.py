@@ -29,7 +29,6 @@ try:
     from qtpy.QtGui import QColor, QFont
     from qtpy.QtWidgets import (
         QButtonGroup,
-        QCheckBox,
         QColorDialog,
         QComboBox,
         QDialog,
@@ -38,6 +37,7 @@ try:
         QFormLayout,
         QGroupBox,
         QHBoxLayout,
+        QInputDialog,
         QLabel,
         QLineEdit,
         QListWidget,
@@ -46,7 +46,6 @@ try:
         QPushButton,
         QRadioButton,
         QSpinBox,
-        QTextEdit,
         QVBoxLayout,
         QWidget,
     )
@@ -78,6 +77,10 @@ class EditPanel(QWidget):  # type: ignore[misc]
 
         super().__init__(parent)
         self.app = app
+        # label -> (1-based time, 1-based nucleus index, display name)
+        self._axis_landmarks: dict[
+            str, tuple[int, int, str]
+        ] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -208,6 +211,12 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._btn_rename.setToolTip("Force a name on the selected cell")
         self._btn_rename.clicked.connect(self._on_rename_cell)
 
+        self._btn_auto_name = QPushButton("Use Automatic")
+        self._btn_auto_name.setToolTip(
+            "Remove the manual name override and rerun automatic naming"
+        )
+        self._btn_auto_name.clicked.connect(self._on_clear_name_override)
+
         self._btn_kill = QPushButton("Kill")
         self._btn_kill.setToolTip("Kill the selected cell (mark all nuclei dead)")
         self._btn_kill.clicked.connect(self._on_kill_cell)
@@ -217,6 +226,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._btn_resurrect.clicked.connect(self._on_resurrect)
 
         cell_layout.addWidget(self._btn_rename)
+        cell_layout.addWidget(self._btn_auto_name)
         cell_layout.addWidget(self._btn_kill)
         cell_layout.addWidget(self._btn_resurrect)
         layout.addWidget(cell_group)
@@ -245,6 +255,71 @@ class EditPanel(QWidget):  # type: ignore[misc]
         link_layout.addWidget(self._btn_relink)
         link_layout.addWidget(self._btn_track)
         layout.addWidget(link_group)
+
+        # ── Anatomical body orientation ──
+        axis_group = QGroupBox("Body Orientation")
+        axis_layout = QVBoxLayout(axis_group)
+        axis_layout.setSpacing(4)
+
+        axis_help = QLabel(
+            "At one timepoint, label Posterior + Anterior and either "
+            "Right + Left or Ventral + Dorsal."
+        )
+        axis_help.setWordWrap(True)
+        axis_layout.addWidget(axis_help)
+
+        axis_label_row = QHBoxLayout()
+        self._combo_axis_label = QComboBox()
+        for display, value in (
+            ("Posterior", "posterior"),
+            ("Anterior", "anterior"),
+            ("Ventral", "ventral"),
+            ("Dorsal", "dorsal"),
+            ("Right", "right"),
+            ("Left", "left"),
+        ):
+            self._combo_axis_label.addItem(display, userData=value)
+        self._combo_axis_label.setToolTip(
+            "Choose the anatomical endpoint represented by the selected nucleus"
+        )
+
+        self._btn_label_axis = QPushButton("Label Selected")
+        self._btn_label_axis.setToolTip(
+            "Use the selected nucleus as this anatomical landmark"
+        )
+        self._btn_label_axis.clicked.connect(self._on_label_body_axis)
+        axis_label_row.addWidget(self._combo_axis_label, stretch=1)
+        axis_label_row.addWidget(self._btn_label_axis)
+        axis_layout.addLayout(axis_label_row)
+
+        axis_action_row = QHBoxLayout()
+        self._btn_swap_axis = QPushButton("Swap Pair")
+        self._btn_swap_axis.setToolTip(
+            "Reverse the currently selected anatomical axis pair"
+        )
+        self._btn_swap_axis.clicked.connect(self._on_swap_body_axis_pair)
+
+        self._btn_apply_axes = QPushButton("Apply Axes")
+        self._btn_apply_axes.setToolTip(
+            "Validate and use these body axes for automatic daughter naming"
+        )
+        self._btn_apply_axes.clicked.connect(self._on_apply_body_axes)
+
+        self._btn_clear_axes = QPushButton("Clear Labels")
+        self._btn_clear_axes.setToolTip(
+            "Clear pending landmark labels; Undo removes an applied correction"
+        )
+        self._btn_clear_axes.clicked.connect(self._on_clear_body_axis_labels)
+
+        axis_action_row.addWidget(self._btn_swap_axis)
+        axis_action_row.addWidget(self._btn_apply_axes)
+        axis_action_row.addWidget(self._btn_clear_axes)
+        axis_layout.addLayout(axis_action_row)
+
+        self._axis_status_label = QLabel("No pending body-axis labels")
+        self._axis_status_label.setWordWrap(True)
+        axis_layout.addWidget(self._axis_status_label)
+        layout.addWidget(axis_group)
 
         # ── Status ──
         self._status_label = QLabel("Ready")
@@ -435,6 +510,144 @@ class EditPanel(QWidget):  # type: ignore[misc]
         vi = self.app._viewer_integration
         if vi is not None:
             self._chk_trails.setChecked(vi.trails_visible)
+
+        self._refresh_body_axis_status()
+
+    def _refresh_body_axis_status(self) -> None:
+        """Show pending landmarks and the active orientation provenance."""
+        pending = ", ".join(
+            f"{label.title()}={self._axis_landmarks[label][2]}"
+            for label in sorted(self._axis_landmarks)
+        ) or "none"
+        auxinfo = getattr(self.app.manager, "auxinfo", None)
+        if auxinfo is not None and getattr(auxinfo, "has_orientation", False):
+            if getattr(auxinfo, "is_manual", False):
+                quality = float(getattr(auxinfo, "orientation_quality", 0.0))
+                reference = int(getattr(auxinfo, "reference_time", 0))
+                active = f"manual ({quality:.0%} quality"
+                if reference:
+                    active += f", t={reference}"
+                active += ")"
+            else:
+                active = "acquisition metadata"
+        else:
+            active = "automatic / not established"
+        self._axis_status_label.setText(
+            f"Pending: {pending}. Active: {active}."
+        )
+
+    def _on_label_body_axis(self) -> None:
+        """Attach the chosen anatomical endpoint to the selected nucleus."""
+        selected = self._get_selected_nucleus()
+        if selected is None:
+            self._status_label.setText("Select a nucleus before labelling a body axis")
+            return
+
+        nucleus, time, _ = selected
+        existing_times = {item[0] for item in self._axis_landmarks.values()}
+        if existing_times and time not in existing_times:
+            self._status_label.setText(
+                "Body-axis landmarks must all come from one timepoint; "
+                "clear the pending labels to start again"
+            )
+            return
+
+        label = str(self._combo_axis_label.currentData())
+        display_name = nucleus.effective_name or f"idx={nucleus.index}"
+        self._axis_landmarks[label] = (
+            time,
+            nucleus.index,
+            display_name,
+        )
+        self._status_label.setText(
+            f"Labelled {display_name} as {label.title()} at t={time}"
+        )
+        self._refresh_body_axis_status()
+
+    def _on_swap_body_axis_pair(self) -> None:
+        """Reverse the pending endpoint pair selected in the combo box."""
+        selected = str(self._combo_axis_label.currentData())
+        opposite = {
+            "posterior": "anterior",
+            "anterior": "posterior",
+            "ventral": "dorsal",
+            "dorsal": "ventral",
+            "right": "left",
+            "left": "right",
+        }[selected]
+        if selected not in self._axis_landmarks or opposite not in self._axis_landmarks:
+            self._status_label.setText(
+                f"Label both {selected.title()} and {opposite.title()} before swapping"
+            )
+            return
+        self._axis_landmarks[selected], self._axis_landmarks[opposite] = (
+            self._axis_landmarks[opposite],
+            self._axis_landmarks[selected],
+        )
+        self._status_label.setText(
+            f"Swapped {selected.title()} and {opposite.title()} landmarks"
+        )
+        self._refresh_body_axis_status()
+
+    def _on_apply_body_axes(self) -> None:
+        """Validate pending landmarks and commit one undoable body frame."""
+        from ..editing.commands import SetBodyAxes
+        from ..naming.body_axes import (
+            BodyAxisFrame,
+            BodyAxisLandmark,
+            BodyAxisLabels,
+            BodyAxisValidationError,
+        )
+
+        if not self._axis_landmarks:
+            self._status_label.setText("No body-axis landmarks have been labelled")
+            return
+
+        times = {item[0] for item in self._axis_landmarks.values()}
+        if len(times) != 1:
+            self._status_label.setText(
+                "Body-axis landmarks must all come from one timepoint"
+            )
+            return
+        reference_time = next(iter(times))
+        try:
+            landmarks = []
+            for label, (time, index, _) in self._axis_landmarks.items():
+                nuclei = self.app.manager.nuclei_at(time)
+                if not 0 < index <= len(nuclei) or not nuclei[index - 1].is_alive:
+                    raise BodyAxisValidationError(
+                        f"The {label} landmark nucleus is no longer available"
+                    )
+                nucleus = nuclei[index - 1]
+                landmarks.append(BodyAxisLandmark(
+                    label,
+                    (float(nucleus.x), float(nucleus.y), float(nucleus.z)),
+                ))
+            labels = BodyAxisLabels.from_landmarks(landmarks)
+            frame = BodyAxisFrame.from_landmarks(
+                labels,
+                z_pix_res=self.app.manager.z_pix_res,
+                provenance="manual_landmarks",
+                reference_time=reference_time,
+            )
+        except (BodyAxisValidationError, ValueError) as error:
+            self._status_label.setText(f"Cannot apply body axes: {error}")
+            return
+
+        command = SetBodyAxes(self.app.manager, frame)
+        self.app.edit_history.do(command)
+        self._status_label.setText(
+            f"Applied manual body axes from t={reference_time} "
+            f"({frame.quality:.0%} geometry quality). "
+            "Automatic names were recalculated; verify low-confidence divisions."
+        )
+        self.refresh()
+
+    def _on_clear_body_axis_labels(self) -> None:
+        """Clear pending labels without changing the committed orientation."""
+        self._axis_landmarks.clear()
+        self._status_label.setText("Cleared pending body-axis landmarks")
+        self._refresh_body_axis_status()
 
     # ── Color mode handlers ──────────────────────────────────────
 
@@ -644,18 +857,37 @@ class EditPanel(QWidget):  # type: ignore[misc]
         Returns:
             Tuple of (nucleus, time, index) or None if no selection.
         """
+        getter = getattr(self.app, "get_selected_nucleus", None)
+        if getter is not None:
+            return getter()
+
+        # Compatibility for lightweight third-party/mock app objects.  The
+        # real AceTreeApp always uses the stable selection-anchor path above.
         if not self.app.current_cell_name:
             return None
-
         cell = self.app.manager.get_cell(self.app.current_cell_name)
         if cell is None:
             return None
-
         nuc = cell.get_nucleus_at(self.app.current_time)
-        if nuc is None:
-            return None
+        return (nuc, self.app.current_time, nuc.index) if nuc is not None else None
 
-        return nuc, self.app.current_time, nuc.index
+    def _get_selected_cell(self):
+        """Resolve the selected cell from its physical nucleus anchor."""
+        getter = getattr(self.app, "get_selected_cell", None)
+        if getter is not None:
+            return getter()
+
+        # Compatibility for lightweight third-party/mock app objects.  The
+        # real AceTreeApp path above never resolves an anchored selection by
+        # its potentially duplicated display name.
+        selected = self._get_selected_nucleus()
+        resolver = getattr(self.app, "_cell_for_nucleus", None)
+        if selected is not None and resolver is not None:
+            nuc, time, _ = selected
+            return resolver(time, nuc)
+        if not self.app.current_cell_name:
+            return None
+        return self.app.manager.get_cell(self.app.current_cell_name)
 
     def _show_validation_errors(self, errors: list[str]) -> None:
         """Show validation errors in a message box."""
@@ -674,7 +906,8 @@ class EditPanel(QWidget):  # type: ignore[misc]
                 self._btn_track.setChecked(False)
 
             self.app.enter_add_mode()
-            parent = self.app.current_cell_name
+            selected_cell = self._get_selected_cell()
+            parent = selected_cell.name if selected_cell is not None else None
             if parent:
                 self._status_label.setText(
                     f"ADD MODE: Left-click in viewer to place nucleus.\n"
@@ -791,6 +1024,11 @@ class EditPanel(QWidget):  # type: ignore[misc]
         if not new_name:
             self._status_label.setText("Name cannot be empty")
             return
+        if new_name == nuc.effective_name:
+            # Pressing OK on a pre-filled automatic name must be a true no-op,
+            # not an implicit conversion to assigned_id/manual state.
+            self._status_label.setText("No change to cell name")
+            return
 
         from ..editing.commands import RenameCell, SwapCellNames
         from ..editing.validators import validate_rename_cell
@@ -831,13 +1069,32 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._status_label.setText(f"Done: {cmd.description}")
         self.refresh()
 
+    def _on_clear_name_override(self) -> None:
+        """Release the selected cell's forced name back to automatic naming."""
+        sel = self._get_selected_nucleus()
+        if sel is None:
+            self._status_label.setText("No nucleus selected")
+            return
+
+        nuc, time, index = sel
+        if not nuc.assigned_id:
+            self._status_label.setText("Cell name is already automatic")
+            return
+
+        from ..editing.commands import ClearNameOverride
+
+        cmd = ClearNameOverride(time=time, index=index)
+        self.app.edit_history.do(cmd)
+        self._status_label.setText(f"Done: {cmd.description}")
+        self.refresh()
+
     def _on_kill_cell(self) -> None:
         """Open the Kill Cell dialog."""
         if not self.app.current_cell_name:
             self._status_label.setText("No cell selected")
             return
 
-        cell = self.app.manager.get_cell(self.app.current_cell_name)
+        cell = self._get_selected_cell()
         if cell is None:
             self._status_label.setText("Cell not found in lineage")
             return
@@ -845,6 +1102,17 @@ class EditPanel(QWidget):  # type: ignore[misc]
         dialog = KillCellDialog(cell.name, cell.start_time, cell.end_time, parent=self)
         if dialog.exec_() == QDialog.Accepted:
             values = dialog.get_values()
+            anchor_nuc = cell.get_nucleus_at(values["start_time"])
+            if (
+                anchor_nuc is None
+                or not anchor_nuc.is_alive
+                or anchor_nuc.effective_name != values["cell_name"]
+            ):
+                self._show_validation_errors([
+                    "The selected cell is not alive at the requested start time."
+                ])
+                return
+
             from ..editing.validators import validate_kill_cell
 
             errors = validate_kill_cell(
@@ -862,20 +1130,80 @@ class EditPanel(QWidget):  # type: ignore[misc]
                 cell_name=values["cell_name"],
                 start_time=values["start_time"],
                 end_time=values["end_time"],
+                anchor_index=anchor_nuc.index,
             )
             self.app.edit_history.do(cmd)
             self._status_label.setText(f"Done: {cmd.description}")
             self.refresh()
 
     def _on_resurrect(self) -> None:
-        """Resurrect the currently selected (dead) nucleus."""
+        """Choose and resurrect a dead nucleus at the current timepoint.
+
+        A live selection is never treated as a resurrection target.  This is
+        important because the lineage view normally selects only live nuclei;
+        the chooser makes the otherwise-hidden dead records discoverable.
+        """
         sel = self._get_selected_nucleus()
-        if sel is None:
-            # Try to find a dead nucleus at the current position
-            self._status_label.setText("No nucleus selected")
+
+        if sel is not None and not sel[0].is_alive:
+            nuc, time, index = sel
+        else:
+            time = self.app.current_time
+            manager = self.app.manager
+            if hasattr(manager, "nuclei_at"):
+                nuclei = list(manager.nuclei_at(time))
+            else:
+                record = getattr(manager, "nuclei_record", [])
+                nuclei = list(record[time - 1]) if 0 < time <= len(record) else []
+            dead = [candidate for candidate in nuclei if not candidate.is_alive]
+
+            if not dead:
+                if sel is not None:
+                    self._status_label.setText(
+                        "Selected nucleus is alive; no dead nuclei exist at this time"
+                    )
+                else:
+                    self._status_label.setText("No dead nuclei exist at this time")
+                return
+
+            if len(dead) == 1:
+                nuc = dead[0]
+            else:
+                labels: list[str] = []
+                for candidate in dead:
+                    former_name = candidate.effective_name
+                    name_part = f" — {former_name}" if former_name else ""
+                    labels.append(
+                        f"idx={candidate.index}{name_part}  "
+                        f"({candidate.x:.1f}, {candidate.y:.1f}, z={candidate.z:.1f})"
+                    )
+                choice, accepted = QInputDialog.getItem(
+                    self,
+                    "Choose Dead Nucleus",
+                    f"Dead nuclei at t={time}:",
+                    labels,
+                    0,
+                    False,
+                )
+                if not accepted:
+                    self._status_label.setText("Resurrection cancelled")
+                    return
+                nuc = dead[labels.index(choice)]
+            index = nuc.index
+
+            # Keep subsequent edits and the viewer anchored to the record the
+            # user chose, including when it had no usable lineage name.
+            if hasattr(self.app, "_set_selection_from_nucleus"):
+                self.app._set_selection_from_nucleus(time, nuc)
+            else:
+                self.app.current_cell_name = nuc.effective_name or f"idx={time}:{index}"
+
+        # Guard again at the command boundary in case a third-party app's
+        # selection helper returned a stale/live object.
+        if nuc.is_alive:
+            self._status_label.setText("Selected nucleus is already alive")
             return
 
-        nuc, time, index = sel
         dialog = ResurrectDialog(nuc, time, parent=self)
         if dialog.exec_() == QDialog.Accepted:
             identity = dialog.get_identity()
@@ -908,6 +1236,12 @@ class EditPanel(QWidget):  # type: ignore[misc]
 
         self.app.enter_relink_pick_mode(self._on_relink_target_picked)
 
+    def _on_relink_cancelled(self) -> None:
+        """Restore relink controls after Escape or another mode takes over."""
+        self._relink_source = None
+        self._btn_relink.setEnabled(True)
+        self._status_label.setText("Relink cancelled")
+
     def _on_relink_target_picked(self, target_time: int, target_nuc) -> None:
         """Callback when the user picks a relink target in the viewer."""
         self._btn_relink.setEnabled(True)
@@ -939,11 +1273,9 @@ class EditPanel(QWidget):  # type: ignore[misc]
         if src_time < target_time:
             early_time, early_index, early_name = src_time, src_index, src_name
             late_time, late_index, late_name = target_time, target_index, tgt_name
-            early_nuc, late_nuc = src_nuc, target_nuc
         else:
             early_time, early_index, early_name = target_time, target_index, tgt_name
             late_time, late_index, late_name = src_time, src_index, src_name
-            early_nuc, late_nuc = target_nuc, src_nuc
 
         time_gap = late_time - early_time
 
@@ -1023,15 +1355,13 @@ class EditPanel(QWidget):  # type: ignore[misc]
     def _on_track(self, checked: bool) -> None:
         """Toggle click-to-place tracking mode."""
         if checked:
-            parent_name = self.app.current_cell_name or None
+            selected_cell = self._get_selected_cell()
+            parent_name = selected_cell.name if selected_cell is not None else None
 
-            if parent_name:
-                cell = self.app.manager.get_cell(parent_name)
-                if cell is None:
-                    self._status_label.setText(
-                        f"Cell '{parent_name}' not in lineage tree — entering root mode"
-                    )
-                    parent_name = None
+            if self.app.current_cell_name and selected_cell is None:
+                self._status_label.setText(
+                    "Selected cell is not in the lineage tree — entering root mode"
+                )
 
             if parent_name:
                 self._status_label.setText(

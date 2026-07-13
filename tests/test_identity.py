@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
-import pytest
 
 from acetree_py.core.nucleus import NILLI, Nucleus
 from acetree_py.io.auxinfo import AuxInfo
@@ -97,6 +95,78 @@ class TestIdentityAssigner:
         assert nuclei_record[2][0].identity == "AB"
         assert nuclei_record[2][1].identity == "P1"
 
+    def test_partial_dataset_rebuild_preserves_existing_names(self):
+        nuclei_record = _make_simple_lineage()
+        assigner = IdentityAssigner(
+            nuclei_record=nuclei_record,
+            naming_method=NEWCANONICAL,
+        )
+
+        assigner.assign_identities()
+
+        assert nuclei_record[0][0].identity == "P0"
+        assert nuclei_record[1][0].identity == "AB"
+        assert nuclei_record[1][1].identity == "P1"
+        assert nuclei_record[2][0].identity == "AB"
+        assert nuclei_record[2][1].identity == "P1"
+
+    def test_founders_without_full_frame_do_not_use_lab_space_for_daughters(
+        self, monkeypatch,
+    ):
+        import numpy as np
+        import acetree_py.naming.identity as identity_module
+        from acetree_py.naming.founder_id import FounderAssignment
+
+        # Four trusted topology anchors are deliberately collinear, so AP is
+        # available but DV/LR are anatomically unknowable.
+        record = [[
+            _make_nuc(1, 0, 0, 0, succ1=1),
+            _make_nuc(2, 10, 0, 0, succ1=2),
+            _make_nuc(3, 20, 0, 0, succ1=3, succ2=4),
+            _make_nuc(4, 30, 0, 0, succ1=5),
+        ], [
+            _make_nuc(1, 0, 0, 0, pred=1),
+            _make_nuc(2, 10, 0, 0, pred=2),
+            _make_nuc(3, 18, 0, 0, identity="trusted-loaded-E", pred=3),
+            _make_nuc(4, 22, 0, 0, pred=3),
+            _make_nuc(5, 30, 0, 0, pred=4),
+        ]]
+
+        def fake_identify(nuclei_record, **_kwargs):
+            for nuc, name in zip(
+                nuclei_record[0], ("ABa", "ABp", "EMS", "P2"),
+            ):
+                nuc.identity = name
+            return FounderAssignment(
+                success=True,
+                confidence=0.5,
+                four_cell_time=0,
+                aba_idx=0,
+                abp_idx=1,
+                ems_idx=2,
+                p2_idx=3,
+                ap_vector=np.array([-1.0, 0.0, 0.0]),
+                lr_vector=None,
+                dv_vector=None,
+                timing_confidence=1.0,
+                size_confidence=1.0,
+                axis_confidence=0.0,
+            )
+
+        monkeypatch.setattr(identity_module, "identify_founders", fake_identify)
+        assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+
+        assigner.assign_identities()
+
+        assert assigner.division_caller is None
+        assert [n.effective_name for n in record[0]] == [
+            "ABa", "ABp", "EMS", "P2",
+        ]
+        assert record[1][2].effective_name == "trusted-loaded-E"
+        assert record[1][3].effective_name.startswith("Nuc")
+        assert not record[1][3].effective_name.startswith(("E", "MS"))
+        assert any("no complete AP/DV/LR frame" in w for w in assigner.founder_assignment.warnings)
+
     def test_preassigned_id_honored(self):
         """Forced names should override DivisionCaller assignments."""
         from acetree_py.naming.identity import _use_preassigned_id
@@ -109,8 +179,8 @@ class TestIdentityAssigner:
         assert dau1.identity == "ForcedName"
         assert dau2.identity == "ABp"
 
-    def test_preassigned_id_collision_resolved(self):
-        """If both daughters get the same name after forcing, append X."""
+    def test_duplicate_forced_names_remain_visible_for_validation(self):
+        """Automation must not hide an explicit conflict with an identity-only alias."""
         from acetree_py.naming.identity import _use_preassigned_id
 
         dau1 = _make_nuc(1, 280, 240, 14.0, identity="SameName", assigned_id="SameName")
@@ -118,8 +188,46 @@ class TestIdentityAssigner:
 
         _use_preassigned_id(dau1, dau2)
 
-        assert dau1.identity == "SameName"
-        assert dau2.identity == "SameNamX"
+        assert dau1.effective_name == "SameName"
+        assert dau2.effective_name == "SameName"
+
+    def test_one_forced_daughter_can_take_sisters_automatic_name(self):
+        from acetree_py.naming.identity import _use_preassigned_id
+
+        dau1 = _make_nuc(1, 280, 240, 14.0, identity="ABa", assigned_id="ABp")
+        dau2 = _make_nuc(2, 320, 260, 16.0, identity="ABp")
+
+        _use_preassigned_id(dau1, dau2)
+
+        assert dau1.effective_name == "ABp"
+        assert dau2.effective_name == "ABa"
+
+    def test_forced_name_propagation_stops_at_dead_or_nonreciprocal_link(self):
+        record = [
+            [_make_nuc(1, 0, 0, 0, succ1=1, assigned_id="curated")],
+            [_make_nuc(1, 0, 0, 0, pred=2, succ1=1)],
+            [_make_nuc(1, 0, 0, 0, pred=1, status=-1)],
+        ]
+        assigner = IdentityAssigner(record, naming_method=MANUAL)
+
+        assigner.assign_identities()
+
+        assert record[0][0].assigned_id == "curated"
+        assert record[1][0].assigned_id == ""
+        assert record[2][0].assigned_id == ""
+
+    def test_conflicting_forced_anchors_are_not_overwritten(self):
+        record = [
+            [_make_nuc(1, 0, 0, 0, succ1=1, assigned_id="first")],
+            [_make_nuc(1, 0, 0, 0, pred=1, succ1=1)],
+            [_make_nuc(1, 0, 0, 0, pred=1, assigned_id="second")],
+        ]
+        assigner = IdentityAssigner(record, naming_method=MANUAL)
+
+        assigner.assign_identities()
+
+        assert record[0][0].assigned_id == "first"
+        assert record[2][0].assigned_id == "second"
 
     def test_orientation_string_computation(self):
         """Test _compute_orientation helper."""

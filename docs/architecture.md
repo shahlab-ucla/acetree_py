@@ -1,5 +1,7 @@
 # AceTree-Py Architecture Reference
 
+The normative cross-module naming and edit invariants are collected in [Naming and Manual-Curation Workflows](naming_workflows.md).
+
 **Version 0.1.0** | Python reimplementation of AceTree for *C. elegans* embryogenesis
 
 ---
@@ -27,10 +29,11 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     canonical_transform.py     # Rotation to canonical frame (Wahba solver)
     rules.py                   # Rule, RuleManager (naming rules)
     sulston_names.py           # Sulston conventions + letter maps
-    lineage_axes.py            # Per-timepoint body axis estimation from lineage centroids + LR quality metric
+    body_axes.py               # Anatomical landmarks and validated body-axis frames
+    lineage_axes.py            # Per-timepoint body axes + secondary-axis quality
     validation.py              # Post-naming validation
   editing/                     # Command-pattern edit system — no GUI deps
-    commands.py                # EditCommand ABC + 10 concrete commands
+    commands.py                # Reversible edit commands and composites
     history.py                 # EditHistory (undo/redo stacks)
     validators.py              # Pre-edit validation functions
   io/                          # File I/O — no GUI dependencies
@@ -96,8 +99,8 @@ The fundamental record. Represents one detected nucleus at one timepoint.
 | `x`, `y`       | `int`        | Pixel coordinates                                 |
 | `z`            | `float`      | Z-plane (float for sub-plane precision)           |
 | `size`         | `int`        | Nucleus diameter in pixels                        |
-| `identity`     | `str`        | Auto-assigned Sulston name (e.g., `"ABala"`)      |
-| `assigned_id`  | `str`        | Manually forced name (survives re-naming)         |
+| `identity`     | `str`        | Current automatic/computed Sulston name (e.g., `"ABala"`) |
+| `assigned_id`  | `str`        | Explicit user override (survives re-naming)       |
 | `status`       | `int`        | ≥1 = alive, -1 = dead/invalid                    |
 | `predecessor`  | `int`        | 1-based index into previous timepoint (NILLI = -1)|
 | `successor1`   | `int`        | 1-based index into next timepoint                 |
@@ -111,6 +114,8 @@ The fundamental record. Represents one detected nucleus at one timepoint.
 - `is_alive` → `status >= 1`
 - `is_dividing` → `successor2 != NILLI`
 - `effective_name` → `assigned_id if assigned_id else identity`
+
+`effective_name` is the read boundary for UI labels, cell lookup, edit targeting, validation, and parent-rule selection. `identity` may be recalculated; `assigned_id` changes only through an explicit editing command. Automatic suggestions are never promoted to forced state.
 
 **Serialization:** CSV lines in ZIP entries, with both old-format (Java legacy) and new-format parsers.
 
@@ -201,7 +206,7 @@ The `<image>` element supports three shapes:
 - `<image numChannels="N" channel1="..." channel2="..."/>` — one directory per channel; routed to `MultiChannelFolderProvider`.
 - `<image file="..." numChannels="N" channelOrder="CZ|ZC"/>` — single TIFF per timepoint whose pages are interleaved multichannel. Parsed into `config.stack_interleaved=True` and `config.num_channels=N`; routed to `StackTiffProvider` with native de-interleaving (see §3.3). `channelOrder` accepts aliases (`interleaved` → `CZ`, `planar` → `ZC`); unknown values log a warning and fall back to `CZ`.
 
-`NamingMethod` enum: `STANDARD=2`, `MANUAL=2` (skip naming), `NEWCANONICAL=3`.
+`NamingMethod` enum: `STANDARD=2`, `MANUAL=2`, `NEWCANONICAL=3`. Manual mode normalizes/propagates explicit overrides and skips automatic founder/division assignment; it does not bypass forced-name consistency checks.
 
 ### 3.2 Nuclei Reader/Writer
 
@@ -214,7 +219,9 @@ nuclei/
 ```
 
 - `read_nuclei_zip(path)` → `list[list[Nucleus]]`
-- `write_nuclei_zip(nuclei_record, path, start_time=1)` — writes new-format CSV
+- `write_nuclei_zip(nuclei_record, path, start_time=1)` — writes new-format CSV to a temporary archive in the destination directory, then atomically replaces the destination. Atomic replacements preserve an existing destination's file mode; a new file uses the normal process umask rather than inheriting the private `0600` mode of its staging file.
+
+When a manager contains manual body axes, Save also writes the matching AuxInfo v2 sidecar. The archive and sidecar are fully staged before either visible file changes. The sidecar is committed first with a same-directory rollback copy, and the archive is committed last; if either commit raises, the prior archive/sidecar set is restored. Undoing a manual frame removes only an AceTree-created sidecar under the same transaction—acquisition-provided sidecars are retained. Save As updates the config's nuclei path only after the data save succeeds, then atomically rewrites the source XML so reopening that config follows the new ZIP. If XML persistence fails, the in-memory target and savepoint remain unchanged (the newly written ZIP is retained as a standalone safety copy).
 
 ### 3.3 Image Providers (`io/image_provider.py`)
 
@@ -249,7 +256,11 @@ The `create_image_provider_from_config()` factory routes `<image file="..." numC
 Embryo orientation metadata.
 
 - **v1** (`_AuxInfo.csv`): 3-char axis string (e.g., `"ADL"`) + rotation angle
-- **v2** (`_AuxInfo_v2.csv`): AP and LR orientation vectors (3D)
+- **v2** (`_AuxInfo_v2.csv`): AP and LR orientation vectors (3D), plus orientation source, quality, and reference time
+
+`BodyAxisFrame` (`naming/body_axes.py`) is the validated in-memory representation. AP points posterior→anterior, DV ventral→dorsal, and LR right→left; `DV = AP × LR`. Frames can be built from AuxInfo vectors or from manual anatomical endpoints. All z coordinates are multiplied by `z_pix_res` before vector construction. Manual frames are persisted as v2 sidecars.
+
+AuxInfo selection is based on usability, not merely file presence. A v2 record must contain finite, non-zero, non-parallel AP/LR vectors; otherwise a valid supported v1 orientation is selected. If neither file supplies an orientation, readable shape and resolution measurements remain available, but the record is not allowed to claim a body frame.
 
 ---
 
@@ -260,11 +271,11 @@ Embryo orientation metadata.
 `IdentityAssigner.assign_identities()`:
 
 1. Clear non-forced names (cells with `assigned_id` are preserved).
-2. **Propagate forced names** (`_propagate_assigned_ids()`): extend each `assigned_id` forward through `successor1` chains and backward through `predecessor` chains, covering the cell's entire lifetime. Stops at division boundaries.
-3. Build `CanonicalTransform` (if v2 AuxInfo available, used for cross-validation only).
+2. **Propagate forced names** (`_propagate_assigned_ids()`): extend each `assigned_id` only through live reciprocal one-successor continuations. Stop at divisions, dead/missing links, non-reciprocal links, or a different forced identity.
+3. Select orientation in precedence order: valid v2 (manual or imported), supported v1, per-timepoint lineage geometry, then static founder geometry.
 4. **Topology-based identification** (`identify_founders()`).
 5. If topology fails (confidence < 0.3): warn and assign generic names. Legacy diamond-pattern identification available via `legacy_mode=True`.
-6. Set up `DivisionCaller` with per-timepoint lineage centroid axes and seed axes from 4-cell midpoint.
+6. Set up `DivisionCaller` with the selected orientation source and deterministic chronological axis caching.
 7. **Forward pass**: apply canonical rules from 4-cell stage onward (single-frame classification with quality-aware axis smoothing; multi-frame averaging disabled in lineage mode).
 8. Assign generic `Nuc_t_z_x_y` names to remaining unnamed cells.
 
@@ -282,7 +293,7 @@ Topology-based identification of ABa, ABp, EMS, P2 at the 4-cell stage:
    - **EMS vs P2**: Primary signal is forward division timing (EMS divides before P2); secondary signal is nucleus size (EMS is typically larger).
    - **ABa vs ABp**: Projection onto the AP axis vector, averaged over the 4-cell window for robustness (more anterior = ABa). Falls back to PC1 of 4-cell point cloud when no 2-cell stage is available.
 5. **Back-trace**: trace predecessors to name AB, P1, P0 and their continuation cells.
-6. **Axis derivation**: compute AP, DV, LR vectors from the 4 cell positions.
+6. **Axis derivation**: AP is P2→ABa; the DV seed is EMS→ABp projected perpendicular to AP; LR completes the right-handed frame.
 7. **Confidence**: composite of timing, size, and axis confidence with per-component breakdown.
 
 ### 4.3 Division Caller (`naming/division_caller.py`)
@@ -296,13 +307,16 @@ Classifies each cell division to determine daughter names:
 5. Angle between division vector and rule axis maps to a confidence score.
 6. If confidence < 0.3, **deferred majority-vote evaluation**: follow daughters forward up to 8 frames, re-classify at each, and use majority vote.
 
-Four coordinate transform modes (selected automatically based on available data):
-- **v2**: Full `CanonicalTransform` rotation (Wahba's problem solver). Used when AuxInfo v2 is available.
-- **v1**: Sign-flip matrix + 2D rotation by angle. Used when AuxInfo v1 is available.
-- **Lineage centroid** (primary no-AuxInfo mode): Per-timepoint axes derived from ABa/ABp/EMS/P2 lineage centroids via `lineage_axes.py`. Rotation-invariant — automatically handles embryo rotations during imaging. Includes LR quality metric, quality-aware sign correction with gap limits, and temporal LR smoothing for degenerate frames.
-- **Static founder** (legacy fallback): Project onto axes derived once from the 4-cell stage positions. Used only when lineage centroid axes are unavailable at a given timepoint.
+Four coordinate transform modes are selected by explicit precedence:
+
+- **v2**: Full `CanonicalTransform` rotation, including manual landmark frames. A valid explicit v2 frame wins over inferred geometry.
+- **v1**: Sign-flip matrix plus 2D rotation for supported anatomical strings (`ADL`, `AVR`, `PDR`, `PVL`). Placeholders such as `XXX` are not orientation.
+- **Lineage centroid**: Per-timepoint AP and DV estimates from ABa/P2 and ABp/EMS lineage centroids via `lineage_axes.py`, with quality-aware continuity.
+- **Static founder**: The same construction at the four-cell midpoint, used when current lineage axes are unavailable.
 
 Multi-frame averaging is disabled in lineage centroid mode (per-timepoint axes make cross-frame averaging unreliable). Seed axes from the 4-cell midpoint provide initial sign anchoring.
+
+Signed LR cannot be derived from the ABa–ABp pair alone at the four-cell stage. A trusted secondary orientation, manual cue, or later handedness is required for a biologically grounded sign. Therefore every division suggestion carries confidence, axis label, and provenance; weak geometry remains correctable rather than being converted into a forced name.
 
 ### 4.4 Rules (`naming/rules.py`)
 
@@ -328,7 +342,7 @@ Each `Rule` contains: `parent`, `sulston_letter`, `daughter1`, `daughter2`, `axi
 
 Abstract base: `EditCommand` with `execute()`, `undo()`, `description`, `structural`.
 
-The `structural` property (default `True`) indicates whether the edit changes lineage structure (links, identity, etc.). Non-structural edits like `MoveNucleus` (`structural = False`) skip the expensive naming + tree rebuild in the edit callback and only refresh the display. This prevents cell deselection when nudging positions.
+The `structural` property (default `True`) indicates whether an edit can affect lineage or naming. `MoveNucleus` is structural because division classification is geometry-dependent. Selection stability is provided by the app's `(time,index)` anchor rather than by skipping reprocessing.
 
 | Command                    | Operation                                 | State Captured                        |
 |---------------------------|-------------------------------------------|---------------------------------------|
@@ -336,11 +350,15 @@ The `structural` property (default `True`) indicates whether the edit changes li
 | `RemoveNucleus`            | Kill nucleus (status=-1)                  | Old status, identity, assigned_id     |
 | `MoveNucleus`              | Change position/size                      | Old x, y, z, size                     |
 | `RenameCell`               | Set identity + assigned_id across the cell's entire continuation chain (atomic, cell-scoped) | List of (time, idx, old identity, old assigned_id) tuples for every nucleus in the chain |
+| `ClearNameOverride`        | Return a cell continuation to automatic naming | Old identity and assigned_id per nucleus |
+| `SetCellNameState`         | Set automatic/forced state over one anchored continuation component | Old identity and assigned_id per nucleus |
 | `SwapCellNames`            | Atomically swap the forced names of two cells (writes B's name onto all of A's chain and vice versa) | Two lists of (time, idx, old identity, old assigned_id) tuples, one per chain |
 | `RelinkNucleus`            | Change predecessor link                   | Old/new pred, both parents' successors|
 | `KillCell`                 | Kill all nuclei of a named cell           | List of (time, idx, old state) tuples |
 | `ResurrectCell`            | Restore dead nucleus                      | Old status, identity, assigned_id     |
 | `RelinkWithInterpolation`  | Link with interpolated intermediates      | Added nuclei list, old/new links      |
+| `SetBodyAxes`              | Install manual orientation and invalidate naming | Previous AuxInfo/frame state |
+| `CompositeCommand`         | Group one user gesture into one history entry | Ordered child commands |
 
 ### 5.2 Undo/Redo (`editing/history.py`)
 
@@ -350,9 +368,13 @@ The `structural` property (default `True`) indicates whether the edit changes li
 
 Flow: `do(cmd)` → execute + push undo + clear redo. `undo()` → pop undo + reverse + push redo. `redo()` → pop redo + re-execute + push undo. New edits always clear the redo stack. Max 1000 commands (configurable).
 
+One completed GUI gesture produces one command. A composite executes children in order and undoes them in reverse order, so add/track/relink interpolation cannot be left half-committed by a single Undo.
+
+Dirty state is savepoint-based, not stack-length-based. Save and Save As mark the current state only after all files are written successfully. Undo/redo can return exactly to that state; editing after Undo creates a distinct branch. Save As also updates `config.zip_file`, making the new archive the target of subsequent Save operations.
+
 ### 5.3 Validators (`editing/validators.py`)
 
-Pre-edit validation returns `list[str]` error messages (empty = valid). Checks index ranges, alive status, successor capacity (max 2 children), and time ordering.
+Pre-edit validation returns `list[str]` error messages (empty = valid). Checks index ranges, alive status, reciprocal continuity, successor capacity (max 2 children), time ordering, and forced-name conflicts. Names are trimmed and reject commas, CR/LF, and control characters before serialization.
 
 ---
 
@@ -368,7 +390,7 @@ Main coordinator. Owns the napari `Viewer`, `NucleiManager`, `EditHistory`, and 
 - **Editing mode** (default): hardcoded status palette — white=selected, purple=named, orange=unnamed, gray=none.
 - **Visualization mode**: rule-based coloring via `ColorRuleEngine`. Presets include lineage-depth (rainbow) and expression (viridis colormap). Users can define custom rules.
 
-**Z-plane deselect:** Manually changing z-plane deselects the active cell (the user is exploring, not tracking). Time navigation continues to follow the tracked cell's centroid.
+**Stable selection:** The app stores `_selection_anchor = (time,index)` and re-resolves the selected nucleus after naming/tree rebuilds. Changing z-plane does not clear selection; explicit Deselect does. Any index fallback is time-qualified so duplicate per-frame indices cannot select the wrong nucleus.
 
 **Widget layout:**
 ```
@@ -392,7 +414,7 @@ Napari's default layer list and layer controls panels are hidden on startup to s
 | Key            | Action                   |
 |----------------|--------------------------|
 | `Right`/`Left` | Next/previous timepoint  |
-| `Up`/`Down`    | Next/previous z-plane (deselects active cell) |
+| `Up`/`Down`    | Next/previous z-plane      |
 | `Ctrl+S`       | Save                     |
 | `Ctrl+Shift+S` | Save As                  |
 | `Ctrl+Z`       | Undo                     |
@@ -462,7 +484,7 @@ Pure computational layout engine (no Qt dependency):
 | `PlayerControls`    | Time/plane navigation, play/pause, labels toggle, deselect, 3D mode, 3D window |
 | `CellInfoPanel`     | Cell info builder (used by hover tooltip)    |
 | `ContrastTools`     | Per-channel contrast sliders with visibility toggles, auto-contrast |
-| `EditPanel`         | Color mode toggle, edit buttons, D-pad move (popup), relink, add/track, trails, screenshot/record, edit history (popup) |
+| `EditPanel`         | Color mode toggle, edit buttons, body-axis landmarks, D-pad move (popup), relink, add/track, trails, screenshot/record, edit history (popup) |
 | `ColorRulesDialog`  | Rule list editor popup: add/edit/delete/reorder rules, "All other cells" default color, apply to engine |
 | `_RuleEditorDialog` | Single rule editor: criterion, pattern, color mode, color picker, colormap settings, match mode help |
 
@@ -476,8 +498,8 @@ Pure computational layout engine (no Qt dependency):
 
 **Add mode** — Click-to-place nucleus with automatic predecessor linking:
 1. (Optional) Select an existing cell. Click **Add** (toggle).
-2. **Left-click** in viewer to place. Inherits identity, diameter, and predecessor from selected cell.
-3. Gap > 1 triggers automatic interpolation.
+2. **Left-click** in viewer to place. Inherits diameter and predecessor. Automatic identity stays automatic; only an existing parent `assigned_id` propagates as forced state.
+3. Gap > 1 triggers automatic interpolation. Placement plus interpolation is one `CompositeCommand`.
 
 **Track mode** — Continuous click-to-place across timepoints:
 1. Select parent cell. Click **Track** (toggle).
@@ -485,6 +507,10 @@ Pure computational layout engine (no Qt dependency):
 3. Mode stays active until Esc or re-click Track.
 
 All modes are mutually exclusive and can be cancelled with **Escape**.
+
+**Division preview** — A second-daughter placement calls `NucleiManager.suggest_division_names()` with the actual parent and raw daughter coordinates. The manager applies physical z scaling and the parent's rule, then returns `first_name`, `second_name`, `confidence`, `axis_label`, `source`, and ambiguity. Suggestions populate `identity` only. This prevents manual placement from hard-coding `a/p` or freezing a prediction in `assigned_id`.
+
+**Body orientation** — The panel accumulates anatomical endpoint labels at one reference frame: posterior+anterior and either ventral+dorsal or right+left. `BodyAxisFrame.from_landmarks()` validates and constructs the third axis; `SetBodyAxes` applies it as one undoable command. Re-labeling/swapping an endpoint pair is the correction path. Manual frame source and quality are shown and persisted in AuxInfo v2.
 
 ### 6.7 Color Rule Engine (`gui/color_rules.py`)
 
