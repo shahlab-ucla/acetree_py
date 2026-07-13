@@ -358,10 +358,19 @@ class TestGetApDirectionAt:
         from acetree_py.core.nuclei_manager import NucleiManager
         from acetree_py.io.auxinfo import AuxInfo
         mgr = NucleiManager()
-        mgr.auxinfo = AuxInfo(version=1, data={"axis": "PDL"})
+        mgr.auxinfo = AuxInfo(version=1, data={"axis": "PDR"})
         mgr.identity_assigner = None
         ap = mgr.get_ap_direction_at(1)
         np.testing.assert_allclose(ap, [-1.0, 0.0, 0.0])
+
+    def test_invalid_handedness_code_is_not_treated_as_orientation(self):
+        import numpy as np
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.io.auxinfo import AuxInfo
+        mgr = NucleiManager()
+        mgr.auxinfo = AuxInfo(version=1, data={"axis": "PDL"})
+        mgr.identity_assigner = None
+        np.testing.assert_allclose(mgr.get_ap_direction_at(1), [1.0, 0.0, 0.0])
 
     def test_auxinfo_v2_ap_orientation_overrides_v1(self):
         """V2 AP orientation is an arbitrary 3D vector; it takes

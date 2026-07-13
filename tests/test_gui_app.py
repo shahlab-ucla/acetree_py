@@ -5,13 +5,10 @@ overlay computation, cell info text, and tracking. Does NOT require
 napari or Qt to be installed — only tests the data-layer logic.
 """
 
-import math
 
 import numpy as np
-import pytest
 
-from acetree_py.core.cell import Cell, CellFate
-from acetree_py.core.lineage import LineageTree, build_lineage_tree
+from acetree_py.core.lineage import build_lineage_tree
 from acetree_py.core.movie import Movie
 from acetree_py.core.nucleus import NILLI, Nucleus
 from acetree_py.core.nuclei_manager import NucleiManager
@@ -22,11 +19,11 @@ from acetree_py.gui.viewer_integration import make_circle_polygon
 # ── Fixtures ─────────────────────────────────────────────────────
 
 
-def _make_nuc(index, x, y, z, size=20, identity="", status=1,
+def _make_nuc(index, x, y, z, size=20, identity="", assigned_id="", status=1,
               predecessor=NILLI, successor1=NILLI, successor2=NILLI):
     return Nucleus(
         index=index, x=x, y=y, z=z, size=size,
-        identity=identity, status=status,
+        identity=identity, assigned_id=assigned_id, status=status,
         predecessor=predecessor, successor1=successor1, successor2=successor2,
     )
 
@@ -66,6 +63,7 @@ def _build_test_manager():
         ],
     ]
 
+    mgr.set_all_successors()
     # Build lineage tree manually
     mgr.lineage_tree = build_lineage_tree(
         mgr.nuclei_record,
@@ -84,6 +82,49 @@ def _make_app():
     app.current_time = 1
     app.current_plane = 15
     return app
+
+
+def _make_duplicate_name_app():
+    """Build two disconnected tracks that share one forced display name."""
+    mgr = NucleiManager()
+    mgr.movie = Movie(xy_res=0.1, z_res=1.0, num_planes=30)
+    mgr.nuclei_record = [
+        [
+            _make_nuc(
+                1, 40, 50, 5.0, identity="LeftSeed", assigned_id="Dup",
+                successor1=1,
+            ),
+            _make_nuc(
+                2, 140, 150, 15.0, identity="RightSeed", assigned_id="Dup",
+                successor1=2,
+            ),
+        ],
+        [
+            _make_nuc(
+                1, 42, 50, 6.0, identity="LeftSeed", assigned_id="Dup",
+                predecessor=1,
+            ),
+            _make_nuc(
+                2, 142, 150, 16.0, identity="RightSeed", assigned_id="Dup",
+                predecessor=2,
+            ),
+        ],
+        [],
+    ]
+    mgr.set_all_successors()
+    mgr.lineage_tree = build_lineage_tree(
+        mgr.nuclei_record,
+        starting_index=0,
+        ending_index=3,
+        create_dummy_ancestors=False,
+    )
+
+    collisions = mgr.lineage_tree.name_collisions["Dup"]
+    lookup_cell = mgr.get_cell("Dup")
+    selected_cell = next(cell for cell in collisions if cell is not lookup_cell)
+    app = AceTreeApp(mgr, image_provider=None)
+    app.current_plane = 1
+    return app, selected_cell, lookup_cell
 
 
 # ── Navigation tests ─────────────────────────────────────────────
@@ -171,6 +212,119 @@ class TestCellSelection:
         app.select_cell_at_position(195, 145)
         assert app.current_cell_name == "P1"
 
+    def test_selected_physical_cell_survives_rename_and_undo_elsewhere(self):
+        """Undoing an unrelated rename must not move selection to its target."""
+        from acetree_py.editing.commands import RenameCell
+
+        app = _make_app()
+        app.manager.process()
+        selected_name = app.manager.nuclei_record[2][0].effective_name
+        app.select_cell(selected_name, time=3)
+        assert app.selection_anchor == (3, 1)
+
+        selected = app.manager.nuclei_record[2][0]
+        app.edit_history.do(RenameCell(time=3, index=2, new_name="Other"))
+        resolved, time, index = app.get_selected_nucleus()
+        assert resolved is selected
+        assert (time, index) == (3, 1)
+        assert app.current_cell_name != "Other"
+        assert app.selection_anchor == (3, 1)
+
+        app.edit_history.undo()
+        resolved, time, index = app.get_selected_nucleus()
+        assert resolved is selected
+        assert (time, index) == (3, 1)
+        assert app.selection_anchor == (3, 1)
+
+    def test_selected_name_re_resolves_across_rename_and_undo(self):
+        from acetree_py.editing.commands import RenameCell
+
+        app = _make_app()
+        app.manager.process()
+        original_name = app.manager.nuclei_record[2][0].effective_name
+        app.select_cell(original_name, time=3)
+        app.edit_history.do(RenameCell(time=3, index=1, new_name="AB_manual"))
+        assert app.current_cell_name == "AB_manual"
+        assert app.selection_anchor == (3, 1)
+
+        app.edit_history.undo()
+        assert app.current_cell_name == original_name
+        assert app.selection_anchor == (3, 1)
+
+    def test_unnamed_index_selection_is_time_qualified(self):
+        """The same numeric index at another time is not the same selection."""
+        mgr = NucleiManager()
+        mgr.movie = Movie(xy_res=0.1, z_res=1.0, num_planes=10)
+        mgr.nuclei_record = [
+            [_make_nuc(1, 10, 10, 2)],
+            [_make_nuc(1, 90, 90, 3)],
+        ]
+        mgr.lineage_tree = build_lineage_tree(
+            mgr.nuclei_record,
+            starting_index=0,
+            ending_index=2,
+            create_dummy_ancestors=False,
+        )
+        app = AceTreeApp(mgr, image_provider=None)
+        app.current_time = 1
+        app._set_selection_from_nucleus(1, mgr.nuclei_record[0][0])
+
+        assert app.current_cell_name == "idx=1:1"
+        app.current_time = 2
+        assert app.get_selected_nucleus() is None
+        assert app.selection_anchor == (1, 1)
+        app._delete_active_nucleus()
+        assert mgr.nuclei_record[1][0].is_alive
+
+
+class TestInteractionModes:
+    def test_modes_are_exclusive_and_escape_clears_relink_source(self):
+        app = _make_app()
+
+        class _Button:
+            def __init__(self):
+                self.checked = False
+
+            def setChecked(self, checked):
+                self.checked = checked
+
+        class _Label:
+            def setText(self, text):
+                self.text = text
+
+        class _Panel:
+            def __init__(self):
+                self._btn_add = _Button()
+                self._btn_track = _Button()
+                self._status_label = _Label()
+                self._relink_source = None
+                self.cancel_count = 0
+
+            def _on_relink_cancelled(self):
+                self._relink_source = None
+                self.cancel_count += 1
+
+        panel = _Panel()
+        app._edit_panel = panel
+
+        app.enter_add_mode()
+        assert app._add_mode and not app._placement_mode
+        app.enter_placement_mode(parent_name="AB")
+        assert app._placement_mode and not app._add_mode
+        app.enter_relink_pick_mode(lambda *_: None)
+        panel._relink_source = (object(), 3, 1)
+        assert app._relink_pick_mode
+        assert not app._add_mode and not app._placement_mode
+
+        app._exit_all_modes()
+
+        assert not app._relink_pick_mode
+        assert app._relink_pick_callback is None
+        assert panel._relink_source is None
+        assert panel.cancel_count == 1
+        assert not panel._btn_add.checked
+        assert not panel._btn_track.checked
+
 
 # ── Tracking tests ───────────────────────────────────────────────
 
@@ -235,6 +389,21 @@ class TestTracking:
         # Should have switched to AB (first daughter)
         assert app.current_cell_name in ("AB", "P1")
 
+    def test_follow_uses_anchor_when_disconnected_cells_share_name(self):
+        app, selected_cell, lookup_cell = _make_duplicate_name_app()
+        assert selected_cell is not lookup_cell
+        _, selected = selected_cell.nuclei[0]
+        app.current_time = 1
+        app._set_selection_from_nucleus(1, selected)
+
+        app.set_time(2)
+
+        expected = selected_cell.get_nucleus_at(2)
+        assert expected is not None
+        assert app.current_plane == round(expected.z + NUCZINDEXOFFSET)
+        assert app.selection_anchor == (2, expected.index)
+        assert app.get_selected_cell() is selected_cell
+
 
 # ── Add-mode auto-advance tests ──────────────────────────────────
 
@@ -263,9 +432,49 @@ class TestAddModeAutoAdvance:
         new_nuc = app.manager.nuclei_record[5][0]
         # Linked to AB's nucleus at t=5 (idx 1)
         assert new_nuc.predecessor == 1
-        # And inherited AB's name via assigned_id so the naming pipeline
-        # treats the chain as one cell.
-        assert new_nuc.assigned_id == "AB"
+        # AB is automatic in this fixture. Extending it must not silently
+        # convert that automatic name into a permanent manual override.
+        assert new_nuc.assigned_id == ""
+        assert app.manager.nuclei_record[4][0].assigned_id == ""
+
+    def test_track_extension_of_automatic_parent_stays_unlocked(self):
+        app = _make_app()
+        app.manager.nuclei_record.append([])
+        app.current_time = 6
+        app.enter_placement_mode(parent_name="AB")
+        before = app.edit_history.num_undoable
+
+        assert app._handle_placement_click(101.0, 151.0)
+
+        new_nuc = app.manager.nuclei_record[5][0]
+        assert new_nuc.predecessor == 1
+        assert new_nuc.assigned_id == ""
+        assert app.edit_history.num_undoable == before + 1
+        from acetree_py.editing.commands import CompositeCommand
+        assert isinstance(app.edit_history.last_command, CompositeCommand)
+
+    def test_root_track_auto_exit_refreshes_button_state(self):
+        app = _make_app()
+        app.current_time = 3
+        app.enter_placement_mode(parent_name=None)
+
+        class _Panel:
+            def __init__(self):
+                self.refresh_count = 0
+                self.track_checked = True
+
+            def refresh(self):
+                self.refresh_count += 1
+                self.track_checked = app._placement_mode
+
+        panel = _Panel()
+        app._edit_panel = panel
+        assert app._handle_placement_click(350.0, 350.0)
+        assert not app._placement_mode
+        # The structural edit refresh happens while placement mode is still
+        # active; the explicit post-exit refresh is what unchecks Track.
+        assert panel.refresh_count >= 2
+        assert not panel.track_checked
 
     def test_add_without_selection_is_root(self):
         """No cell selected → new nucleus is a root, no predecessor,
@@ -282,6 +491,43 @@ class TestAddModeAutoAdvance:
         new_nuc = app.manager.nuclei_record[2][-1]
         assert new_nuc.predecessor == -1  # NILLI
         assert new_nuc.assigned_id == ""
+
+    def test_add_uses_anchor_when_disconnected_cells_share_name(self):
+        app, selected_cell, lookup_cell = _make_duplicate_name_app()
+        assert selected_cell is not lookup_cell
+        selected = selected_cell.get_nucleus_at(2)
+        assert selected is not None
+        app.current_time = 2
+        app._set_selection_from_nucleus(2, selected)
+        app.enter_add_mode()
+
+        assert app._handle_add_click(145.0, 150.0)
+
+        added = app.manager.nuclei_record[2][0]
+        assert added.predecessor == selected.index
+        assert selected.successor1 == added.index
+        wrong_parent = lookup_cell.get_nucleus_at(2)
+        assert wrong_parent is not None
+        assert wrong_parent.successor1 == NILLI
+
+    def test_track_uses_captured_anchor_when_duplicate_name_is_ambiguous(self):
+        app, selected_cell, lookup_cell = _make_duplicate_name_app()
+        assert selected_cell is not lookup_cell
+        selected = selected_cell.get_nucleus_at(2)
+        assert selected is not None
+        app.current_time = 2
+        app._set_selection_from_nucleus(2, selected)
+        app.enter_placement_mode(parent_name="Dup")
+        app.current_time = 3
+
+        assert app._handle_placement_click(145.0, 150.0)
+
+        added = app.manager.nuclei_record[2][0]
+        assert added.predecessor == selected.index
+        assert selected.successor1 == added.index
+        wrong_parent = lookup_cell.get_nucleus_at(2)
+        assert wrong_parent is not None
+        assert wrong_parent.successor1 == NILLI
 
 
 # ── Phantom-cell scaffold handling ────────────────────────────────
@@ -300,7 +546,7 @@ class TestPhantomAncestorAvoidance:
     @staticmethod
     def _fresh_manual_app(num_timepoints: int = 10):
         from acetree_py.core.nuclei_manager import NucleiManager
-        from acetree_py.editing.commands import AddNucleus, RenameCell
+        from acetree_py.editing.commands import RenameCell
         from acetree_py.gui.app import AceTreeApp
         from acetree_py.io.config import AceTreeConfig, NamingMethod
 
@@ -370,16 +616,20 @@ class TestPhantomAncestorAvoidance:
 class TestManualDivision:
     """Pressing Add a second time on a cell that already has a first
     daughter at the current timepoint creates a manual division.  The
-    two daughters get distinct ``+"a"`` / ``+"p"`` suffixes along the
-    embryo's AP axis so they don't collide on the parent's forced name
-    (and the lineage tree doesn't fall back to the ``_{n}`` alias)."""
+    two daughters get distinct, parent-specific biological names from the
+    automatic naming model, without turning those suggestions into locks."""
 
     @staticmethod
-    def _fresh_app(num_timepoints: int = 10):
+    def _fresh_app(
+        num_timepoints: int = 10,
+        parent_name: str = "P2",
+        with_body_frame: bool = True,
+    ):
         from acetree_py.core.nuclei_manager import NucleiManager
         from acetree_py.editing.commands import RenameCell
         from acetree_py.gui.app import AceTreeApp
         from acetree_py.io.config import AceTreeConfig, NamingMethod
+        from acetree_py.naming.body_axes import BodyAxisFrame
 
         cfg = AceTreeConfig(
             naming_method=NamingMethod.NEWCANONICAL,
@@ -387,13 +637,30 @@ class TestManualDivision:
         )
         mgr = NucleiManager.new_empty(cfg, num_timepoints=num_timepoints)
         mgr.process()
+        # These tests assert biological daughter identities, so give the
+        # synthetic one-lineage dataset a complete manual body frame.  Orient
+        # the relevant rule axis along the daughters' X separation: EMS uses
+        # AP, while P2 uses DV.
+        if with_body_frame:
+            if parent_name == "P2":
+                ap, lr = ([0.0, 1.0, 0.0], [0.0, 0.0, -1.0])
+            else:
+                ap, lr = ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0])
+            mgr.set_manual_body_axes(BodyAxisFrame.from_auxinfo_vectors(
+                ap,
+                lr,
+                provenance="manual_test_frame",
+                reference_time=1,
+            ))
         app = AceTreeApp(mgr, image_provider=None)
         app.current_plane = 5
         app.enter_add_mode()
-        # Seed P2 at t=1
+        # Seed the requested parent at t=1
         app._handle_add_click(100.0, 100.0)
         app.current_cell_name = mgr.nuclei_record[0][0].effective_name
-        app.edit_history.do(RenameCell(time=1, index=1, new_name="P2"))
+        app.edit_history.do(
+            RenameCell(time=1, index=1, new_name=parent_name)
+        )
         # Extend to t=2
         app.set_time(2)
         app._handle_add_click(110.0, 100.0)
@@ -401,57 +668,109 @@ class TestManualDivision:
         return app
 
     def test_second_add_creates_axis_aware_division(self):
-        """With the default AP direction (+X is anterior), clicking Add
-        at (x=50, y=100) — far from the existing first daughter at
-        (110, 100) — splits the cell into P2 + P2a (anterior) + P2p
-        (posterior), not P2 and P2_2."""
+        """P2's manual division uses its canonical C/P3 lineage rule."""
         app = self._fresh_app()
+        history_before = app.edit_history.num_undoable
         app._handle_add_click(50.0, 100.0)
         mgr = app.manager
+
+        # A click is one user gesture, even though it adds the second daughter
+        # and repairs the first daughter's inherited name state together.
+        from acetree_py.editing.commands import CompositeCommand
+        assert app.edit_history.num_undoable == history_before + 1
+        assert isinstance(app.edit_history.last_command, CompositeCommand)
 
         # t=1 parent cell still named P2, now marked as dividing
         assert mgr.nuclei_record[0][0].effective_name == "P2"
         assert mgr.nuclei_record[0][0].successor1 != -1
         assert mgr.nuclei_record[0][0].successor2 != -1
 
-        # t=2 has two daughters with P2a / P2p names
+        # t=2 has P2's actual biological daughters, not generic suffixes.
         nucs = mgr.nuclei_record[1]
         assert len(nucs) == 2
         names = {n.effective_name for n in nucs}
-        assert names == {"P2a", "P2p"}
+        assert names == {"C", "P3"}
+        assert all(n.assigned_id == "" for n in nucs)
 
-        # Larger-X daughter is anterior (default AP = +X), so P2a is at x=110
+        # The manual frame orients the empirical P2 rule consistently.
         for n in nucs:
-            if n.effective_name == "P2a":
+            if n.effective_name == "C":
                 assert n.x == 110
-            elif n.effective_name == "P2p":
+            elif n.effective_name == "P3":
                 assert n.x == 50
 
-        # No P2_2 collision cell in the tree
+        # No collision alias or biologically invalid generic suffix remains.
         assert mgr.get_cell("P2_2") is None
-        assert mgr.get_cell("P2a") is not None
-        assert mgr.get_cell("P2p") is not None
+        assert mgr.get_cell("P2a") is None
+        assert mgr.get_cell("P2p") is None
+        assert mgr.get_cell("C") is not None
+        assert mgr.get_cell("P3") is not None
+
+        app.edit_history.undo()
+        assert len(mgr.nuclei_record[1]) == 1
+
+    def test_second_daughter_without_body_frame_uses_neutral_names(self):
+        app = self._fresh_app(parent_name="EMS", with_body_frame=False)
+
+        app._handle_add_click(50.0, 100.0)
+
+        daughters = app.manager.nuclei_record[1]
+        assert len(daughters) == 2
+        assert all(n.assigned_id == "" for n in daughters)
+        assert all(n.effective_name.startswith("Nuc") for n in daughters)
+        assert len({n.effective_name for n in daughters}) == 2
 
     def test_division_flips_when_ap_direction_flipped(self):
-        """If AuxInfo says ``axis[0] = "P"`` (canonical +X is posterior),
-        the daughter at larger X gets the ``"p"`` suffix instead."""
+        """A valid legacy body frame still uses P2's C/P3 rule.
+
+        P2's empirical rule is predominantly dorsoventral, so the UI must
+        not reduce it to the old hard-coded AP ``a/p`` suffix heuristic.
+        """
         from acetree_py.io.auxinfo import AuxInfo
 
         app = self._fresh_app()
-        # Force a v1 AuxInfo with P as first axis character.
-        app.manager.auxinfo = AuxInfo(version=1, data={"axis": "PDL"})
+        # Force a valid v1 AuxInfo with P as first axis character.  PDR is
+        # handed consistently; the old PDL combination is intentionally
+        # rejected by AuxInfo validation.
+        app.manager.auxinfo = AuxInfo(version=1, data={"axis": "PDR"})
         # Also clear the stored identity_assigner so get_ap_direction_at
         # falls through to the AuxInfo path instead of the topology path.
         app.manager.identity_assigner = None
 
         app._handle_add_click(50.0, 100.0)
         nucs = app.manager.nuclei_record[1]
-        for n in nucs:
-            if n.x == 110:
-                # Larger X is now posterior under PDL axis
-                assert n.effective_name == "P2p"
-            elif n.x == 50:
-                assert n.effective_name == "P2a"
+        assert {n.effective_name for n in nucs} == {"C", "P3"}
+        assert all(n.assigned_id == "" for n in nucs)
+
+    def test_ems_division_uses_e_and_ms(self):
+        """Founder-specific rules also cover the EMS -> E/MS division."""
+        app = self._fresh_app(parent_name="EMS")
+        app._handle_add_click(50.0, 100.0)
+
+        nucs = app.manager.nuclei_record[1]
+        assert {n.effective_name for n in nucs} == {"E", "MS"}
+        assert all(n.assigned_id == "" for n in nucs)
+
+    def test_track_can_commit_retroactive_division_as_one_edit(self):
+        """Track and Add share the same retroactive-division semantics."""
+        from acetree_py.editing.commands import CompositeCommand
+
+        app = self._fresh_app()
+        app.exit_add_mode()
+        app.enter_placement_mode(parent_name="P2")
+        app.current_time = 2
+        history_before = app.edit_history.num_undoable
+
+        assert app._handle_placement_click(50.0, 100.0)
+
+        nucs = app.manager.nuclei_record[1]
+        assert {n.effective_name for n in nucs} == {"C", "P3"}
+        assert all(n.assigned_id == "" for n in nucs)
+        assert app.edit_history.num_undoable == history_before + 1
+        assert isinstance(app.edit_history.last_command, CompositeCommand)
+
+        app.edit_history.undo()
+        assert len(app.manager.nuclei_record[1]) == 1
 
     def test_click_near_existing_at_end_time_extends(self):
         """At click_time == cell.end_time, a close click preserves the

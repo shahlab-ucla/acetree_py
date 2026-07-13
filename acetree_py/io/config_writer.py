@@ -7,6 +7,9 @@ round-trip: load_config(path) → write_config_xml(config, path2) → load_confi
 from __future__ import annotations
 
 import logging
+import os
+import stat
+import tempfile
 from pathlib import Path
 from xml.etree.ElementTree import Element, ElementTree, SubElement, indent
 
@@ -109,7 +112,29 @@ def write_config_xml(config: AceTreeConfig, path: str | Path) -> None:
         SubElement(root, "angle", degrees=str(config.angle))
 
     indent(root)
-    tree = ElementTree(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tree.write(str(path), xml_declaration=True, encoding="utf-8")
+    fd, temp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        tree = ElementTree(root)
+        tree.write(str(temp_path), xml_declaration=True, encoding="utf-8")
+        os.chmod(temp_path, _replacement_mode(path))
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
     logger.info("Wrote config XML to %s", path)
+
+
+def _replacement_mode(destination: Path) -> int:
+    """Mode for an atomic replacement, preserving target or normal defaults."""
+    try:
+        return stat.S_IMODE(destination.stat().st_mode)
+    except FileNotFoundError:
+        previous = os.umask(0)
+        os.umask(previous)
+        return 0o666 & ~previous

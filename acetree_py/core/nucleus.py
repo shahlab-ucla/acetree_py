@@ -15,7 +15,8 @@ Ported from: org.rhwlab.snight.Nucleus (Nucleus.java)
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import unicodedata
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,26 @@ _OLD_SUCC2 = 14
 
 # Red correction method names (matches Config.REDCHOICE)
 RED_CORRECTIONS = ("none", "global", "local", "blot", "cross")
+
+
+def validate_storable_name(name: str, *, allow_empty: bool = True) -> str | None:
+    """Return a persistence error for a nucleus name, or ``None``.
+
+    The legacy nuclei format is comma/newline delimited and has no escaping
+    convention, so accepting these characters would shift columns or create
+    phantom records on the next load.
+    """
+    if not name:
+        return None if allow_empty else "Cell name cannot be empty"
+    if not name.strip():
+        return "Cell name cannot be blank"
+    if "," in name:
+        return "Cell names cannot contain commas"
+    if "\r" in name or "\n" in name:
+        return "Cell names cannot contain line breaks"
+    if any(unicodedata.category(char) == "Cc" for char in name):
+        return "Cell names cannot contain control characters"
+    return None
 
 
 @dataclass
@@ -233,6 +254,11 @@ class Nucleus:
         This matches the column indices used by the constructor for parsing,
         ensuring round-trip compatibility.
         """
+        for value in (self.identity, self.assigned_id):
+            error = validate_storable_name(value)
+            if error:
+                raise ValueError(error)
+
         # Status: write 1 if alive, 0 if not (matches NucZipper behavior)
         status_out = 1 if self.status > 0 else 0
         parts = [

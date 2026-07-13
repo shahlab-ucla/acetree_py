@@ -23,12 +23,12 @@ import numpy as np
 from ..core.nucleus import NILLI, Nucleus
 from ..io.auxinfo import AuxInfo
 from .canonical_transform import CanonicalTransform, TransformValidationError
-from .division_caller import DivisionCaller, DivisionClassification
+from .division_caller import DivisionCaller
 from .founder_id import FounderAssignment, identify_founders
 from .initial_id import NUC, identify_initial_cells
 from .lineage_axes import build_lineage_map
 from .rules import RuleManager
-from .validation import NamingWarning, validate_naming
+from .validation import NamingWarning
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,11 @@ class IdentityAssigner:
         pipeline for backward compatibility testing.
         """
         if self.naming_method == MANUAL:
-            logger.info("Skipping naming due to MANUAL naming method")
+            # Manual mode does not generate identities, but a forced name is
+            # still cell-scoped.  Normalising explicit overrides here keeps a
+            # saved file consistent across MANUAL and automatic modes.
+            self._propagate_assigned_ids()
+            logger.info("Skipping automatic naming due to MANUAL naming method")
             return
 
         if self.legacy_mode:
@@ -116,6 +120,15 @@ class IdentityAssigner:
                 self._build_canonical_transform()
             self._run_legacy_pipeline()
             return
+
+        # Keep the loaded/current automatic state until the pipeline proves
+        # that it can establish a replacement founder frame.  Partial movies
+        # and focused edits often contain no four-cell stage; erasing valid
+        # names in those datasets on every rebuild is destructive.
+        previous_identities = [
+            [nuc.identity for nuc in nuclei]
+            for nuclei in self.nuclei_record
+        ]
 
         # Step 1: Clear all non-forced names
         self._clear_all_names()
@@ -128,11 +141,16 @@ class IdentityAssigner:
             self._build_canonical_transform()
 
         # Step 3: Topology-based identification (unified default)
+        ap_hint = None
+        if self.auxinfo is not None and self.auxinfo.is_v2 and self.auxinfo.has_orientation:
+            ap_hint = self.auxinfo.ap_orientation
+
         self.founder_assignment = identify_founders(
             self.nuclei_record,
             starting_index=self.starting_index,
             ending_index=self.ending_index,
             z_pix_res=self.z_pix_res,
+            ap_hint=ap_hint,
         )
 
         if self.founder_assignment.success and self.founder_assignment.confidence >= 0.3:
@@ -157,6 +175,22 @@ class IdentityAssigner:
                 self._cross_validate_with_auxinfo()
                 return
 
+            # Founder topology can be trustworthy even when compression or
+            # missing landmark groups make DV/LR unknowable.  Preserve those
+            # founder identities, but do not let raw microscope coordinates
+            # masquerade as a canonical body frame for downstream divisions.
+            logger.warning(
+                "Founder identities retained, but downstream canonical naming "
+                "is deferred because no complete body frame is available"
+            )
+            downstream_start = self.founder_assignment.four_cell_time + 1
+            self._restore_previous_identities(
+                previous_identities, start_index=downstream_start,
+            )
+            self._propagate_assigned_ids()
+            self._assign_neutral_names(downstream_start)
+            return
+
         # Step 4: Founder ID failed — provide diagnostics instead of
         # silently falling back to the weaker legacy algorithm
         fa = self.founder_assignment
@@ -167,17 +201,104 @@ class IdentityAssigner:
             "to try the AuxInfo-dependent pipeline.",
             fa.success, fa.confidence, fa.warnings,
         )
-        self._assign_generic_names(self.starting_index)
+        # Founder probing may have written tentative ABa/ABp/EMS/P2 labels
+        # before its composite confidence fell below the acceptance threshold.
+        # Do not let those rejected guesses leak into the fallback result.
+        self._clear_all_names()
+
+        # A late-start or ablated dataset may not contain a usable four-cell
+        # stage.  If the curator supplied both a trusted orientation and at
+        # least one forced lineage anchor, continue canonical rules forward
+        # from that anchor instead of discarding the useful manual context.
+        has_forced_anchor = any(
+            nuc.is_alive and bool(nuc.assigned_id)
+            for nuclei in self.nuclei_record[self.starting_index:self.ending_index]
+            for nuc in nuclei
+        )
+        if has_forced_anchor:
+            if self.canonical_transform is not None and self.canonical_transform.active:
+                self._setup_division_caller("")
+            elif (
+                self.auxinfo is not None
+                and not self.auxinfo.is_v2
+                and getattr(self.auxinfo, "has_orientation", False)
+            ):
+                self._setup_division_caller(self.auxinfo.axis.upper())
+            if self.division_caller is not None:
+                logger.info(
+                    "Founder ID unavailable; continuing canonical naming from forced anchors"
+                )
+                self._use_canonical_rules(self.starting_index)
+                return
+
+        self._restore_previous_identities(previous_identities)
+        self._propagate_assigned_ids()
+        self._assign_neutral_names(self.starting_index)
+
+    def _restore_previous_identities(
+        self,
+        previous_identities: list[list[str]],
+        start_index: int = 0,
+    ) -> None:
+        """Restore valid loaded names when re-identification is unavailable.
+
+        Manual overrides remain authoritative, dead records stay unnamed, and
+        previously blank entries remain available for the generic fill pass.
+        """
+        for t, nuclei in enumerate(self.nuclei_record):
+            if t < start_index:
+                continue
+            if t >= len(previous_identities):
+                break
+            prior_at_time = previous_identities[t]
+            for j, nuc in enumerate(nuclei):
+                if (
+                    not nuc.is_alive
+                    or nuc.assigned_id
+                    or j >= len(prior_at_time)
+                ):
+                    continue
+                if prior_at_time[j]:
+                    nuc.identity = prior_at_time[j]
+
+    def _assign_neutral_names(self, start_index: int) -> None:
+        """Fill unnamed records without asserting anatomical daughter order.
+
+        Continuations inherit a known parent identity.  At a division with no
+        complete body frame, each still-unnamed daughter receives a neutral
+        ``Nuc...`` identifier instead of a biological ``a/p``, ``d/v``, or
+        ``l/r`` suffix.  Reprocessing after a curator supplies valid axes can
+        then replace these placeholders with canonical names.
+        """
+        end = min(self.ending_index, len(self.nuclei_record))
+        for t in range(max(0, start_index), end):
+            previous = self.nuclei_record[t - 1] if t > 0 else None
+            for nuc in self.nuclei_record[t]:
+                if not nuc.is_alive or nuc.identity:
+                    continue
+                if nuc.assigned_id:
+                    nuc.identity = nuc.assigned_id
+                    continue
+
+                if previous is not None and nuc.predecessor > 0:
+                    pred_idx = nuc.predecessor - 1
+                    if 0 <= pred_idx < len(previous):
+                        pred = previous[pred_idx]
+                        if pred.is_alive and pred.successor2 == NILLI:
+                            nuc.identity = pred.effective_name
+                            if nuc.identity:
+                                continue
+
+                z = round(nuc.z)
+                nuc.identity = f"{NUC}{t + 1:03d}_{z}_{nuc.x}_{nuc.y}"
 
     def _run_legacy_pipeline(self) -> None:
         """Run the legacy InitialID-based pipeline."""
         import math
 
         angle_rad = 0.0
-        axis_string = ""
         if self.auxinfo is not None:
             angle_rad = math.radians(-self.auxinfo.angle)
-            axis_string = self.auxinfo.axis or ""
 
         result = identify_initial_cells(
             self.nuclei_record,
@@ -253,7 +374,7 @@ class IdentityAssigner:
             # In v2, canonical_transform maps lab -> canonical.
             # AP in canonical is [-1, 0, 0], so lab AP = inverse(transform) @ [-1,0,0]
             # For comparison, we just check angle agreement, not exact direction.
-            auxinfo_ap = self.canonical_transform.apply(np.array([-1.0, 0.0, 0.0]))
+            auxinfo_ap = self.canonical_transform.inverse_apply(np.array([-1.0, 0.0, 0.0]))
         elif not self.auxinfo.is_v2 and fa.ap_vector is not None:
             # v1: use the founder-derived AP as a proxy for "AuxInfo-informed" AP
             auxinfo_ap = fa.ap_vector
@@ -268,7 +389,7 @@ class IdentityAssigner:
                 continue
             lineage_ap = axes[0]
             cos_angle = np.clip(np.dot(lineage_ap, auxinfo_ap), -1.0, 1.0)
-            angle_deg = np.degrees(np.arccos(abs(cos_angle)))
+            angle_deg = np.degrees(np.arccos(cos_angle))
             angles.append(angle_deg)
 
         if angles:
@@ -303,17 +424,35 @@ class IdentityAssigner:
         )
 
     def _setup_division_caller_from_founders(self) -> None:
-        """Create the DivisionCaller using per-timepoint lineage centroid axes.
+        """Create a DivisionCaller using the best trusted body-frame source.
 
-        Always uses the rotation-invariant lineage centroid approach as the
-        primary axis source. AuxInfo (v1 or v2) is used for cross-validation
-        diagnostics only (see ``_cross_validate_with_auxinfo``).
+        Explicit AuxInfo orientation is user/acquisition metadata and therefore
+        outranks an inferred frame.  The lineage-centroid estimate is retained
+        as the fallback for datasets without valid orientation metadata.
         """
         fa = self.founder_assignment
         if fa is None:
             return
 
-        # Always use per-timepoint lineage centroid axes (rotation-invariant).
+        if self.canonical_transform is not None and self.canonical_transform.active:
+            self.division_caller = DivisionCaller(
+                rule_manager=self.rule_manager,
+                z_pix_res=self.z_pix_res,
+                canonical_transform=self.canonical_transform,
+            )
+            logger.info("Using explicit AuxInfo v2 body axes for division naming")
+            return
+
+        if (
+            self.auxinfo is not None
+            and not self.auxinfo.is_v2
+            and getattr(self.auxinfo, "has_orientation", False)
+        ):
+            self._setup_division_caller(self.auxinfo.axis.upper())
+            logger.info("Using explicit AuxInfo v1 orientation for division naming")
+            return
+
+        # No explicit orientation: infer a per-timepoint frame from lineages.
         lineage_map = build_lineage_map(
             self.nuclei_record,
             four_cell_time=fa.four_cell_time,
@@ -323,17 +462,34 @@ class IdentityAssigner:
             p2_idx=fa.p2_idx,
         )
 
-        # Compute axes at the 4-cell midpoint to seed the sign anchor.
-        # This is typically the highest-quality frame for LR because ABa
-        # and ABp are maximally separated at this stage.
+        # Compute axes at the four-cell midpoint to seed temporal signs.
+        # AP comes from P2->ABa and DV from EMS->ABp; LR is the right-handed
+        # completion, not the ABa--ABp separation.  The secondary quality
+        # value records when that DV geometry is weak or nearly collinear.
         from .lineage_axes import compute_local_axes
-        seed_ap, seed_lr, seed_dv, seed_q = compute_local_axes(
+        seed_ap, seed_lr, seed_dv, _seed_quality = compute_local_axes(
             self.nuclei_record, lineage_map, fa.four_cell_time, self.z_pix_res,
         )
+
+        complete_seed = all(axis is not None for axis in (seed_ap, seed_lr, seed_dv))
+        complete_founder = all(
+            axis is not None
+            for axis in (fa.ap_vector, fa.lr_vector, fa.dv_vector)
+        )
+        if not complete_seed and not complete_founder:
+            fa.warnings.append(
+                "Founder topology identified, but no complete AP/DV/LR frame "
+                "is available for downstream division naming"
+            )
+            self.division_caller = None
+            return
 
         self.division_caller = DivisionCaller(
             rule_manager=self.rule_manager,
             z_pix_res=self.z_pix_res,
+            founder_ap=fa.ap_vector,
+            founder_lr=fa.lr_vector,
+            founder_dv=fa.dv_vector,
             lineage_map=lineage_map,
             nuclei_record=self.nuclei_record,
             seed_ap=seed_ap,
@@ -377,7 +533,8 @@ class IdentityAssigner:
         seeds: list[tuple[int, int, str]] = []
         for t in range(self.starting_index, n_times):
             for j, nuc in enumerate(nr[t]):
-                if nuc.assigned_id:
+                if nuc.is_alive and nuc.assigned_id:
+                    nuc.identity = nuc.assigned_id
                     seeds.append((t, j, nuc.assigned_id))
 
         for seed_t, seed_j, forced_name in seeds:
@@ -394,17 +551,15 @@ class IdentityAssigner:
                 if not (0 <= s_idx < len(nr[t + 1])):
                     break
                 succ = nr[t + 1][s_idx]
-                # With cell-scoped RenameCell (Part 9), the entire chain
-                # is written atomically, so a differing assigned_id in the
-                # same continuation chain indicates a legacy save file or
-                # an edit that bypassed RenameCell.  In that case we still
-                # sweep the latest seed through — log it so inconsistencies
-                # are visible.
+                if not succ.is_alive or succ.predecessor != idx + 1:
+                    break
                 if succ.assigned_id and succ.assigned_id != forced_name:
                     logger.warning(
-                        "Propagation overwriting differing assigned_id at t=%d idx=%d: '%s' -> '%s'",
-                        t + 2, s_idx + 1, succ.assigned_id, forced_name,
+                        "Conflicting forced names in one continuation at t=%d idx=%d: "
+                        "'%s' vs '%s'; stopping propagation",
+                        t + 2, s_idx + 1, forced_name, succ.assigned_id,
                     )
+                    break
                 succ.assigned_id = forced_name
                 succ.identity = forced_name
                 t, idx = t + 1, s_idx
@@ -423,11 +578,15 @@ class IdentityAssigner:
                 # this cell is a daughter, not a continuation
                 if pred.successor2 > 0:
                     break
+                if not pred.is_alive or pred.successor1 != idx + 1:
+                    break
                 if pred.assigned_id and pred.assigned_id != forced_name:
                     logger.warning(
-                        "Propagation overwriting differing assigned_id at t=%d idx=%d: '%s' -> '%s'",
-                        t, p_idx + 1, pred.assigned_id, forced_name,
+                        "Conflicting forced names in one continuation at t=%d idx=%d: "
+                        "'%s' vs '%s'; stopping propagation",
+                        t, p_idx + 1, forced_name, pred.assigned_id,
                     )
+                    break
                 pred.assigned_id = forced_name
                 pred.identity = forced_name
                 t, idx = t - 1, p_idx
@@ -566,20 +725,36 @@ class IdentityAssigner:
 def _use_preassigned_id(dau1: Nucleus, dau2: Nucleus) -> None:
     """Honor forced names (assigned_id) on daughter cells.
 
-    If a daughter has an assigned_id, override its identity with it.
-    If both daughters end up with the same name, append 'X' to distinguish.
+    If a daughter has an assigned_id, override its identity with it.  When a
+    single forced name selects the automatic name originally proposed for the
+    sister, move that sister to the complementary automatic name.  Two equal
+    forced names are an invalid manual conflict and are deliberately left
+    visible for validation; changing only ``identity`` cannot disambiguate
+    them because ``effective_name`` prioritises ``assigned_id``.
     """
     if not dau1.assigned_id and not dau2.assigned_id:
         return
 
+    automatic1, automatic2 = dau1.identity, dau2.identity
+
+    if dau1.assigned_id and dau2.assigned_id:
+        dau1.identity = dau1.assigned_id
+        dau2.identity = dau2.assigned_id
+        if dau1.assigned_id == dau2.assigned_id:
+            logger.error(
+                "Both daughters carry the same forced name '%s'; manual correction required",
+                dau1.assigned_id,
+            )
+        return
+
     if dau1.assigned_id:
         dau1.identity = dau1.assigned_id
-    if dau2.assigned_id:
+        if dau1.assigned_id == automatic2:
+            dau2.identity = automatic1
+    elif dau2.assigned_id:
         dau2.identity = dau2.assigned_id
-
-    # Resolve naming collision
-    if dau1.identity == dau2.identity:
-        dau2.identity = dau2.identity[:-1] + "X"
+        if dau2.assigned_id == automatic1:
+            dau1.identity = automatic2
 
 
 def _compute_orientation(ap: int, dv: int, lr: int) -> str:

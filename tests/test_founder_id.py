@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from acetree_py.core.nucleus import NILLI, Nucleus
 from acetree_py.naming.founder_id import (
-    FounderAssignment,
     _axes_from_founders,
     _count_alive,
     _find_four_cell_windows,
@@ -253,8 +251,17 @@ class TestAxesFromFounders:
         assert lr is not None
         assert dv is not None
 
-        # AP should point from P2 toward AB center (negative x direction)
+        # AP should point from P2 toward ABa (negative x direction)
         assert ap[0] < 0  # AP points from posterior to anterior
+
+        expected_ap = np.array([aba.x - p2.x, aba.y - p2.y, aba.z - p2.z])
+        expected_ap = expected_ap / np.linalg.norm(expected_ap)
+        np.testing.assert_allclose(ap, expected_ap)
+
+        # DV is EMS -> ABp after projection off AP; LR completes the
+        # right-handed anatomical frame (DV = AP x LR).
+        assert np.dot(dv, np.array([abp.x - ems.x, abp.y - ems.y, abp.z - ems.z])) > 0
+        np.testing.assert_allclose(np.cross(ap, lr), dv)
 
         # Axes should be orthogonal
         assert abs(np.dot(ap, lr)) < 0.1
@@ -299,6 +306,16 @@ class TestAxesFromFounders:
         # AP axis directions should differ (rotated) but both be unit vectors
         assert abs(np.linalg.norm(ap1) - 1.0) < 1e-6
         assert abs(np.linalg.norm(ap2) - 1.0) < 1e-6
+
+    def test_explicit_ap_hint_controls_aba_abp_ordering(self):
+        record = _make_standard_lineage()
+        result = identify_founders(record, z_pix_res=11.1, ap_hint=np.array([1.0, 0.0, 0.0]))
+
+        assert result.success
+        midpoint = record[result.four_cell_time]
+        assert midpoint[1].identity == "ABa"  # the more +X AB daughter
+        assert midpoint[0].identity == "ABp"
+        assert any("explicit AP orientation" in warning for warning in result.warnings)
 
 
 class TestIsPolarBody:

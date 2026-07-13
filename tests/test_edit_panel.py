@@ -17,16 +17,14 @@ from __future__ import annotations
 
 import pytest
 
+from acetree_py.core.lineage import build_lineage_tree
 from acetree_py.core.nucleus import NILLI, Nucleus
-from acetree_py.core.cell import Cell, CellFate
-from acetree_py.core.lineage import LineageTree
+from acetree_py.core.cell import Cell
 from acetree_py.core.movie import Movie
 from acetree_py.core.nuclei_manager import NucleiManager
 from acetree_py.editing.history import EditHistory
 from acetree_py.editing.commands import (
     AddNucleus,
-    MoveNucleus,
-    RemoveNucleus,
     RenameCell,
 )
 
@@ -39,9 +37,11 @@ pytest.importorskip("qtpy")
 
 
 def _make_nucleus(index=1, x=100, y=200, z=10.0, size=20, identity="ABa",
+                  assigned_id="",
                   status=1, predecessor=NILLI, successor1=NILLI, successor2=NILLI):
     return Nucleus(
         index=index, x=x, y=y, z=z, size=size, identity=identity,
+        assigned_id=assigned_id,
         status=status, predecessor=predecessor,
         successor1=successor1, successor2=successor2,
     )
@@ -96,6 +96,11 @@ class MockManager:
         if time < 1 or time > len(self.nuclei_record):
             return []
         return [n for n in self.nuclei_record[time - 1] if n.is_alive]
+
+    def nuclei_at(self, time):
+        if time < 1 or time > len(self.nuclei_record):
+            return []
+        return self.nuclei_record[time - 1]
 
     def find_closest_nucleus(self, x, y, z, time):
         return None
@@ -182,9 +187,13 @@ class TestEditPanel:
         assert panel._btn_remove is not None
         assert panel._btn_track is not None
         assert panel._btn_rename is not None
+        assert panel._btn_auto_name is not None
         assert panel._btn_kill is not None
         assert panel._btn_resurrect is not None
         assert panel._btn_relink is not None
+        assert panel._btn_label_axis is not None
+        assert panel._btn_apply_axes is not None
+        assert panel._btn_swap_axis is not None
 
     def test_initial_undo_redo_disabled(self, qtbot):
         """Undo/redo buttons initially disabled when no edits."""
@@ -330,6 +339,18 @@ class TestEditPanel:
         assert nuc.identity == "AB"
         assert time == 2
 
+    def test_get_selected_nucleus_prefers_stable_app_api(self, qtbot):
+        from acetree_py.gui.edit_panel import EditPanel
+
+        app = MockApp()
+        sentinel = (object(), 7, 9)
+        app.current_cell_name = ""
+        app.get_selected_nucleus = lambda: sentinel
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+
+        assert panel._get_selected_nucleus() is sentinel
+
     def test_remove_no_selection_updates_status(self, qtbot):
         """Clicking remove with no selection shows status message."""
         from acetree_py.gui.edit_panel import EditPanel
@@ -362,6 +383,47 @@ class TestEditPanel:
 
         panel._on_rename_cell()
         assert "No nucleus selected" in panel._status_label.text()
+
+    def test_unchanged_rename_is_a_noop(self, qtbot, monkeypatch):
+        from qtpy.QtWidgets import QDialog
+        from acetree_py.gui.edit_panel import EditPanel, RenameCellDialog
+
+        app = MockApp()
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+        selected, _, _ = panel._get_selected_nucleus()
+        monkeypatch.setattr(
+            RenameCellDialog, "exec_", lambda self: QDialog.Accepted
+        )
+        monkeypatch.setattr(
+            RenameCellDialog, "get_name", lambda self: selected.effective_name
+        )
+        before = app.edit_history.num_undoable
+
+        panel._on_rename_cell()
+
+        assert app.edit_history.num_undoable == before
+        assert selected.assigned_id == ""
+        assert "No change" in panel._status_label.text()
+
+    def test_use_automatic_clears_manual_override(self, qtbot):
+        from acetree_py.gui.edit_panel import EditPanel
+
+        app = MockApp()
+        selected = app.manager.nuclei_record[1][0]
+        selected.assigned_id = "AB"
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+
+        panel._on_clear_name_override()
+
+        assert selected.assigned_id == ""
+        assert selected.identity == "AB"
+        assert app.edit_history.num_undoable == 1
+        assert "automatic" in panel._status_label.text().lower()
+
+        app.edit_history.undo()
+        assert selected.assigned_id == "AB"
 
     def test_kill_no_selection_updates_status(self, qtbot):
         """Clicking kill with no cell selected shows status message."""
@@ -404,6 +466,91 @@ class TestEditPanel:
         assert "Cell1" in panel._history_list.item(0).text()
         assert "Cell3" in panel._history_list.item(2).text()
         panel._history_dialog.close()
+
+
+class TestBodyOrientationWorkflow:
+    @staticmethod
+    def _panel_with_real_manager(qtbot):
+        from acetree_py.gui.edit_panel import EditPanel
+
+        nuclei = [
+            _make_nucleus(1, 0, 0, 0.0, identity="Post"),
+            _make_nucleus(2, 10, 0, 0.0, identity="Ant"),
+            _make_nucleus(3, 0, -10, 0.0, identity="Right"),
+            _make_nucleus(4, 0, 10, 0.0, identity="Left"),
+        ]
+        record = [nuclei]
+        app = MockApp(record)
+        manager = NucleiManager()
+        manager.nuclei_record = record
+        app.manager = manager
+        app.edit_history = EditHistory(record)
+        app.current_time = 1
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+        return app, panel, nuclei
+
+    @staticmethod
+    def _label(panel, label, nucleus, time=1):
+        index = panel._combo_axis_label.findData(label)
+        panel._combo_axis_label.setCurrentIndex(index)
+        panel._get_selected_nucleus = lambda: (nucleus, time, nucleus.index)
+        panel._on_label_body_axis()
+
+    def test_labels_apply_as_one_undoable_manual_frame(self, qtbot):
+        app, panel, nuclei = self._panel_with_real_manager(qtbot)
+        for label, nucleus in zip(
+            ("posterior", "anterior", "right", "left"), nuclei,
+        ):
+            self._label(panel, label, nucleus)
+
+        panel._on_apply_body_axes()
+
+        assert app.edit_history.num_undoable == 1
+        assert app.manager.auxinfo is not None
+        assert app.manager.auxinfo.is_manual
+        assert app.manager.auxinfo.reference_time == 1
+        assert app.manager.auxinfo.orientation_quality == pytest.approx(1.0)
+        assert "Applied manual body axes" in panel._status_label.text()
+        assert "manual" in panel._axis_status_label.text()
+
+        app.edit_history.undo()
+        panel.refresh()
+        assert app.manager.auxinfo is None
+        assert "automatic" in panel._axis_status_label.text()
+
+    def test_landmarks_from_different_times_are_rejected(self, qtbot):
+        _, panel, nuclei = self._panel_with_real_manager(qtbot)
+        self._label(panel, "posterior", nuclei[0], time=1)
+        self._label(panel, "anterior", nuclei[1], time=2)
+
+        assert set(panel._axis_landmarks) == {"posterior"}
+        assert "one timepoint" in panel._status_label.text()
+
+    def test_swap_pair_reverses_pending_axis(self, qtbot):
+        _, panel, nuclei = self._panel_with_real_manager(qtbot)
+        self._label(panel, "posterior", nuclei[0])
+        self._label(panel, "anterior", nuclei[1])
+        before_posterior = panel._axis_landmarks["posterior"]
+        before_anterior = panel._axis_landmarks["anterior"]
+        panel._combo_axis_label.setCurrentIndex(
+            panel._combo_axis_label.findData("anterior")
+        )
+
+        panel._on_swap_body_axis_pair()
+
+        assert panel._axis_landmarks["posterior"] == before_anterior
+        assert panel._axis_landmarks["anterior"] == before_posterior
+
+    def test_incomplete_frame_explains_missing_landmarks(self, qtbot):
+        _, panel, nuclei = self._panel_with_real_manager(qtbot)
+        self._label(panel, "posterior", nuclei[0])
+        self._label(panel, "anterior", nuclei[1])
+
+        panel._on_apply_body_axes()
+
+        assert panel.app.edit_history.num_undoable == 0
+        assert "ventral/dorsal or right/left" in panel._status_label.text()
 
 
 # ── Dialog tests ─────────────────────────────────────────────────
@@ -650,7 +797,6 @@ class TestEditPanelIntegration:
     def test_rename_via_dialog_values(self, qtbot):
         """Verify RenameCell command can be created from dialog values."""
         from acetree_py.gui.edit_panel import RenameCellDialog
-        from acetree_py.editing.commands import RenameCell
 
         dialog = RenameCellDialog("ABa")
         qtbot.addWidget(dialog)
@@ -722,17 +868,72 @@ class TestEditPanelIntegration:
         panel._on_kill_cell()
         assert "not found" in panel._status_label.text()
 
-    def test_relink_no_selection(self, qtbot):
-        """Relink shows status when no nucleus selected."""
+    def test_kill_uses_selected_anchor_when_disconnected_names_collide(
+        self, qtbot, monkeypatch
+    ):
+        from qtpy.QtWidgets import QDialog
+
+        from acetree_py.gui.app import AceTreeApp
+        from acetree_py.gui.edit_panel import EditPanel, KillCellDialog
+
+        record = [[
+            _make_nucleus(
+                1, identity="LeftSeed", assigned_id="Dup",
+            ),
+            _make_nucleus(
+                2, identity="RightSeed", assigned_id="Dup",
+            ),
+        ]]
+        manager = NucleiManager()
+        manager.movie = Movie()
+        manager.nuclei_record = record
+        manager.lineage_tree = build_lineage_tree(
+            record,
+            starting_index=0,
+            ending_index=1,
+            create_dummy_ancestors=False,
+        )
+        lookup_cell = manager.get_cell("Dup")
+        selected_cell = next(
+            cell
+            for cell in manager.lineage_tree.name_collisions["Dup"]
+            if cell is not lookup_cell
+        )
+        selected = selected_cell.get_nucleus_at(1)
+        wrong_target = lookup_cell.get_nucleus_at(1)
+        assert selected is not None
+        assert wrong_target is not None
+
+        app = AceTreeApp(manager, image_provider=None)
+        app.current_time = 1
+        app._set_selection_from_nucleus(1, selected)
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+        monkeypatch.setattr(
+            KillCellDialog, "exec_", lambda self: QDialog.Accepted
+        )
+
+        panel._on_kill_cell()
+
+        assert not selected.is_alive
+        assert wrong_target.is_alive
+        assert app.edit_history.last_command.anchor_index == selected.index
+
+    def test_relink_cancel_restores_source_and_button(self, qtbot):
+        """Escape cancellation cannot leave a stale relink source behind."""
         from acetree_py.gui.edit_panel import EditPanel
 
         app = MockApp()
-        app.current_cell_name = ""
         panel = EditPanel(app)
         qtbot.addWidget(panel)
+        panel._relink_source = (app.manager.nuclei_record[1][0], 2, 1)
+        panel._btn_relink.setEnabled(False)
 
-        panel._on_relink()
-        assert "No nucleus selected" in panel._status_label.text()
+        panel._on_relink_cancelled()
+
+        assert panel._relink_source is None
+        assert panel._btn_relink.isEnabled()
+        assert "cancelled" in panel._status_label.text().lower()
 
     def test_relink_no_selection(self, qtbot):
         """Relink shows status when no nucleus selected."""
@@ -747,7 +948,7 @@ class TestEditPanelIntegration:
         assert "No nucleus selected" in panel._status_label.text()
 
     def test_resurrect_no_selection(self, qtbot):
-        """Resurrect shows status when no nucleus selected."""
+        """Without a dead record, Resurrect explains what is needed."""
         from acetree_py.gui.edit_panel import EditPanel
 
         app = MockApp()
@@ -756,4 +957,62 @@ class TestEditPanelIntegration:
         qtbot.addWidget(panel)
 
         panel._on_resurrect()
-        assert "No nucleus selected" in panel._status_label.text()
+        assert "No dead nuclei" in panel._status_label.text()
+
+    def test_resurrect_live_selection_chooses_dead_record(self, qtbot, monkeypatch):
+        """A live selection is rejected as target; a dead record is used."""
+        from qtpy.QtWidgets import QDialog
+        from acetree_py.gui.edit_panel import EditPanel, ResurrectDialog
+
+        record = _make_nuclei_record()
+        dead = record[1][0]
+        dead.status = -1
+        dead.identity = ""
+        app = MockApp(record)
+        app.current_cell_name = "P1"  # deliberately select the live neighbour
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+        monkeypatch.setattr(
+            ResurrectDialog, "exec_", lambda self: QDialog.Accepted
+        )
+        monkeypatch.setattr(
+            ResurrectDialog, "get_identity", lambda self: "Restored"
+        )
+
+        panel._on_resurrect()
+
+        assert dead.is_alive
+        assert dead.identity == "Restored"
+        assert record[1][1].identity == "P1"
+
+    def test_resurrect_multiple_dead_records_uses_chooser(
+        self, qtbot, monkeypatch
+    ):
+        from qtpy.QtWidgets import QDialog, QInputDialog
+        from acetree_py.gui.edit_panel import EditPanel, ResurrectDialog
+
+        record = _make_nuclei_record()
+        first, second = record[1]
+        first.status = second.status = -1
+        first.identity = second.identity = ""
+        app = MockApp(record)
+        app.current_cell_name = ""
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+        monkeypatch.setattr(
+            QInputDialog,
+            "getItem",
+            lambda *args: (args[3][1], True),
+        )
+        monkeypatch.setattr(
+            ResurrectDialog, "exec_", lambda self: QDialog.Accepted
+        )
+        monkeypatch.setattr(
+            ResurrectDialog, "get_identity", lambda self: "Chosen"
+        )
+
+        panel._on_resurrect()
+
+        assert not first.is_alive
+        assert second.is_alive
+        assert second.identity == "Chosen"

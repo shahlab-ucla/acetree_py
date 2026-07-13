@@ -2,6 +2,8 @@
 
 A practical guide to opening datasets, navigating the viewer, editing cells, and saving your work.
 
+For automatic-versus-forced names and the complete correction contract, see [Naming and Manual-Curation Workflows](naming_workflows.md).
+
 ---
 
 ## 1. Installation
@@ -120,8 +122,8 @@ Napari's built-in layer list and layer controls are hidden by default to save sc
 |------------------|---------------------------|
 | `Right Arrow`    | Next timepoint (follows tracked cell) |
 | `Left Arrow`     | Previous timepoint        |
-| `Up Arrow`       | Next z-plane (deselects active cell) |
-| `Down Arrow`     | Previous z-plane (deselects active cell) |
+| `Up Arrow`       | Next z-plane              |
+| `Down Arrow`     | Previous z-plane          |
 | `Ctrl+S`         | Save                      |
 | `Ctrl+Shift+S`   | Save As                   |
 | `Ctrl+Z`         | Undo                      |
@@ -129,7 +131,7 @@ Napari's built-in layer list and layer controls are hidden by default to save sc
 | `Delete`         | Remove active cell's nucleus at the current timepoint |
 | `Escape`         | Exit active mode (Add, Track, Relink pick) |
 
-**Note:** Changing z-plane deselects the active cell because the user is manually exploring rather than following a tracked cell. Time navigation continues to follow the tracked cell's centroid.
+Changing z-plane does **not** clear the active cell. Selection is anchored by timepoint and nucleus index, so it remains stable across display refreshes and automatic renaming. Use **Deselect** when you intentionally want to clear it.
 
 ### 4.2 Player Controls
 
@@ -216,6 +218,10 @@ All edits are **undoable** (`Ctrl+Z`) and **redoable** (`Ctrl+Y`). Up to 1000 ed
 │ Link Operations              │
 │ [Relink] [Track]             │
 │                              │
+│ Body Orientation             │
+│ Endpoint: [Anterior ▾]       │
+│ [Label selected] [Apply axes]│
+│                              │
 │ Status: Ready                │
 │                              │
 │ Visualization                │
@@ -240,9 +246,9 @@ The **Add** button is a toggle that activates click-to-add mode:
 4. Press **Esc** or click **Add** again to exit add mode.
 
 **Predecessor linking:**
-- If a cell is selected when you click, the new nucleus inherits the selected cell's identity and is linked as its successor.
+- If a cell is selected when you click, the new nucleus is linked as its successor. A continuation may carry the current automatic identity, but an automatic name is never converted into a forced override. `assigned_id` is inherited only when the parent was already manually forced.
 - If the selected cell's last timepoint is adjacent (gap = 1), a direct predecessor link is made.
-- If there is a gap > 1 timepoint, the system automatically interpolates intermediate nuclei to fill the gap.
+- If there is a gap > 1 timepoint, the system automatically interpolates intermediate nuclei to fill the gap. Placement, interpolation, and linking are one action, so one Undo removes the entire gesture.
 - If no cell is selected, a new independent root nucleus is created.
 
 **Inherited properties:** When adding from an existing cell, the new nucleus inherits the parent cell's diameter (size). Root nuclei use the default diameter (20 pixels).
@@ -269,13 +275,15 @@ The rename is **cell-scoped**: the forced name (`assigned_id`) is written atomic
 
 The forced name persists through automatic re-naming on reload. When the cell divides, the forced name is used as the parent name for Sulston daughter naming rules. Undo restores the previous `identity` and `assigned_id` on every nucleus the rename touched.
 
+If the displayed name is already correct, closing or accepting Rename without a change does nothing and adds no undo entry. Choose **Use Automatic** to remove the forced override from the cell continuation. AceTree then recomputes its automatic identity; Undo restores the override.
+
 **Name collisions:** If the target name is already in use by a different cell, AceTree offers a **Swap** — pressing "Swap" runs the `SwapCellNames` command, which atomically exchanges the forced names of the two cells (writes cell B's effective name onto every nucleus in cell A's chain, and vice versa). This is the same one-step undo.
 
 #### Kill
 Select a cell, then click **Kill**. Choose a time range. All nuclei of that cell within the range are marked dead.
 
 #### Resurrect
-Select a dead nucleus, then click **Resurrect**. The nucleus is restored to alive status.
+Click **Resurrect** to choose from dead nuclei at the current timepoint (dead records are normally hidden from the overlay). If an explicitly anchored dead nucleus is available, it is used directly. A live selection is never silently toggled; the command rejects it or offers the dead-record chooser. Resurrection restores the requested automatic/forced name state and is undoable.
 
 ### 6.5 Link Operations
 
@@ -296,6 +304,8 @@ The relink operation lets you change which cell a nucleus is linked to as its pr
 
 **Automatic interpolation:** If the two cells are more than 1 timepoint apart, the system automatically creates interpolated nuclei to fill the gap. This is required by the data format — every cell must have a continuous chain of nuclei across consecutive timepoints. The interpolated nuclei are placed at linearly interpolated positions and sizes between the two endpoints.
 
+The link must be alive, reciprocal, and unambiguous. AceTree rejects a relink that would merge two different forced identities instead of silently choosing whichever name it encounters first. Relinking and all interpolation are a single undoable action. **Escape** exits pick mode and restores the normal selection controls.
+
 **Adjacent links (gap = 1 frame):** A simple predecessor change is made, no interpolation needed.
 
 #### Track Mode
@@ -305,12 +315,45 @@ The **Track** button enables continuous click-to-place tracking across timepoint
 1. Select a cell to track from (the parent).
 2. Click **Track** — the button stays pressed.
 3. Navigate to a later timepoint.
-4. **Right-click** in the viewer to place a nucleus. It is automatically linked to the parent cell with the correct identity and predecessor.
+4. **Right-click** in the viewer to place a nucleus. It is automatically linked to the parent cell. Existing manual override state is preserved; a merely automatic parent name is not locked.
 5. If there is a time gap > 1, intermediate nuclei are interpolated.
 6. The mode stays active so you can advance to the next timepoint and place again.
 7. Press **Esc** or click **Track** again to exit.
 
 If no cell is selected, Track enters root mode: a single right-click places one independent nucleus and exits.
+
+When a placement creates a second daughter, AceTree evaluates the division rule for the **actual parent**. The preview can therefore propose `ABal/ABar`, `E/MS`, `C/P3`, or other parent-specific pairs rather than always proposing `a/p`. The preview reports its axis, confidence, and orientation source. Suggested names remain automatic (`identity`); use Rename only when you intend to force a correction. Low-confidence or ambiguous geometry is an invitation to inspect the body axes and daughter positions.
+
+#### Curate a Known Sublineage: EMS to E to Ea/Ep
+
+This workflow is supported even when the rest of the embryo is incomplete:
+
+1. At a clear reference frame, define **Body Orientation** using Posterior + Anterior and either Ventral + Dorsal or Right + Left, then click **Apply Axes**.
+2. Select any trusted nucleus in the EMS continuation, choose **Rename**, and enter `EMS`. The forced EMS identity propagates only along that one-successor continuation.
+3. Enter **Track** and place the EMS continuation through successive frames.
+4. At the EMS division frame, place one daughter, then place the second daughter at the same frame. The second placement establishes the division. AceTree keeps `EMS` on the parent, removes the inherited EMS lock from the first daughter, and proposes `E` and `MS` from their geometry in the manual body frame.
+5. Exit Track, select `E`, and enter Track again to follow that branch. At the E division, place both daughters at the same frame; AceTree applies the E rule and proposes `Ea` and `Ep`.
+6. Repeat by selecting whichever automatically named daughter you want to follow. Re-selecting at a division is intentional: Track stays anchored to the branch that was selected when the mode began.
+
+`E`, `MS`, `Ea`, and `Ep` are automatic identities, not new manual locks. Correcting the body frame and clicking **Apply Axes** can therefore reorder them while preserving the forced `EMS` anchor. If one proposed daughter is independently known, Rename only that cell; **Use Automatic** later returns it to geometry-based naming. The status preview reports the rule axis, source, confidence, and ambiguity, so inspect uncertain calls before continuing deeply down the branch.
+
+At a selected cell's terminal frame, a click near the existing nucleus is interpreted as continuation, while a click farther away than its displayed diameter is interpreted as the second daughter. If newborn daughters are too close to separate reliably, track to a later frame where they have separated or place them and use **Relink** explicitly. Body axes determine daughter ordering; two reciprocal successor links establish that a division occurred.
+
+### 6.5.1 Body Orientation Correction
+
+Use **Body Orientation** when automatic daughter ordering is systematically mirrored or rotated:
+
+1. Go to one clear reference timepoint. Select a nucleus at the posterior endpoint, choose **Posterior**, and click **Label selected**. Repeat for **Anterior**.
+2. Add either **Ventral** and **Dorsal**, or **Right** and **Left**. All endpoints for a frame must be labeled at the same timepoint.
+3. Click **Apply Axes**. AceTree validates that the two directions are non-zero and not parallel, then displays the committed source and geometry quality.
+4. Inspect several known divisions. If an axis is reversed, relabel or swap that endpoint pair and apply again. **Undo** restores the prior orientation in one step.
+5. Save the dataset to persist the manual orientation beside the nuclei ZIP as AuxInfo v2.
+
+The conventions are AP **posterior → anterior**, DV **ventral → dorsal**, and LR **right → left**, with `DV = AP × LR`. AP plus either DV or LR is sufficient; AceTree constructs the third axis and orthogonalizes the frame. Z separation is scaled by the dataset's physical z resolution, so a one-plane z shift is not assumed to equal one x/y pixel.
+
+Do not infer left/right from the ABa–ABp separation alone. At the four-cell stage that pair does not by itself establish signed LR; use trusted metadata, a manual anatomical cue, or later handedness. Manual orientation takes precedence over automatic geometry, while manual **cell-name** overrides remain intact when naming is rerun.
+
+If AceTree can identify founders from topology but cannot construct a complete AP/DV/LR frame, it keeps those founder names but does not pretend that microscope x/y/z are anatomical coordinates. Existing loaded descendant names are preserved; new uncertain branches use neutral `Nuc...` names until a valid body frame is supplied and naming is rerun.
 
 ### 6.6 3D Volume View
 
@@ -398,18 +441,19 @@ Multi-channel images are displayed as separate napari layers with green/magenta 
 ### 8.1 Save / Save As
 
 - **Ctrl+S** or the **Save** button: Overwrites the original nuclei ZIP file.
-- **Ctrl+Shift+S** or **Save As**: Opens a file dialog to choose a new location.
+- **Ctrl+Shift+S** or **Save As**: Opens a file dialog to choose a new location, makes that location the target of subsequent Save operations, and updates the source XML config so reopening it follows the new ZIP. The retarget happens only after the data save and config rewrite both succeed.
 
-The saved file is a ZIP containing CSV-formatted nucleus data, one entry per timepoint. This is the standard AceTree nuclei format and can be opened by both AceTree-Py and the original Java AceTree.
+The saved file is a ZIP containing CSV-formatted nucleus data, one entry per timepoint. This is the standard AceTree nuclei format and can be opened by both AceTree-Py and the original Java AceTree. AceTree fully prepares the nuclei ZIP and any manual-orientation sidecar before committing them. A failure leaves the previous ZIP and sidecar together, rather than mixing one new file with one old file. Existing file permissions are retained across replacement.
 
 ### 8.2 What Gets Saved
 
 - All nucleus positions, sizes, and names
 - All predecessor/successor links
 - Manual name overrides (`assigned_id`)
+- Manual body orientation in an AuxInfo v2 sidecar, including source, quality, and reference time
 - Expression values
 
-Edits that haven't been saved are tracked — the Edit Tools panel will show unsaved state.
+Edits that haven't been saved are tracked against an explicit savepoint. Undoing a saved edit makes the dataset dirty; redoing exactly back to the saved state makes it clean again. A new edit after Undo creates a new branch and remains dirty even if the history happens to have the same number of entries. The savepoint advances only after a successful Save or Save As.
 
 ---
 
@@ -510,11 +554,11 @@ The dialog also writes the chosen mode back onto `manager._expr_corr`, so the li
 
 When a dataset is loaded, the naming pipeline automatically identifies cells:
 
-1. **Founder identification**: Finds the 4-cell stage and identifies ABa, ABp, EMS, P2 using topology and timing. ABa/ABp are distinguished by projection onto the anterior-posterior axis (not image coordinates), making this step robust to arbitrary embryo orientations.
+1. **Founder identification**: Finds the 4-cell stage and identifies ABa, ABp, EMS, P2 using topology and timing. ABa/ABp are distinguished by projection onto a posterior→anterior axis rather than assuming image x. Explicit orientation is preferred; weak geometric fallbacks are reported with lower confidence.
 2. **Back-tracing**: Names earlier cells (AB, P1, P0) by tracing predecessor links backward.
-3. **Forward naming**: Names all subsequent cells by classifying each division using 3D geometry. The body axes (AP, LR, DV) are re-derived at every timepoint from lineage centroid positions, making naming robust to embryo rotations during imaging.
+3. **Forward naming**: Names all subsequent cells by applying the selected parent's Sulston division rule to physically scaled 3D geometry. Each result carries an axis, confidence, and orientation source.
 
-If AuxInfo orientation data is available (v1 or v2), it is used for higher-precision axis estimation. Without AuxInfo, the pipeline uses the rotation-invariant lineage centroid approach described above.
+Orientation precedence is: valid explicit AuxInfo v2 (including a manual landmark frame), a supported AuxInfo v1 orientation, per-timepoint lineage geometry, then static founder geometry. A present but unusable v2 file (missing, malformed, non-finite, zero, or parallel AP/LR vectors) does not mask valid v1 metadata. Invalid placeholder metadata is ignored. Automatic geometry uses AP from P2 toward ABa and a DV seed from EMS toward ABp, projected perpendicular to AP; it does not treat ABa–ABp as LR. Manual correction is recommended when compression, sparse tracking, or uncertain handedness makes that estimate weak.
 
 ### 11.2 Unnamed Cells
 
@@ -526,7 +570,17 @@ When you **Rename** a cell (Section 6.4), the name is stored as a permanent over
 
 **Automatic propagation:** When the naming pipeline runs (on load or after edits), the forced name is automatically propagated to every timepoint the cell exists — both forward through continuation links and backward to the cell's birth. This means you only need to rename the cell at one timepoint; the override covers its entire lifetime.
 
-**Division naming:** When a renamed cell divides, the forced name is used as the parent name for determining daughter names via the standard Sulston rules. For example, if you rename a cell to "ABal", its daughters will be named according to the division rule for "ABal" (e.g., "ABala" and "ABalp").
+**Division naming:** When a renamed cell divides, the forced name is used as the parent name for determining daughter names via the standard Sulston rules. For example, forcing `EMS` lets its daughters be assigned automatically as `E` and `MS`; tracking `E` to its next division then produces `Ea` and `Ep`. Only the known anchor remains forced, so a later body-axis correction can safely reorder its automatic descendants.
+
+The three name concepts are deliberately separate:
+
+| Displayed concept | Stored value | Meaning |
+|---|---|---|
+| Automatic/current identity | `identity` | May change after a move, relink, or orientation correction |
+| Forced identity | `assigned_id` | Explicit user decision; survives automatic processing |
+| Name used by the UI | `effective_name` | Forced identity when present, otherwise automatic identity |
+
+**Use Automatic** clears `assigned_id` for that cell continuation without erasing the user's ability to Undo. Add and Track do not turn an automatic suggestion into a forced identity. Forced-name propagation follows only live reciprocal one-successor continuations, stops at divisions, and stops on a conflicting override. A conflict is shown for correction; AceTree does not append an arbitrary suffix or let traversal order settle it.
 
 ---
 
@@ -582,6 +636,13 @@ All open panels update synchronously when edits are committed (relink, kill, ren
 1. Look for **orange** circles in the image (unnamed `Nuc*` cells are orange, named ones are purple, gray indicates no name at all). Or switch to visualization mode with the lineage depth preset for a rainbow view.
 2. Right-click to select, then hover over the cell to see the tooltip.
 3. Use **Rename** to assign a name if you know the identity.
+
+### Correcting mirrored daughter names
+
+1. Check that the two daughter tracks and their predecessor links are correct.
+2. Look at the division preview's axis, confidence, and orientation source.
+3. If several divisions are mirrored in the same direction, correct **Body Orientation** rather than renaming every daughter individually.
+4. If one biological identity is known with certainty, Rename that cell to make a forced override. Use **Use Automatic** later if you want geometry to control it again.
 
 ### Decluttering labels
 - Left-click on any nucleus to toggle its label off. Left-click again to toggle it back on.
@@ -701,7 +762,7 @@ Once the GUI is open on a new (empty) dataset:
 **Adding onto an existing cell:**
 1. Right-click an existing nucleus to select its cell.
 2. Navigate to a later timepoint.
-3. Click **Add**, then left-click to place. The new nucleus inherits the selected cell's identity, predecessor link, and diameter.
+3. Click **Add**, then left-click to place. The new nucleus inherits the predecessor link and diameter. It preserves an existing forced override, but a merely automatic name remains automatic.
 4. If there is a gap > 1 timepoint, intermediate nuclei are automatically interpolated.
 
 ### 14.3 Adjusting Nuclei (D-Pad Controls)
@@ -726,7 +787,7 @@ For continuous tracking across many timepoints, use the **Track** button:
 6. Press **Esc** to exit tracking mode.
 
 Track mode automatically handles:
-- **Identity inheritance**: each placed nucleus gets the parent cell's name.
+- **Name continuity**: the current automatic identity can continue, while only a genuinely forced parent override is inherited as `assigned_id`.
 - **Predecessor linking**: direct link if adjacent, interpolation if there's a gap.
 - **Size inheritance**: the placed nucleus inherits the parent's diameter.
 
@@ -751,6 +812,7 @@ Each placed nucleus becomes an independent root cell. The Track button is not us
 After annotation:
 
 - **Save** (`Ctrl+S`) writes the nuclei to the ZIP file and the config XML.
+- A manually applied body orientation is written as an AuxInfo v2 sidecar and loaded before automatic geometry next time.
 - To reopen later: `acetree-py gui path/to/output/config.xml`
 - The automatic naming pipeline runs on load. If enough cells have been placed for the 4→8 cell transition to be detected, Sulston names will be assigned automatically.
 

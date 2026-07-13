@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -200,3 +202,52 @@ class TestJavaXMLCompat:
         assert config.use_stack == 1
         assert config.split == 1
         assert config.flip == 0
+
+
+class TestAtomicConfigWrite:
+    def test_serialization_failure_preserves_existing_config(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        import acetree_py.io.config_writer as config_writer_module
+
+        cfg_path = tmp_path / "embryo.xml"
+        old_contents = b"last known good config"
+        cfg_path.write_bytes(old_contents)
+        config = AceTreeConfig(
+            config_file=cfg_path,
+            zip_file=tmp_path / "nuclei.zip",
+        )
+
+        def fail_after_partial_write(self, path, *args, **kwargs):
+            Path(path).write_text("partial", encoding="utf-8")
+            raise OSError("simulated XML serialization failure")
+
+        monkeypatch.setattr(
+            config_writer_module.ElementTree,
+            "write",
+            fail_after_partial_write,
+        )
+
+        with pytest.raises(OSError, match="serialization"):
+            config_writer_module.write_config_xml(config, cfg_path)
+
+        assert cfg_path.read_bytes() == old_contents
+        assert list(tmp_path.glob(".embryo.xml.*.tmp")) == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file mode semantics")
+    def test_atomic_replace_preserves_existing_config_mode(self, tmp_path: Path):
+        from acetree_py.io.config_writer import write_config_xml
+
+        cfg_path = tmp_path / "embryo.xml"
+        cfg_path.write_text("old", encoding="utf-8")
+        cfg_path.chmod(0o640)
+        config = AceTreeConfig(
+            config_file=cfg_path,
+            zip_file=tmp_path / "nuclei.zip",
+        )
+
+        write_config_xml(config, cfg_path)
+
+        assert stat.S_IMODE(cfg_path.stat().st_mode) == 0o640

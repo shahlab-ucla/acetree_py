@@ -80,7 +80,17 @@ class AceTreeApp:
         self.current_time: int = 1
         self.current_plane: int = 1
         self.current_cell_name: str = ""
+        # Stable physical anchor for the selection.  Cell names are mutable:
+        # automatic naming, manual overrides, relinks, and undo/redo can all
+        # change them.  Keeping the nucleus that was actually picked prevents
+        # a rename elsewhere from stealing the selection and makes unnamed
+        # selections safe across time navigation.
+        self.selection_anchor: tuple[int, int] | None = None
         self.tracking: bool = True
+
+        # Save As becomes the target for subsequent Save operations even for
+        # headless/new managers that do not yet own an AceTreeConfig.
+        self._save_path_override: Path | None = None
 
         # GUI components (initialized in launch())
         self.viewer: napari.Viewer | None = None
@@ -109,6 +119,7 @@ class AceTreeApp:
         # Click-to-place nucleus mode (Track button)
         self._placement_mode: bool = False
         self._placement_parent_name: str | None = None  # None = root mode
+        self._placement_parent_anchor: tuple[int, int] | None = None
         self._placement_default_size: int = 20
 
         # Click-to-add nucleus mode (Add button)
@@ -260,7 +271,6 @@ class AceTreeApp:
         from .contrast_tools import ContrastTools
         from .edit_panel import EditPanel
         from .lineage_list import LineageListWidget
-        from .lineage_widget import LineageWidget
         from .player_controls import PlayerControls
         from .viewer_integration import ViewerIntegration
 
@@ -346,6 +356,8 @@ class AceTreeApp:
     @property
     def _default_save_path(self) -> Path | None:
         """Return the original nuclei ZIP path from config, if available."""
+        if self._save_path_override is not None:
+            return self._save_path_override
         if self.manager.config and str(self.manager.config.zip_file):
             zf = self.manager.config.zip_file
             # Path() defaults to '.' — treat as unset
@@ -388,12 +400,52 @@ class AceTreeApp:
         if not path_str:
             return None  # User cancelled
 
-        return self._do_save(Path(path_str))
+        saved_path = self._do_save(Path(path_str), mark_saved=False)
+        if saved_path is None:
+            return None
 
-    def _do_save(self, path: Path) -> Path | None:
+        config = self.manager.config
+        old_zip_path = config.zip_file if config is not None else None
+        if config is not None:
+            config.zip_file = saved_path
+            config_path = config.config_file
+            if config_path != Path() and config_path.suffix.lower() == ".xml":
+                try:
+                    from ..io.config_writer import write_config_xml
+
+                    write_config_xml(config, config_path)
+                except Exception:
+                    # The target ZIP is a valid standalone copy, but Save As
+                    # is not a successful retarget unless the source config
+                    # will reopen it.  Keep both in-memory and on-disk config
+                    # pointing at the previous dataset and leave history dirty.
+                    config.zip_file = old_zip_path
+                    logger.exception(
+                        "Saved nuclei to %s but could not update config %s",
+                        saved_path,
+                        config_path,
+                    )
+                    from qtpy.QtWidgets import QMessageBox
+
+                    QMessageBox.critical(
+                        self.viewer.window._qt_window,
+                        "Save As Incomplete",
+                        "The nuclei copy was written, but the dataset config "
+                        "could not be updated. The current Save target was "
+                        "not changed.",
+                    )
+                    return None
+
+        self._save_path_override = saved_path
+        self.edit_history.mark_saved()
+        return saved_path
+
+    def _do_save(self, path: Path, *, mark_saved: bool = True) -> Path | None:
         """Write nuclei_record to *path* and report success/failure."""
         try:
             self.manager.save(path)
+            if mark_saved:
+                self.edit_history.mark_saved()
             logger.info("Saved nuclei to %s", path)
             return path
         except Exception:
@@ -550,6 +602,163 @@ class AceTreeApp:
         """Go to the previous z-plane."""
         self.set_plane(self.current_plane - 1)
 
+    def _nucleus_at_anchor(self, anchor: tuple[int, int] | None = None):
+        """Return the raw nucleus at an immutable ``(time, index)`` anchor."""
+        if anchor is None:
+            anchor = self.selection_anchor
+        if anchor is None:
+            return None
+        time, index = anchor
+        t_idx = time - 1
+        n_idx = index - 1
+        nr = self.manager.nuclei_record
+        if not (0 <= t_idx < len(nr)):
+            return None
+        if not (0 <= n_idx < len(nr[t_idx])):
+            return None
+        return nr[t_idx][n_idx]
+
+    def _cell_for_nucleus(self, time: int, nuc):
+        """Resolve the lineage Cell containing *nuc* without using its name."""
+        tree = self.manager.lineage_tree
+        if tree is None:
+            return None
+        if nuc.hash_key:
+            cell = tree.cells_by_hash.get(nuc.hash_key)
+            if cell is not None:
+                return cell
+
+        # Defensive fallback for hand-built trees without nucleus hash keys.
+        for cell in tree.all_cells():
+            if any(t == time and candidate is nuc for t, candidate in cell.nuclei):
+                return cell
+        return None
+
+    def _selection_name(self, time: int, nuc) -> str:
+        """Return the current display name for a physically anchored nucleus."""
+        if not nuc.effective_name:
+            # A bare ``idx=N`` can target an unrelated nucleus after a time
+            # scrub, so raw fallbacks are always time-qualified.
+            return f"idx={time}:{nuc.index}"
+        cell = self._cell_for_nucleus(time, nuc)
+        return cell.name if cell is not None else nuc.effective_name
+
+    def _set_selection_from_nucleus(self, time: int, nuc) -> None:
+        """Select a concrete nucleus and derive its mutable name from it."""
+        old_name = self.current_cell_name
+        self.selection_anchor = (time, nuc.index)
+        self.current_cell_name = self._selection_name(time, nuc)
+        self.tracking = True
+        if self._viewer_integration is not None:
+            if old_name and old_name != self.current_cell_name:
+                self._viewer_integration._shown_labels.discard(old_name)
+            if self.current_cell_name:
+                self._viewer_integration._shown_labels.add(self.current_cell_name)
+
+    def _resolve_selection_after_rebuild(self) -> None:
+        """Re-resolve the selected name from its stable physical anchor."""
+        if self.selection_anchor is None:
+            # Compatibility for callers/tests that still assign the name
+            # directly.  Normal GUI selection paths set the anchor eagerly.
+            if not self.current_cell_name:
+                return
+            cell = self.manager.get_cell(self.current_cell_name)
+            if cell is None:
+                return
+            nuc = cell.get_nucleus_at(self.current_time)
+            if nuc is None and cell.nuclei:
+                anchor_time, nuc = min(
+                    cell.nuclei, key=lambda item: abs(item[0] - self.current_time)
+                )
+            else:
+                anchor_time = self.current_time
+            if nuc is None:
+                return
+            self.selection_anchor = (anchor_time, nuc.index)
+
+        nuc = self._nucleus_at_anchor()
+        if nuc is None or not nuc.is_alive:
+            self.current_cell_name = ""
+            self.selection_anchor = None
+            self.tracking = False
+            return
+
+        anchor_time, _ = self.selection_anchor
+        old_name = self.current_cell_name
+        self.current_cell_name = self._selection_name(anchor_time, nuc)
+        if self._viewer_integration is not None and old_name != self.current_cell_name:
+            if old_name:
+                self._viewer_integration._shown_labels.discard(old_name)
+            if self.current_cell_name:
+                self._viewer_integration._shown_labels.add(self.current_cell_name)
+
+    def get_selected_nucleus(self, time: int | None = None):
+        """Return ``(nucleus, time, index)`` for the stable selection."""
+        target_time = self.current_time if time is None else time
+
+        if self.selection_anchor is None and self.current_cell_name:
+            cell = self.manager.get_cell(self.current_cell_name)
+            if cell is not None:
+                nuc = cell.get_nucleus_at(target_time)
+                if nuc is None and cell.nuclei:
+                    anchor_time, nuc = min(
+                        cell.nuclei,
+                        key=lambda item: abs(item[0] - target_time),
+                    )
+                else:
+                    anchor_time = target_time
+                if nuc is not None:
+                    self.selection_anchor = (anchor_time, nuc.index)
+            elif self.current_cell_name.startswith("idx="):
+                raw = self.current_cell_name[4:]
+                try:
+                    if ":" in raw:
+                        anchor_time, anchor_index = (
+                            int(value) for value in raw.split(":", 1)
+                        )
+                    else:  # qualify legacy in-memory state immediately
+                        anchor_time, anchor_index = target_time, int(raw)
+                    self.selection_anchor = (anchor_time, anchor_index)
+                except ValueError:
+                    return None
+
+        anchor = self.selection_anchor
+        anchor_nuc = self._nucleus_at_anchor(anchor)
+        if anchor is None or anchor_nuc is None:
+            return None
+        anchor_time, _ = anchor
+        if target_time == anchor_time:
+            return anchor_nuc, target_time, anchor_nuc.index
+
+        cell = self._cell_for_nucleus(anchor_time, anchor_nuc)
+        if cell is not None:
+            nuc = cell.get_nucleus_at(target_time)
+            if nuc is not None:
+                return nuc, target_time, nuc.index
+        return None
+
+    def get_selected_cell(self):
+        """Return the physically selected lineage cell.
+
+        Names are intentionally not used when a selection anchor exists:
+        disconnected cells can temporarily share an effective name while a
+        conflict is being corrected.  Name lookup remains only as a legacy
+        bridge for programmatic callers that set ``current_cell_name``
+        directly without selecting a nucleus.
+        """
+        if self.selection_anchor is None:
+            # Qualify legacy name-only state into a physical anchor while the
+            # current tree still provides the lookup context.
+            if self.get_selected_nucleus() is None:
+                return None
+
+        anchor = self.selection_anchor
+        nuc = self._nucleus_at_anchor(anchor)
+        if anchor is None or nuc is None or not nuc.is_alive:
+            return None
+        anchor_time, _ = anchor
+        return self._cell_for_nucleus(anchor_time, nuc)
+
     def select_cell(self, name: str, time: int | None = None) -> None:
         """Select a cell by name, optionally jumping to a specific time.
 
@@ -562,7 +771,7 @@ class AceTreeApp:
             logger.warning("Cell '%s' not found in lineage tree", name)
             return
 
-        self.current_cell_name = name
+        self.current_cell_name = cell.name
         # Explicitly selecting a cell re-enables follow-mode.  This undoes
         # any prior ↑/↓ Z nudge that disabled tracking, so subsequent
         # time-scrubbing snaps the slice back to the selected cell.
@@ -573,18 +782,30 @@ class AceTreeApp:
         elif self.current_time < cell.start_time or self.current_time > cell.end_time:
             self.current_time = cell.start_time
 
+        nuc = cell.get_nucleus_at(self.current_time)
+        if nuc is None and cell.nuclei:
+            anchor_time, nuc = min(
+                cell.nuclei, key=lambda item: abs(item[0] - self.current_time)
+            )
+        else:
+            anchor_time = self.current_time
+        self.selection_anchor = (
+            (anchor_time, nuc.index) if nuc is not None else None
+        )
+
         # Track to cell's z-plane
         self._track_cell_at_time()
 
         # Show label for the selected cell
         if self._viewer_integration is not None:
-            self._viewer_integration._shown_labels.add(name)
+            self._viewer_integration._shown_labels.add(self.current_cell_name)
 
         self.update_display()
 
     def deselect_cell(self) -> None:
         """Clear the current cell selection and stop follow-mode."""
         self.current_cell_name = ""
+        self.selection_anchor = None
         self.tracking = False
         self.update_display()
 
@@ -603,16 +824,15 @@ class AceTreeApp:
             x, y, float(self.current_plane), self.current_time,
             require_hit=True, image_plane=self.current_plane,
         )
-        if nuc and nuc.effective_name:
-            self.select_cell(nuc.effective_name, self.current_time)
-        elif nuc:
+        if nuc:
             # Unnamed nucleus — highlight it and re-enable tracking so
             # subsequent time-scrubbing still snaps Z to follow it (via
             # the predecessor/successor chain fallback in
             # _track_cell_at_time).
-            self.current_cell_name = nuc.effective_name or f"idx={nuc.index}"
-            self.tracking = True
+            self._set_selection_from_nucleus(self.current_time, nuc)
             self.update_display()
+        else:
+            self.deselect_cell()
 
     # ── Relink pick mode (Feature 4) ─────────────────────────────
 
@@ -625,6 +845,13 @@ class AceTreeApp:
         Args:
             callback: Called with (time: int, nuc: Nucleus) when user picks.
         """
+        # Interaction modes are exclusive.  A relink target click must never
+        # also be interpreted as an Add/Track gesture afterward.
+        self.exit_add_mode()
+        self.exit_placement_mode()
+        if self._edit_panel is not None:
+            self._edit_panel._btn_add.setChecked(False)
+            self._edit_panel._btn_track.setChecked(False)
         self._relink_pick_mode = True
         self._relink_pick_callback = callback
         self._focus_viewer_canvas()
@@ -633,6 +860,14 @@ class AceTreeApp:
         """Exit pick mode without choosing a target."""
         self._relink_pick_mode = False
         self._relink_pick_callback = None
+
+    def cancel_relink_pick_mode(self) -> None:
+        """Cancel relink and synchronize the panel's pending source state."""
+        self.exit_relink_pick_mode()
+        if self._edit_panel is not None:
+            cancel = getattr(self._edit_panel, "_on_relink_cancelled", None)
+            if cancel is not None:
+                cancel()
 
     def _handle_relink_pick(self, x: float, y: float) -> bool:
         """If in pick mode, handle a right-click as a pick event.
@@ -656,6 +891,11 @@ class AceTreeApp:
 
     def enter_add_mode(self) -> None:
         """Enter click-to-add mode. Left-click places a nucleus."""
+        if self._relink_pick_mode:
+            self.cancel_relink_pick_mode()
+        self.exit_placement_mode()
+        if self._edit_panel is not None:
+            self._edit_panel._btn_track.setChecked(False)
         self._add_mode = True
         self._focus_viewer_canvas()
 
@@ -740,33 +980,37 @@ class AceTreeApp:
         except Exception:
             pass
 
-    def _division_suffixes(
+    def _suggest_division_names_safe(
         self,
+        parent,
         first_pos: tuple[float, float, float],
         new_pos: tuple[float, float, float],
         time: int,
-    ) -> tuple[str, str]:
-        """Decide which of two division daughters gets the ``"a"`` suffix.
+    ):
+        """Ask the naming model for daughter names, or safely defer to it.
 
-        Projects both daughter positions onto the embryo's AP direction
-        (resolved via ``NucleiManager.get_ap_direction_at``) and returns
-        ``(suffix_for_first_daughter, suffix_for_new_daughter)`` — always
-        one ``"a"`` and one ``"p"``.
-
-        Falls back to Java AceTree's "+X is anterior" convention when no
-        axis information is available — see ``get_ap_direction_at``'s
-        4-source priority order.
+        Older managers do not expose the suggestion API.  In that case the
+        click still creates the division with unlocked daughter identities;
+        the normal post-edit naming pass determines their names.  No GUI-level
+        axis or ``a/p`` assumption is made.
         """
-        import numpy as np
-        ap = self.manager.get_ap_direction_at(time)
-        p1 = np.asarray(first_pos, dtype=float)
-        p2 = np.asarray(new_pos, dtype=float)
-        proj_first = float(np.dot(p1, ap))
-        proj_new = float(np.dot(p2, ap))
-        # Larger projection along AP = more anterior = "a".
-        if proj_first >= proj_new:
-            return ("a", "p")  # first_daughter is anterior
-        return ("p", "a")
+        suggest = getattr(self.manager, "suggest_division_names", None)
+        if suggest is None:
+            return None
+        try:
+            result = suggest(parent, first_pos, new_pos, time)
+        except Exception:
+            logger.exception("Division-name suggestion failed at t=%d", time)
+            return None
+        if not result or not result.first_name or not result.second_name:
+            return None
+        if result.first_name == result.second_name:
+            logger.warning(
+                "Ignoring non-distinct division-name suggestion '%s' at t=%d",
+                result.first_name, time,
+            )
+            return None
+        return result
 
     def _handle_add_click(self, x: float, y: float) -> bool:
         """Handle a left-click in add mode — place a nucleus at (x, y).
@@ -777,15 +1021,19 @@ class AceTreeApp:
         from the parent cell's last nucleus when available.
 
         Manual-division handling: if the click is the second successor of
-        the selected parent, the two daughters are named via the AP axis
-        (``parent_name + "a"`` / ``parent_name + "p"``) so they don't
-        collide on the parent's forced name.  Triple-successor attempts
-        are rejected with a status message.
+        the selected parent, daughter identities are suggested by the same
+        lineage/geometry model used by automated naming. Triple-successor
+        attempts are rejected with a status message.
         """
         if not self._add_mode:
             return False
 
-        from ..editing.commands import AddNucleus, RelinkWithInterpolation, RenameCell
+        from ..editing.commands import (
+            AddNucleus,
+            CompositeCommand,
+            RelinkWithInterpolation,
+            SetCellNameState,
+        )
         from ..editing.validators import validate_add_nucleus
 
         ix, iy = round(x), round(y)
@@ -807,9 +1055,12 @@ class AceTreeApp:
         # happens — matching the "Predecessor: <name>" hint shown in the
         # status bar.  Also advance ``current_time`` so the user sees the
         # newly placed nucleus.
-        parent_name = self.current_cell_name
-        if parent_name:
-            cell = self.manager.get_cell(parent_name)
+        cell = self.get_selected_cell()
+        parent_name = cell.name if cell is not None else None
+        if self.selection_anchor is not None and cell is None:
+            self._say("Selected nucleus is no longer in the lineage tree")
+            return False
+        if cell is not None:
             # Guard against phantom cells (created by the dummy-ancestor
             # scaffold in lineage.py or by _track_cell_at_time following a
             # phantom child).  If current_cell_name maps to a cell with no
@@ -896,13 +1147,10 @@ class AceTreeApp:
                             parent_nuc = nr[t_idx_p][p_idx_p]
                             parent_nuc_ref = parent_nuc
                             size = parent_nuc.size  # inherit diameter
-                            # Plant the parent's effective name as a forced
-                            # name (assigned_id) on the new nucleus.  The
-                            # naming pipeline's _propagate_assigned_ids
-                            # will sweep it backward/forward through the
-                            # continuation chain, unifying the cell across
-                            # timepoints.
-                            assigned_id = parent_nuc.effective_name or parent_name
+                            # Only a genuinely manual parent override is
+                            # inherited.  Copying an automatic effective name
+                            # into assigned_id would silently lock the chain.
+                            assigned_id = parent_nuc.assigned_id
                             if gap == 1:
                                 predecessor = parent_end_index
 
@@ -918,12 +1166,12 @@ class AceTreeApp:
             logger.info("Add rejected: %s", errors[0])
             return False
 
-        # Manual-division detection.  If the click is making the parent
-        # dividing (parent already has exactly one successor and we're
-        # about to add a second), rename both daughters with "a"/"p"
-        # suffixes along the embryo's AP axis so they don't collide on
-        # the parent's forced name.
-        rename_first_to: str | None = None
+        # Daughter names come from the manager's lineage/axis-aware naming
+        # model and remain automatic identities.  A first daughter that
+        # inherited its parent's manual lock while it looked like a
+        # continuation is unlocked once the second daughter proves division.
+        first_name_state = None
+        first_idx = -1
         if (parent_nuc_ref is not None
                 and predecessor != -1
                 and parent_nuc_ref.successor1 != -1
@@ -934,35 +1182,53 @@ class AceTreeApp:
             first_idx = parent_nuc_ref.successor1 - 1
             if 0 <= t_idx < len(nr) and 0 <= first_idx < len(nr[t_idx]):
                 first_daughter = nr[t_idx][first_idx]
-                base = parent_nuc_ref.effective_name or parent_name
                 first_pos = (float(first_daughter.x), float(first_daughter.y),
                              float(first_daughter.z))
                 new_pos = (float(ix), float(iy), float(iz))
-                first_sfx, new_sfx = self._division_suffixes(
-                    first_pos, new_pos, time,
+                suggestion = self._suggest_division_names_safe(
+                    parent_nuc_ref, first_pos, new_pos, time,
                 )
-                # Only rename the first daughter if it's still carrying
-                # the naive "extension" name (same as the parent).  If
-                # the user has customised its name, respect that and
-                # only suffix the new daughter's name.
-                if first_daughter.assigned_id == base:
-                    rename_first_to = base + first_sfx
-                assigned_id = base + new_sfx
-                identity = assigned_id
-                self._say(
-                    f"Division: {base} \u2192 "
-                    f"{rename_first_to or first_daughter.effective_name} + {assigned_id}",
+                inherited_parent_lock = bool(
+                    parent_nuc_ref.assigned_id
+                    and first_daughter.assigned_id == parent_nuc_ref.assigned_id
+                )
+                # The second successor proves that the apparent continuation
+                # is a daughter.  Always clear its inherited automatic parent
+                # identity when geometry is unavailable; otherwise a partial
+                # dataset would retain a duplicate parent name on one branch.
+                first_name_state = SetCellNameState(
+                    time=time,
+                    index=first_idx + 1,
+                    identity=suggestion.first_name if suggestion else "",
+                    assigned_id=(
+                        "" if inherited_parent_lock
+                        else first_daughter.assigned_id
+                    ),
                 )
 
-        # Issue AddNucleus FIRST so that set_all_successors marks the
-        # parent as dividing (successor2 set to the new nucleus).  The
-        # subsequent RenameCell on the first daughter then walks only
-        # that daughter's continuation chain — the backward walk stops
-        # at the now-dividing parent instead of bleeding into the
-        # parent cell.  Issuing them in the opposite order would
-        # rename the parent too (it and the first daughter were a
-        # single continuation chain until the second daughter landed).
-        cmd = AddNucleus(
+                assigned_id = ""
+                identity = suggestion.second_name if suggestion else ""
+                if suggestion:
+                    self._say(
+                        f"Division: {suggestion.first_name} + "
+                        f"{suggestion.second_name} "
+                        f"({suggestion.axis_label}, {suggestion.source}, "
+                        f"confidence {suggestion.confidence:.0%})"
+                    )
+                else:
+                    self._say(
+                        "Division created; biological daughter ordering is "
+                        "deferred until a complete body frame is available"
+                    )
+
+        # Issue AddNucleus first so the parent becomes a division before the
+        # first daughter's continuation component is updated.  Reversing the
+        # order would let SetCellNameState walk backward into the parent.
+        nr = self.edit_history.nuclei_record
+        predicted_index = (
+            len(nr[time - 1]) + 1 if 0 <= time - 1 < len(nr) else 1
+        )
+        add_cmd = AddNucleus(
             time=time,
             x=ix,
             y=iy,
@@ -972,14 +1238,9 @@ class AceTreeApp:
             predecessor=predecessor,
             assigned_id=assigned_id,
         )
-        self.edit_history.do(cmd)
-        new_index = cmd._added_index
-
-        if rename_first_to is not None:
-            self.edit_history.do(
-                RenameCell(time=time, index=first_idx + 1,
-                           new_name=rename_first_to),
-            )
+        commands = [add_cmd]
+        if first_name_state is not None:
+            commands.append(first_name_state)
 
         # Fill gap > 1 with interpolation
         if (parent_name and parent_end_time is not None
@@ -990,9 +1251,14 @@ class AceTreeApp:
                     start_time=parent_end_time,
                     start_index=parent_end_index,
                     end_time=time,
-                    end_index=new_index,
+                    end_index=predicted_index,
                 )
-                self.edit_history.do(interp_cmd)
+                commands.append(interp_cmd)
+
+        self.edit_history.do(CompositeCommand(
+            commands=commands,
+            label=f"Add nucleus at t={time}",
+        ))
 
         return True
 
@@ -1009,8 +1275,18 @@ class AceTreeApp:
             parent_name: Name of parent cell to extend, or None for root mode.
             default_size: Default nucleus diameter for placed nuclei.
         """
+        if self._relink_pick_mode:
+            self.cancel_relink_pick_mode()
+        self.exit_add_mode()
+        if self._edit_panel is not None:
+            self._edit_panel._btn_add.setChecked(False)
         self._placement_mode = True
         self._placement_parent_name = parent_name
+        self._placement_parent_anchor = None
+        if parent_name is not None:
+            selected_cell = self.get_selected_cell()
+            if selected_cell is not None and selected_cell.name == parent_name:
+                self._placement_parent_anchor = self.selection_anchor
         self._placement_default_size = default_size
         self._focus_viewer_canvas()
 
@@ -1018,6 +1294,7 @@ class AceTreeApp:
         """Exit click-to-place mode."""
         self._placement_mode = False
         self._placement_parent_name = None
+        self._placement_parent_anchor = None
 
     def _handle_placement_click(self, x: float, y: float) -> bool:
         """Handle a click in placement mode — create a nucleus at (x, y).
@@ -1027,7 +1304,12 @@ class AceTreeApp:
         if not self._placement_mode:
             return False
 
-        from ..editing.commands import AddNucleus, RelinkWithInterpolation, RenameCell
+        from ..editing.commands import (
+            AddNucleus,
+            CompositeCommand,
+            RelinkWithInterpolation,
+            SetCellNameState,
+        )
         from ..editing.validators import validate_add_nucleus
 
         ix, iy = round(x), round(y)
@@ -1045,30 +1327,74 @@ class AceTreeApp:
         parent_end_time = None
         parent_end_index = None
         if parent_name:
-            cell = self.manager.get_cell(parent_name)
+            cell = None
+            if self._placement_parent_anchor is not None:
+                anchor = self._placement_parent_anchor
+                anchor_nuc = self._nucleus_at_anchor(anchor)
+                if anchor_nuc is not None and anchor_nuc.is_alive:
+                    cell = self._cell_for_nucleus(anchor[0], anchor_nuc)
+                if cell is None:
+                    self._say("Tracked parent is no longer in the lineage tree")
+                    return False
+            else:
+                # Compatibility for programmatic callers that start Track
+                # with a name but no GUI selection.
+                cell = self.manager.get_cell(parent_name)
             if cell is not None:
-                parent_end_time = cell.end_time
-                gap = time - parent_end_time
-                if gap <= 0:
-                    # Same or earlier timepoint as parent — can't link;
-                    # treat as independent root placement (e.g. single-frame
-                    # annotation where multiple nuclei exist at t=1).
-                    parent_name = None
+                parent_name = cell.name
+                existing_here = cell.get_nucleus_at(time)
+                is_division_click = False
+                if (existing_here is not None
+                        and time > 1
+                        and existing_here.predecessor != NILLI):
+                    # As in Add mode, a placement during the cell's lifetime
+                    # is a retroactive division.  At the terminal frame a far
+                    # click is a division while a close click is left as an
+                    # unlinked placement (Track extensions should be made at
+                    # a later frame selected by the user).
+                    if time < cell.end_time:
+                        is_division_click = True
+                    else:
+                        dx_ex = ix - existing_here.x
+                        dy_ex = iy - existing_here.y
+                        is_division_click = (
+                            dx_ex * dx_ex + dy_ex * dy_ex
+                            > float(existing_here.size) ** 2
+                        )
+
+                if is_division_click:
+                    parent_end_time = time - 1
+                    parent_end_index = existing_here.predecessor
+                    nr = self.manager.nuclei_record
+                    t0 = parent_end_time - 1
+                    j0 = parent_end_index - 1
+                    if 0 <= t0 < len(nr) and 0 <= j0 < len(nr[t0]):
+                        parent_nuc_ref = nr[t0][j0]
+                        size = parent_nuc_ref.size
+                        identity = parent_nuc_ref.effective_name
+                        assigned_id = parent_nuc_ref.assigned_id
+                        predecessor = parent_end_index
+                    else:
+                        parent_name = None
                 else:
-                    identity = parent_name
-                    parent_nuc = cell.get_nucleus_at(parent_end_time)
-                    if parent_nuc is not None:
-                        parent_nuc_ref = parent_nuc
-                        parent_end_index = parent_nuc.index
-                        size = parent_nuc.size  # inherit diameter
-                        # Plant parent's effective name as a forced name on
-                        # the new nucleus so the naming pipeline propagates
-                        # it through the continuation chain (see bug 3).
-                        assigned_id = parent_nuc.effective_name or parent_name
-                        if gap == 1:
-                            # Adjacent: set predecessor directly
-                            predecessor = parent_end_index
-                        # gap > 1 handled after AddNucleus via interpolation
+                    parent_end_time = cell.end_time
+                    gap = time - parent_end_time
+                    if gap <= 0:
+                        # Same/earlier close placement is independent (for
+                        # example, adding multiple roots at the first frame).
+                        parent_name = None
+                    else:
+                        identity = parent_name
+                        parent_nuc = cell.get_nucleus_at(parent_end_time)
+                        if parent_nuc is not None:
+                            parent_nuc_ref = parent_nuc
+                            parent_end_index = parent_nuc.index
+                            size = parent_nuc.size  # inherit diameter
+                            assigned_id = parent_nuc.assigned_id
+                            if gap == 1:
+                                # Adjacent: set predecessor directly
+                                predecessor = parent_end_index
+                            # gap > 1 handled after AddNucleus via interpolation
 
         # Validate BEFORE creating the command — reject triple-successor
         # attempts with a status message instead of silently letting
@@ -1081,11 +1407,9 @@ class AceTreeApp:
             logger.info("Placement rejected: %s", errors[0])
             return False
 
-        # Manual-division detection (mirrors _handle_add_click).  If the
-        # new nucleus is the second successor of the parent, rename the
-        # first daughter and the new daughter with axis-aware "a"/"p"
-        # suffixes so they don't collide on the parent's forced name.
-        rename_first_to: str | None = None
+        # Manual-division detection mirrors Add mode and delegates all
+        # biological name choice to the manager.
+        first_name_state = None
         first_idx = -1
         if (parent_nuc_ref is not None
                 and predecessor != NILLI
@@ -1096,25 +1420,47 @@ class AceTreeApp:
             first_idx = parent_nuc_ref.successor1 - 1
             if 0 <= t_idx < len(nr) and 0 <= first_idx < len(nr[t_idx]):
                 first_daughter = nr[t_idx][first_idx]
-                base = parent_nuc_ref.effective_name or parent_name
                 first_pos = (float(first_daughter.x), float(first_daughter.y),
                              float(first_daughter.z))
                 new_pos = (float(ix), float(iy), float(iz))
-                first_sfx, new_sfx = self._division_suffixes(
-                    first_pos, new_pos, time,
+                suggestion = self._suggest_division_names_safe(
+                    parent_nuc_ref, first_pos, new_pos, time,
                 )
-                if first_daughter.assigned_id == base:
-                    rename_first_to = base + first_sfx
-                assigned_id = base + new_sfx
-                identity = assigned_id
-                self._say(
-                    f"Division: {base} \u2192 "
-                    f"{rename_first_to or first_daughter.effective_name} + {assigned_id}",
+                inherited_parent_lock = bool(
+                    parent_nuc_ref.assigned_id
+                    and first_daughter.assigned_id == parent_nuc_ref.assigned_id
                 )
+                first_name_state = SetCellNameState(
+                    time=time,
+                    index=first_idx + 1,
+                    identity=suggestion.first_name if suggestion else "",
+                    assigned_id=(
+                        "" if inherited_parent_lock
+                        else first_daughter.assigned_id
+                    ),
+                )
+                assigned_id = ""
+                identity = suggestion.second_name if suggestion else ""
+                if suggestion:
+                    self._say(
+                        f"Division: {suggestion.first_name} + "
+                        f"{suggestion.second_name} "
+                        f"({suggestion.axis_label}, {suggestion.source}, "
+                        f"confidence {suggestion.confidence:.0%})"
+                    )
+                else:
+                    self._say(
+                        "Division created; biological daughter ordering is "
+                        "deferred until a complete body frame is available"
+                    )
 
-        # AddNucleus first, RenameCell second — see _handle_add_click for
-        # why the ordering matters (parent-vs-daughter continuation chain).
-        cmd = AddNucleus(
+        # AddNucleus first, SetCellNameState second — see
+        # _handle_add_click for why the structural ordering matters.
+        nr = self.edit_history.nuclei_record
+        predicted_index = (
+            len(nr[time - 1]) + 1 if 0 <= time - 1 < len(nr) else 1
+        )
+        add_cmd = AddNucleus(
             time=time,
             x=ix,
             y=iy,
@@ -1124,14 +1470,9 @@ class AceTreeApp:
             predecessor=predecessor,
             assigned_id=assigned_id,
         )
-        self.edit_history.do(cmd)
-        new_index = cmd._added_index
-
-        if rename_first_to is not None:
-            self.edit_history.do(
-                RenameCell(time=time, index=first_idx + 1,
-                           new_name=rename_first_to),
-            )
+        commands = [add_cmd]
+        if first_name_state is not None:
+            commands.append(first_name_state)
 
         # Handle gap > 1 with interpolation
         if (parent_name and parent_end_time is not None
@@ -1142,14 +1483,21 @@ class AceTreeApp:
                     start_time=parent_end_time,
                     start_index=parent_end_index,
                     end_time=time,
-                    end_index=new_index,
+                    end_index=predicted_index,
                 )
-                self.edit_history.do(interp_cmd)
+                commands.append(interp_cmd)
+
+        self.edit_history.do(CompositeCommand(
+            commands=commands,
+            label=f"Track nucleus at t={time}",
+        ))
 
         # Mode continuation
         if parent_name is None:
             # Root mode: exit after single placement
             self.exit_placement_mode()
+            if self._edit_panel is not None:
+                self._edit_panel.refresh()
         # else: stay in placement mode for continued tracking
 
         return True
@@ -1452,7 +1800,7 @@ class AceTreeApp:
             if nuc is not None:
                 name = nuc.effective_name
                 if name:
-                    self.current_cell_name = name
+                    self._set_selection_from_nucleus(self.current_time, nuc)
                     if self._viewer_integration:
                         self._viewer_integration._shown_labels.add(name)
                     self._update_3d_points()
@@ -1715,10 +2063,7 @@ class AceTreeApp:
         keeps the slice snapping to the right Z across time even for cells
         that aren't fully materialised in the lineage tree.
         """
-        if not self.current_cell_name:
-            return
-
-        cell = self.manager.get_cell(self.current_cell_name)
+        cell = self.get_selected_cell()
         if cell is None:
             return
 
@@ -1735,17 +2080,16 @@ class AceTreeApp:
                 (c for c in cell.children if c.nuclei), None
             )
             if real_child is not None:
-                self.current_cell_name = real_child.name
                 cell = real_child
         elif self.current_time < cell.start_time:
             if cell.parent is not None and cell.parent.nuclei:
-                self.current_cell_name = cell.parent.name
                 cell = cell.parent
 
         nuc = cell.get_nucleus_at(self.current_time)
         if nuc is None:
             nuc = self._find_nucleus_via_chain(cell, self.current_time)
         if nuc:
+            self._set_selection_from_nucleus(self.current_time, nuc)
             self.current_plane = max(1, round(nuc.z + NUCZINDEXOFFSET))
 
     def _find_nucleus_via_chain(self, cell, target_time: int):
@@ -1812,8 +2156,20 @@ class AceTreeApp:
         is_structural = cmd is None or cmd.structural
 
         if is_structural:
+            # A few programmatic callers still set ``current_cell_name``
+            # directly.  Capture its physical nucleus while the pre-edit tree
+            # is still available; after a rename/process that old lookup name
+            # may no longer exist.  Normal click/select paths are already
+            # anchored, so this cannot redirect them to the command target.
+            if self.selection_anchor is None and self.current_cell_name:
+                self.get_selected_nucleus()
             self.manager.set_all_successors()
             self.manager.process()
+
+            # Naming and topology edits can change every display name.  The
+            # physical selection anchor, rather than the command being undone,
+            # determines which cell remains selected.
+            self._resolve_selection_after_rebuild()
 
             # Structural edits (relink, kill, add) change the lineage tree,
             # so all lineage tree panels need a full rebuild.
@@ -1821,37 +2177,6 @@ class AceTreeApp:
                 lw.rebuild_tree()
             if self._lineage_list:
                 self._lineage_list.rebuild()
-
-        # After a rename or swap (or undo of either), the tracked cell's
-        # name in the tree may have changed.  Read the nucleus's current
-        # effective_name to get the correct post-rebuild name (works for
-        # both execute and undo paths).
-        from ..editing.commands import RenameCell, SwapCellNames
-
-        anchors: list[tuple[int, int]] = []
-        if isinstance(cmd, RenameCell):
-            anchors = [(cmd.time, cmd.index)]
-        elif isinstance(cmd, SwapCellNames):
-            anchors = [(cmd.time_a, cmd.index_a), (cmd.time_b, cmd.index_b)]
-
-        if anchors and self.current_cell_name:
-            nr = self.manager.nuclei_record
-            old_name = self.current_cell_name
-            for t_1based, idx_1based in anchors:
-                t_idx = t_1based - 1
-                n_idx = idx_1based - 1
-                if 0 <= t_idx < len(nr) and 0 <= n_idx < len(nr[t_idx]):
-                    nuc = nr[t_idx][n_idx]
-                    new_name = nuc.effective_name
-                    if new_name and self.manager.get_cell(new_name) is not None:
-                        # For a swap, pick whichever anchor's new name is
-                        # actually in the tree.  If neither matches the
-                        # old tracked name, the first valid anchor wins.
-                        self.current_cell_name = new_name
-                        if self._viewer_integration is not None:
-                            self._viewer_integration._shown_labels.discard(old_name)
-                            self._viewer_integration._shown_labels.add(new_name)
-                        break
 
         self.update_display()
 
@@ -2121,29 +2446,11 @@ class AceTreeApp:
         """
         _say = self._say
 
-        if not self.current_cell_name:
-            _say("No nucleus selected to delete")
-            return
-
-        index: int | None = None
-
-        # Path 1: real named cell in the lineage tree
-        cell = self.manager.get_cell(self.current_cell_name)
-        if cell is not None:
-            nuc = cell.get_nucleus_at(self.current_time)
-            if nuc is not None:
-                index = nuc.index
-
-        # Path 2: raw idx= fallback (unnamed manually-added nucleus)
-        if index is None and self.current_cell_name.startswith("idx="):
-            try:
-                index = int(self.current_cell_name[4:])
-            except ValueError:
-                index = None
-
-        if index is None:
+        selected = self.get_selected_nucleus()
+        if selected is None:
             _say(f"Cannot locate '{self.current_cell_name}' at t={self.current_time}")
             return
+        nuc, _, index = selected
 
         from ..editing.validators import validate_remove_nucleus
 
@@ -2208,7 +2515,7 @@ class AceTreeApp:
             self.exit_placement_mode()
             changed = True
         if self._relink_pick_mode:
-            self.exit_relink_pick_mode()
+            self.cancel_relink_pick_mode()
             changed = True
 
         if self._edit_panel:

@@ -13,11 +13,21 @@ Usage:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Callable
 
 from .commands import EditCommand, NucleiRecord
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _HistoryEntry:
+    """A command edge between two unique document states."""
+
+    command: EditCommand
+    before_state: int
+    after_state: int
 
 
 class EditHistory:
@@ -48,8 +58,11 @@ class EditHistory:
         self.nuclei_record = nuclei_record
         self.on_edit = on_edit
         self.max_history = max_history
-        self._undo_stack: list[EditCommand] = []
-        self._redo_stack: list[EditCommand] = []
+        self._undo_stack: list[_HistoryEntry] = []
+        self._redo_stack: list[_HistoryEntry] = []
+        self._current_state = 0
+        self._saved_state = 0
+        self._next_state = 1
         self.modified: bool = False
         self.last_command: EditCommand | None = None
 
@@ -62,9 +75,20 @@ class EditHistory:
             command: The edit command to execute.
         """
         command.execute(self.nuclei_record)
-        self._undo_stack.append(command)
+        if command.is_noop:
+            logger.info("No change: %s", command.description)
+            return
+
+        entry = _HistoryEntry(
+            command=command,
+            before_state=self._current_state,
+            after_state=self._next_state,
+        )
+        self._next_state += 1
+        self._current_state = entry.after_state
+        self._undo_stack.append(entry)
         self._redo_stack.clear()
-        self.modified = True
+        self._sync_modified()
 
         # Enforce max history
         if len(self._undo_stack) > self.max_history:
@@ -85,9 +109,12 @@ class EditHistory:
             logger.info("Nothing to undo")
             return None
 
-        command = self._undo_stack.pop()
+        entry = self._undo_stack.pop()
+        command = entry.command
         command.undo(self.nuclei_record)
-        self._redo_stack.append(command)
+        self._redo_stack.append(entry)
+        self._current_state = entry.before_state
+        self._sync_modified()
 
         logger.info("Undid: %s", command.description)
         self.last_command = command
@@ -105,10 +132,12 @@ class EditHistory:
             logger.info("Nothing to redo")
             return None
 
-        command = self._redo_stack.pop()
+        entry = self._redo_stack.pop()
+        command = entry.command
         command.execute(self.nuclei_record)
-        self._undo_stack.append(command)
-        self.modified = True
+        self._undo_stack.append(entry)
+        self._current_state = entry.after_state
+        self._sync_modified()
 
         logger.info("Redid: %s", command.description)
         self.last_command = command
@@ -130,14 +159,14 @@ class EditHistory:
     def undo_description(self) -> str:
         """Description of the next command to undo, or empty string."""
         if self._undo_stack:
-            return self._undo_stack[-1].description
+            return self._undo_stack[-1].command.description
         return ""
 
     @property
     def redo_description(self) -> str:
         """Description of the next command to redo, or empty string."""
         if self._redo_stack:
-            return self._redo_stack[-1].description
+            return self._redo_stack[-1].command.description
         return ""
 
     @property
@@ -154,12 +183,18 @@ class EditHistory:
         """Clear all history (undo and redo stacks)."""
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._sync_modified()
         logger.info("Edit history cleared")
 
     def mark_saved(self) -> None:
         """Mark the current state as saved (resets modified flag)."""
-        self.modified = False
+        self._saved_state = self._current_state
+        self._sync_modified()
 
     def history_log(self) -> list[str]:
         """Get a list of all executed command descriptions (oldest first)."""
-        return [cmd.description for cmd in self._undo_stack]
+        return [entry.command.description for entry in self._undo_stack]
+
+    def _sync_modified(self) -> None:
+        """Keep the compatibility flag aligned with the current savepoint."""
+        self.modified = self._current_state != self._saved_state

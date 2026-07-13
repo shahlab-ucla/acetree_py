@@ -72,6 +72,7 @@ class LineageTree:
     cells_by_name: dict[str, Cell] = field(default_factory=dict)
     cells_by_hash: dict[str, Cell] = field(default_factory=dict)
     cell_counts: list[int] = field(default_factory=list)
+    name_collisions: dict[str, list[Cell]] = field(default_factory=dict)
 
     def get_cell(self, name: str) -> Cell | None:
         """Look up a cell by name (case-sensitive)."""
@@ -87,11 +88,17 @@ class LineageTree:
 
     def all_cells(self) -> list[Cell]:
         """Return all cells in the tree."""
-        return list(self.cells_by_name.values())
+        result: list[Cell] = []
+        seen: set[int] = set()
+        for cell in [*self.cells_by_name.values(), *self.cells_by_hash.values()]:
+            if id(cell) not in seen:
+                seen.add(id(cell))
+                result.append(cell)
+        return result
 
     @property
     def num_cells(self) -> int:
-        return len(self.cells_by_name)
+        return len(self.all_cells())
 
 
 def build_lineage_tree(
@@ -257,7 +264,7 @@ def build_lineage_tree(
 
     # Build name lookup tables
     tree.cells_by_hash = cells_by_hash
-    tree.cells_by_name = _build_name_lookup(cells_by_hash, dummy_cells)
+    tree.cells_by_name, tree.name_collisions = _build_name_lookup(cells_by_hash, dummy_cells)
 
     # If no root found from data, use the dummy P0
     if tree.root is None and "P0" in dummy_cells:
@@ -428,15 +435,17 @@ def _apply_assigned_id_names(cells_by_hash: dict[str, Cell]) -> None:
 def _build_name_lookup(
     cells_by_hash: dict[str, Cell],
     dummy_cells: dict[str, Cell],
-) -> dict[str, Cell]:
+) -> tuple[dict[str, Cell], dict[str, list[Cell]]]:
     """Build the cells_by_name lookup from all cells.
 
-    Handles name collisions by suffixing (`Name_2`, `Name_3`, ...) so
-    every cell is still reachable by a unique name.  The Part 9
-    validate_rename_cell() prevents user-driven collisions, but this is
-    a safety net for legacy saves, bulk imports, or non-RenameCell edits.
+    Name collisions remain explicit.  Mutating only ``Cell.name`` to a
+    display alias makes the tree disagree with the underlying nuclei and can
+    cause a click to edit the wrong biological cell.  The first lookup entry
+    is retained for compatibility and every conflicting Cell is reported in
+    the returned collision map for validation/UI correction.
     """
     by_name: dict[str, Cell] = {}
+    collisions: dict[str, list[Cell]] = {}
 
     # Add dummy cells first
     for name, cell in dummy_cells.items():
@@ -472,21 +481,16 @@ def _build_name_lookup(
                 by_name[name] = cell
                 continue
 
-            suffix = 2
-            while f"{name}_{suffix}" in by_name:
-                suffix += 1
-            new_name = f"{name}_{suffix}"
             logger.warning(
-                "Name collision: '%s' already used by a different cell; "
-                "aliasing second cell as '%s'",
-                name, new_name,
+                "Name collision: '%s' is used by multiple cells; correction required",
+                name,
             )
-            name = new_name
-            cell.name = name
+            collisions.setdefault(name, [existing]).append(cell)
+            continue
 
         by_name[name] = cell
 
-    return by_name
+    return by_name, collisions
 
 
 def _adjust_dummy_timing(
