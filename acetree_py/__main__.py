@@ -181,7 +181,7 @@ def info(
 
     ts = cell_expression_time_series(cell_obj)
     if ts.values:
-        typer.echo(f"  Expression:")
+        typer.echo("  Expression:")
         typer.echo(f"    Mean:    {ts.mean:.2f}")
         typer.echo(f"    Max:     {ts.max_value:.2f}")
         typer.echo(f"    Onset:   {ts.onset_time or 'never'}")
@@ -224,8 +224,27 @@ def create(
         "CZ", "--channel-order",
         help="Page order for interleaved stacks: 'CZ' (channel-fastest) or 'ZC' (planar)",
     ),
+    tracking: str = typer.Option(
+        "manual", "--tracking",
+        help="Initial workflow: manual, dog-lap, or log-lap",
+    ),
+    detection_channel: int = typer.Option(
+        1, "--detection-channel", help="One-based channel for automated detection",
+    ),
+    nucleus_radius: float = typer.Option(
+        4.0, "--nucleus-radius", help="Expected nucleus radius in microns",
+    ),
+    detection_threshold: float = typer.Option(
+        5.0, "--detection-threshold", help="Minimum LoG/DoG response",
+    ),
+    linking_distance: float = typer.Option(
+        8.0, "--linking-distance", help="Maximum LAP displacement in microns",
+    ),
+    missing_frames: int = typer.Option(
+        1, "--missing-frames", help="Maximum missed frames to bridge",
+    ),
 ):
-    """Create a new dataset from raw images and launch the GUI for manual annotation."""
+    """Create a dataset and launch manual annotation or an automated draft."""
     from acetree_py.gui.app import AceTreeApp
 
     if directory is None:
@@ -319,7 +338,83 @@ def create(
         )
         _derive_image_params(config)
 
-        ace = AceTreeApp.from_new_dataset(config, num_timepoints, out_dir)
+        tracking_mode = tracking.strip().lower()
+        if tracking_mode not in {"manual", "dog-lap", "log-lap"}:
+            typer.echo(
+                "Error: --tracking must be manual, dog-lap, or log-lap.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if detection_channel < 1 or detection_channel > effective_channels:
+            typer.echo(
+                f"Error: --detection-channel must be in 1-{effective_channels}.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if nucleus_radius <= 0 or linking_distance <= 0 or missing_frames < 0:
+            typer.echo(
+                "Error: radius/linking distance must be positive and missing frames non-negative.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        tracking_request = None
+        if tracking_mode != "manual":
+            from acetree_py.tracking.api import (
+                ComponentSpec,
+                TrackingRequest,
+                TrackingScope,
+            )
+
+            detector_id = (
+                "acetree.dog3d" if tracking_mode == "dog-lap" else "acetree.log3d"
+            )
+            tracking_request = TrackingRequest(
+                detector=ComponentSpec(
+                    detector_id,
+                    {
+                        "TARGET_CHANNEL": detection_channel,
+                        "RADIUS": nucleus_radius,
+                        "THRESHOLD": detection_threshold,
+                        "DO_SUBPIXEL_LOCALIZATION": True,
+                        "DO_MEDIAN_FILTERING": False,
+                    },
+                ),
+                tracker=ComponentSpec(
+                    "acetree.simple_lap",
+                    {
+                        "LINKING_MAX_DISTANCE": linking_distance,
+                        "ALLOW_GAP_CLOSING": missing_frames > 0,
+                        "GAP_CLOSING_MAX_DISTANCE": linking_distance,
+                        "MAX_FRAME_GAP": missing_frames + 1 if missing_frames > 0 else 1,
+                        "ALLOW_TRACK_SPLITTING": False,
+                        "ALLOW_TRACK_MERGING": False,
+                    },
+                ),
+                scope=TrackingScope("global", 1, num_timepoints),
+            )
+            typer.echo(
+                f"Building {tracking_mode} tracking draft across {num_timepoints} timepoints…"
+            )
+
+        try:
+            ace = AceTreeApp.from_new_dataset(
+                config,
+                num_timepoints,
+                out_dir,
+                tracking_request=tracking_request,
+            )
+        except Exception as exc:
+            typer.echo(
+                f"Error: initial tracking draft failed: {exc}",
+                err=True,
+            )
+            typer.echo(
+                "The empty nuclei ZIP and XML remain valid; rerun with "
+                "--tracking manual to curate them manually.",
+                err=True,
+            )
+            raise typer.Exit(1) from exc
         ace.run()
 
 

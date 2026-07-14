@@ -968,6 +968,32 @@ class TestRelinkWithInterpolation:
 
 
 class TestEditHistory:
+    def test_revision_identifies_do_undo_redo_states(self):
+        record = _simple_record()
+        history = EditHistory(record)
+        initial = history.revision
+
+        history.do(MoveNucleus(time=1, index=1, new_x=10))
+        edited = history.revision
+        assert edited != initial
+
+        history.undo()
+        assert history.revision == initial
+        history.redo()
+        assert history.revision == edited
+
+    def test_change_counter_never_rewinds(self):
+        record = _simple_record()
+        history = EditHistory(record)
+
+        assert history.change_counter == 0
+        history.do(MoveNucleus(time=1, index=1, new_x=10))
+        assert history.change_counter == 1
+        history.undo()
+        assert history.change_counter == 2
+        history.redo()
+        assert history.change_counter == 3
+
     def test_do_and_undo(self):
         record = _simple_record()
         history = EditHistory(record)

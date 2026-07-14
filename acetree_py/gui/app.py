@@ -22,6 +22,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     import napari
+    from ..tracking.api import TrackingRequest, TrackingResult
 
 from ..core.nuclei_manager import NucleiManager
 from ..editing.history import EditHistory
@@ -91,6 +92,12 @@ class AceTreeApp:
         # Save As becomes the target for subsequent Save operations even for
         # headless/new managers that do not yet own an AceTreeConfig.
         self._save_path_override: Path | None = None
+
+        # Accepted image-analysis runs are retained as provenance and written
+        # to the optional tracking sidecar on Save.  They never replace the
+        # legacy XML/nuclei ZIP contract.
+        self._tracking_results: list[TrackingResult] = []
+        self._tracking_sidecar_managed: bool = False
 
         # GUI components (initialized in launch())
         self.viewer: napari.Viewer | None = None
@@ -164,6 +171,23 @@ class AceTreeApp:
                 logger.warning("No image provider could be created from config")
 
         app = cls(manager, image_provider)
+        tracking_sidecar = config.zip_file.with_suffix(".tracking.json")
+        if tracking_sidecar.exists():
+            try:
+                from ..tracking.persistence import read_tracking_proposal
+
+                app._tracking_results.append(
+                    read_tracking_proposal(tracking_sidecar)
+                )
+                app._tracking_sidecar_managed = True
+            except Exception:
+                # Tracking provenance is optional and must never make a
+                # backward-compatible nuclei dataset impossible to open.
+                logger.warning(
+                    "Could not read tracking sidecar %s",
+                    tracking_sidecar,
+                    exc_info=True,
+                )
         app.current_time = 1
         # Set initial plane to middle of stack
         if image_provider is not None and image_provider.num_planes > 0:
@@ -178,6 +202,7 @@ class AceTreeApp:
         config: AceTreeConfig,
         num_timepoints: int,
         output_dir: Path,
+        tracking_request: TrackingRequest | None = None,
     ) -> AceTreeApp:
         """Create an AceTreeApp for a brand-new dataset (empty nuclei).
 
@@ -188,6 +213,8 @@ class AceTreeApp:
             config: Configuration built from DatasetCreationDialog.
             num_timepoints: Number of timepoints detected from images.
             output_dir: Where to save the nuclei ZIP and config XML.
+            tracking_request: Optional automated draft to generate. ``None``
+                preserves the manual-annotation workflow.
 
         Returns:
             A fully initialized AceTreeApp ready for manual annotation.
@@ -224,6 +251,8 @@ class AceTreeApp:
             app.current_plane = max(1, image_provider.num_planes // 2)
         else:
             app.current_plane = max(1, (manager.movie.num_planes or 30) // 2)
+        if tracking_request is not None:
+            app.run_tracking_request(tracking_request)
         return app
 
     @classmethod
@@ -236,7 +265,7 @@ class AceTreeApp:
         from .dataset_dialog import DatasetCreationDialog
 
         # Need a QApplication for the dialog
-        from qtpy.QtWidgets import QApplication
+        from qtpy.QtWidgets import QApplication, QMessageBox
         qt_app = QApplication.instance()
         if qt_app is None:
             qt_app = QApplication([])
@@ -249,11 +278,39 @@ class AceTreeApp:
         output_dir = dlg.get_output_directory()
         dataset_name = dlg.get_dataset_name()
         num_timepoints = dlg.get_num_timepoints()
+        tracking_request = dlg.get_tracking_request()
 
         # Set zip_file name from dataset name
         config.zip_file = output_dir / f"{dataset_name}.zip"
 
-        return cls.from_new_dataset(config, num_timepoints, output_dir)
+        try:
+            return cls.from_new_dataset(
+                config,
+                num_timepoints,
+                output_dir,
+                tracking_request=tracking_request,
+            )
+        except Exception as exc:
+            if tracking_request is None:
+                raise
+            logger.exception("Initial automated tracking failed")
+            reply = QMessageBox.question(
+                dlg,
+                "Automated Draft Failed",
+                f"The automated draft could not be generated:\n\n{exc}\n\n"
+                "The empty dataset files are valid. Open them for manual "
+                "annotation instead?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return None
+            return cls.from_new_dataset(
+                config,
+                num_timepoints,
+                output_dir,
+                tracking_request=None,
+            )
 
     def launch(self) -> None:
         """Create the napari viewer and add all dock widgets.
@@ -351,6 +408,86 @@ class AceTreeApp:
         import napari
         napari.run()
 
+    def run_tracking_request(
+        self,
+        request: TrackingRequest,
+        *,
+        progress=None,
+        cancelled=None,
+    ) -> TrackingResult:
+        """Analyze images and accept the result as one undoable draft edit."""
+        proposal, revision = self.analyze_tracking_request(
+            request,
+            progress=progress,
+            cancelled=cancelled,
+        )
+        self.accept_tracking_proposal(proposal, expected_revision=revision)
+        return proposal
+
+    def analyze_tracking_request(
+        self,
+        request: TrackingRequest,
+        *,
+        progress=None,
+        cancelled=None,
+    ) -> tuple[TrackingResult, int]:
+        """Return an uncommitted proposal and its source document revision."""
+        if self.image_provider is None:
+            raise ValueError("This dataset has no readable image source")
+        config = self.manager.config
+        if config is None:
+            raise ValueError("Tracking requires dataset calibration")
+
+        from ..tracking.api import Calibration
+        from ..tracking.pipeline import TrackingPipeline
+
+        revision = self.edit_history.revision
+        calibration = Calibration(
+            xy_um=config.xy_res,
+            z_um=config.z_res,
+            plane_start=config.plane_start,
+        )
+        proposal = TrackingPipeline().run(
+            self.image_provider,
+            calibration,
+            request,
+            nuclei_record=self.manager.nuclei_record,
+            progress=progress,
+            cancelled=cancelled,
+        )
+        if self.edit_history.revision != revision:
+            raise RuntimeError(
+                "The dataset changed while tracking was running; recompute the draft"
+            )
+        return proposal, revision
+
+    def accept_tracking_proposal(
+        self,
+        proposal: TrackingResult,
+        *,
+        expected_revision: int,
+    ) -> dict[str, tuple[int, int]]:
+        """Commit a reviewed proposal and return detection-to-nucleus locations."""
+        if self.edit_history.revision != expected_revision:
+            raise RuntimeError(
+                "The dataset changed after preview; recompute the tracking draft"
+            )
+        config = self.manager.config
+        if config is None:
+            raise ValueError("Tracking requires dataset calibration")
+
+        from ..tracking.api import Calibration
+        from ..tracking.integration import ApplyTrackingProposal
+
+        calibration = Calibration(
+            xy_um=config.xy_res,
+            z_um=config.z_res,
+            plane_start=config.plane_start,
+        )
+        command = ApplyTrackingProposal(result=proposal, calibration=calibration)
+        self.edit_history.do(command)
+        return command.detection_mapping
+
     # ── Save ──────────────────────────────────────────────────────
 
     @property
@@ -444,6 +581,22 @@ class AceTreeApp:
         """Write nuclei_record to *path* and report success/failure."""
         try:
             self.manager.save(path)
+            if self._tracking_results:
+                from ..tracking.persistence import (
+                    tracking_sidecar_path,
+                    write_tracking_proposal,
+                )
+
+                write_tracking_proposal(
+                    tracking_sidecar_path(path),
+                    self._tracking_results[-1],
+                )
+                self._tracking_sidecar_managed = True
+            elif self._tracking_sidecar_managed:
+                from ..tracking.persistence import tracking_sidecar_path
+
+                tracking_sidecar_path(path).unlink(missing_ok=True)
+                self._tracking_sidecar_managed = False
             if mark_saved:
                 self.edit_history.mark_saved()
             logger.info("Saved nuclei to %s", path)
@@ -1546,6 +1699,10 @@ class AceTreeApp:
                 self._viewer_integration._division_line_layer.visible = False
             if self._viewer_integration._trails_layer:
                 self._viewer_integration._trails_layer.visible = False
+            if self._viewer_integration._tracking_preview_spots_layer:
+                self._viewer_integration._tracking_preview_spots_layer.visible = False
+            if self._viewer_integration._tracking_preview_links_layer:
+                self._viewer_integration._tracking_preview_links_layer.visible = False
 
         # Build 3D Points layer for nuclei
         self._update_3d_points()
@@ -1589,6 +1746,7 @@ class AceTreeApp:
                 self._viewer_integration._division_line_layer.visible = True
             if self._viewer_integration._trails_layer:
                 self._viewer_integration._trails_layer.visible = True
+            self._viewer_integration._update_tracking_preview()
 
         # Reload 2D plane
         self.update_display()
@@ -2153,6 +2311,7 @@ class AceTreeApp:
     def _on_edit(self) -> None:
         """Callback after any edit command — rebuild tree and refresh display."""
         cmd = self.edit_history.last_command
+        self._sync_tracking_provenance(cmd)
         is_structural = cmd is None or cmd.structural
 
         if is_structural:
@@ -2181,6 +2340,28 @@ class AceTreeApp:
         self.update_display()
 
     # ── Multi-panel lineage management ──────────────────────────
+
+    def _sync_tracking_provenance(self, command) -> None:
+        """Keep the saved proposal aligned with tracking-command undo/redo."""
+        if (
+            command is None
+            or command.__class__.__name__ != "ApplyTrackingProposal"
+            or not command.__class__.__module__.endswith(".tracking.integration")
+        ):
+            return
+        try:
+            command.detection_mapping
+            applied = True
+        except RuntimeError:
+            applied = False
+        present = any(item is command.result for item in self._tracking_results)
+        if applied and not present:
+            self._tracking_results.append(command.result)
+        elif not applied and present:
+            self._tracking_results = [
+                item for item in self._tracking_results
+                if item is not command.result
+            ]
 
     def add_lineage_panel(
         self,
@@ -2519,6 +2700,14 @@ class AceTreeApp:
             changed = True
 
         if self._edit_panel:
+            dialog = getattr(self._edit_panel, "_auto_track_dialog", None)
+            if dialog is not None:
+                try:
+                    if dialog.isVisible():
+                        dialog.reject()
+                        changed = True
+                except RuntimeError:
+                    self._edit_panel._auto_track_dialog = None
             try:
                 self._edit_panel._btn_add.setChecked(False)
             except Exception:

@@ -11,7 +11,6 @@ Tests cover:
 
 from __future__ import annotations
 
-import pytest
 from typer.testing import CliRunner
 
 from acetree_py.__main__ import app
@@ -36,6 +35,13 @@ class TestCLIHelp:
         assert "export" in result.output
         assert "rename" in result.output
         assert "info" in result.output
+
+    def test_create_help_exposes_manual_or_automated_tracking(self):
+        result = runner.invoke(app, ["create", "--help"])
+        assert result.exit_code == 0
+        assert "--tracking" in result.output
+        assert "dog-lap" in result.output
+        assert "log-lap" in result.output
 
 
 class TestLoadCommand:

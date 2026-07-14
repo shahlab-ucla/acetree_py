@@ -63,6 +63,10 @@ class EditHistory:
         self._current_state = 0
         self._saved_state = 0
         self._next_state = 1
+        # Monotonic event counter for open analysis/review sessions.  Unlike
+        # ``revision``, this does not return to an older value after Undo, so a
+        # draft that observed any intervening edit can remain safely stale.
+        self._change_counter = 0
         self.modified: bool = False
         self.last_command: EditCommand | None = None
 
@@ -86,6 +90,7 @@ class EditHistory:
         )
         self._next_state += 1
         self._current_state = entry.after_state
+        self._change_counter += 1
         self._undo_stack.append(entry)
         self._redo_stack.clear()
         self._sync_modified()
@@ -114,6 +119,7 @@ class EditHistory:
         command.undo(self.nuclei_record)
         self._redo_stack.append(entry)
         self._current_state = entry.before_state
+        self._change_counter += 1
         self._sync_modified()
 
         logger.info("Undid: %s", command.description)
@@ -137,6 +143,7 @@ class EditHistory:
         command.execute(self.nuclei_record)
         self._undo_stack.append(entry)
         self._current_state = entry.after_state
+        self._change_counter += 1
         self._sync_modified()
 
         logger.info("Redid: %s", command.description)
@@ -178,6 +185,32 @@ class EditHistory:
     def num_redoable(self) -> int:
         """Number of commands that can be re-done."""
         return len(self._redo_stack)
+
+    @property
+    def revision(self) -> int:
+        """Opaque token identifying the document state currently displayed.
+
+        Long-running analysis workflows capture this value before reading the
+        nuclei record and compare it again before applying their proposal.  A
+        mismatch means that the user edited (or undid/redid) the dataset while
+        analysis was running, so the preview must be recomputed instead of
+        being committed against stale nucleus indices.
+
+        The token is deliberately opaque: callers may compare it for equality
+        but should not assume that it is monotonic across undo/redo.
+        """
+        return self._current_state
+
+    @property
+    def change_counter(self) -> int:
+        """Monotonic count of successful do, undo, and redo operations.
+
+        Long-lived previews use this in addition to :attr:`revision`: even if
+        an Undo restores the same document-state token, the user has crossed
+        an edit boundary and the visible analysis must be deliberately rerun.
+        """
+
+        return self._change_counter
 
     def clear(self) -> None:
         """Clear all history (undo and redo stacks)."""

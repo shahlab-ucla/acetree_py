@@ -4,7 +4,8 @@ Provides a wizard-style dialog that walks the user through:
 1. Selecting an image directory
 2. Configuring image format (single channel, side-by-side, separate dirs, multichannel stack)
 3. Setting voxel sizes and reviewing auto-detected parameters
-4. Choosing an output directory for the nuclei ZIP and config XML
+4. Choosing manual annotation or an initial automated tracking draft
+5. Choosing an output directory for the nuclei ZIP and config XML
 """
 
 from __future__ import annotations
@@ -12,12 +13,12 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+from ..io.config import AceTreeConfig, NamingMethod
 
 logger = logging.getLogger(__name__)
 
 try:
-    from qtpy.QtCore import Qt
     from qtpy.QtWidgets import (
         QCheckBox,
         QComboBox,
@@ -43,9 +44,6 @@ except ImportError:
     _QT_AVAILABLE = False
     QDialog = object  # type: ignore[misc,assignment]
 
-from ..io.config import AceTreeConfig, NamingMethod
-
-
 class DatasetCreationDialog(QDialog):  # type: ignore[misc]
     """Multi-page wizard for creating a new AceTree dataset from images."""
 
@@ -68,12 +66,14 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._page1 = self._build_page1_directory()
         self._page2 = self._build_page2_format()
         self._page3 = self._build_page3_parameters()
-        self._page4 = self._build_page4_output()
+        self._page4 = self._build_page4_tracking()
+        self._page5 = self._build_page5_output()
 
         self._stack.addWidget(self._page1)
         self._stack.addWidget(self._page2)
         self._stack.addWidget(self._page3)
         self._stack.addWidget(self._page4)
+        self._stack.addWidget(self._page5)
 
         # Navigation buttons
         nav = QHBoxLayout()
@@ -293,10 +293,114 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
     # ── Page 4: Output ────────────────────────────────────────────
 
-    def _build_page4_output(self) -> QWidget:
+    def _build_page4_tracking(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("<b>Step 4: Output Location</b>"))
+        layout.addWidget(QLabel("<b>Step 4: Initial Tracking</b>"))
+        explanation = QLabel(
+            "Start with an empty dataset for manual annotation, or generate an "
+            "editable detection-and-tracking draft. Automated results are never "
+            "treated as biological ground truth: review them in AceTree and use "
+            "Undo to discard the whole draft."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        mode_group = QGroupBox("Starting workflow")
+        mode_layout = QVBoxLayout(mode_group)
+        self._radio_tracking_manual = QRadioButton("Manual annotation (recommended)")
+        self._radio_tracking_manual.setChecked(True)
+        self._radio_tracking_auto = QRadioButton(
+            "Automated detector + tracker draft"
+        )
+        mode_layout.addWidget(self._radio_tracking_manual)
+        mode_layout.addWidget(self._radio_tracking_auto)
+        layout.addWidget(mode_group)
+
+        self._tracking_settings_group = QGroupBox("Prototype settings")
+        settings = QFormLayout(self._tracking_settings_group)
+
+        from ..tracking.registry import get_default_registry
+
+        registry = get_default_registry()
+        self._tracking_detector_combo = QComboBox()
+        for descriptor in registry.detector_descriptors():
+            self._tracking_detector_combo.addItem(
+                descriptor.display_name,
+                descriptor.plugin_id,
+            )
+        settings.addRow("Detector:", self._tracking_detector_combo)
+
+        self._tracking_tracker_combo = QComboBox()
+        for descriptor in registry.tracker_descriptors():
+            self._tracking_tracker_combo.addItem(
+                descriptor.display_name,
+                descriptor.plugin_id,
+            )
+        settings.addRow("Tracker:", self._tracking_tracker_combo)
+
+        self._tracking_channel_spin = QSpinBox()
+        self._tracking_channel_spin.setRange(1, 8)
+        self._tracking_channel_spin.setValue(1)
+        self._tracking_channel_spin.setToolTip(
+            "One-based image channel, matching TrackMate"
+        )
+        settings.addRow("Detection channel:", self._tracking_channel_spin)
+
+        self._tracking_radius_spin = QDoubleSpinBox()
+        self._tracking_radius_spin.setRange(0.05, 100.0)
+        self._tracking_radius_spin.setDecimals(2)
+        self._tracking_radius_spin.setValue(4.0)
+        self._tracking_radius_spin.setSuffix(" µm")
+        self._tracking_radius_spin.setToolTip(
+            "Approximate nucleus radius in physical units"
+        )
+        settings.addRow("Expected radius:", self._tracking_radius_spin)
+
+        self._tracking_threshold_spin = QDoubleSpinBox()
+        self._tracking_threshold_spin.setRange(0.0, 1_000_000.0)
+        self._tracking_threshold_spin.setDecimals(4)
+        self._tracking_threshold_spin.setValue(5.0)
+        self._tracking_threshold_spin.setToolTip(
+            "Minimum scale-space response (in image-intensity units)"
+        )
+        settings.addRow("Quality threshold:", self._tracking_threshold_spin)
+
+        self._tracking_link_distance_spin = QDoubleSpinBox()
+        self._tracking_link_distance_spin.setRange(0.05, 1_000.0)
+        self._tracking_link_distance_spin.setDecimals(2)
+        self._tracking_link_distance_spin.setValue(8.0)
+        self._tracking_link_distance_spin.setSuffix(" µm")
+        settings.addRow("Maximum displacement:", self._tracking_link_distance_spin)
+
+        self._tracking_gap_spin = QSpinBox()
+        self._tracking_gap_spin.setRange(0, 20)
+        self._tracking_gap_spin.setValue(1)
+        self._tracking_gap_spin.setToolTip(
+            "Maximum number of missing frames bridged by a draft link"
+        )
+        settings.addRow("Missing frames allowed:", self._tracking_gap_spin)
+
+        self._tracking_settings_group.setEnabled(False)
+        self._radio_tracking_auto.toggled.connect(
+            self._tracking_settings_group.setEnabled
+        )
+        layout.addWidget(self._tracking_settings_group)
+
+        limitation = QLabel(
+            "Built-in prototype limitation: Simple LAP links continuations and short gaps, "
+            "but does not infer cell divisions or merges. Divisions remain a manual "
+            "curation step until the lineage-aware tracker is available."
+        )
+        limitation.setWordWrap(True)
+        layout.addWidget(limitation)
+        layout.addStretch()
+        return page
+
+    def _build_page5_output(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("<b>Step 5: Output Location</b>"))
         layout.addWidget(QLabel("Choose where to save the dataset files (nuclei ZIP + config XML)."))
 
         dir_row = QHBoxLayout()
@@ -356,7 +460,6 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._btn_next.setText("Create" if is_last else "Next")
 
     def _update_summary(self) -> None:
-        d = self._detected
         lines = [
             f"Image directory: {self._dir_edit.text()}",
             f"Format: {self._format_description()}",
@@ -365,6 +468,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             f"Z res: {self._z_res_spin.value()} \u00b5m",
             f"Timepoints: {self._timepoints_spin.value()}",
             f"Z-planes: {self._planes_spin.value()}",
+            f"Initial tracking: {self._tracking_description()}",
             f"Output: {self._output_edit.text()}",
             f"Dataset name: {self._dataset_name_edit.text()}",
         ]
@@ -380,6 +484,16 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             ordering = "CZ" if self._ordering_combo.currentIndex() == 0 else "ZC"
             return f"Interleaved multichannel TIFF stack ({n_ch} channels, order={ordering})"
         return "Single channel"
+
+    def _tracking_description(self) -> str:
+        if not self._radio_tracking_auto.isChecked():
+            return "Manual annotation"
+        return (
+            f"{self._tracking_detector_combo.currentText()} + "
+            f"{self._tracking_tracker_combo.currentText()} draft "
+            f"(radius={self._tracking_radius_spin.value():g} µm, "
+            f"max displacement={self._tracking_link_distance_spin.value():g} µm)"
+        )
 
     # ── Results ───────────────────────────────────────────────────
 
@@ -460,6 +574,62 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
     def get_num_timepoints(self) -> int:
         return self._timepoints_spin.value()
+
+    def get_tracking_request(self):
+        """Return an initial global tracking request, or ``None`` for manual mode."""
+        if not self._radio_tracking_auto.isChecked():
+            return None
+
+        from ..tracking.api import ComponentSpec, TrackingRequest, TrackingScope
+        from ..tracking.registry import get_default_registry
+
+        max_distance = self._tracking_link_distance_spin.value()
+        gap_frames = self._tracking_gap_spin.value()
+        registry = get_default_registry()
+        detector_id = str(self._tracking_detector_combo.currentData())
+        tracker_id = str(self._tracking_tracker_combo.currentData())
+        detector_settings = registry.default_settings(detector_id)
+        tracker_settings = registry.default_settings(tracker_id)
+        detector_common = {
+            "TARGET_CHANNEL": self._tracking_channel_spin.value(),
+            "RADIUS": self._tracking_radius_spin.value(),
+            "THRESHOLD": self._tracking_threshold_spin.value(),
+            "DO_SUBPIXEL_LOCALIZATION": True,
+            "DO_MEDIAN_FILTERING": False,
+        }
+        tracker_common = {
+            "LINKING_MAX_DISTANCE": max_distance,
+            "ALLOW_GAP_CLOSING": gap_frames > 0,
+            "GAP_CLOSING_MAX_DISTANCE": max_distance,
+            "MAX_FRAME_GAP": gap_frames + 1 if gap_frames > 0 else 1,
+            "ALLOW_TRACK_SPLITTING": False,
+            "ALLOW_TRACK_MERGING": False,
+        }
+        detector_schema = registry.get_descriptor(detector_id).settings_schema
+        tracker_schema = registry.get_descriptor(tracker_id).settings_schema
+        detector_settings.update(
+            (key, value) for key, value in detector_common.items()
+            if key in detector_schema
+        )
+        tracker_settings.update(
+            (key, value) for key, value in tracker_common.items()
+            if key in tracker_schema
+        )
+        return TrackingRequest(
+            detector=ComponentSpec(
+                plugin_id=detector_id,
+                settings=detector_settings,
+            ),
+            tracker=ComponentSpec(
+                plugin_id=tracker_id,
+                settings=tracker_settings,
+            ),
+            scope=TrackingScope(
+                kind="global",
+                start_frame=1,
+                end_frame=self._timepoints_spin.value(),
+            ),
+        )
 
 
 # ── Auto-detection helpers ────────────────────────────────────────

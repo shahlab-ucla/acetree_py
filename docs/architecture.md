@@ -1,6 +1,6 @@
 # AceTree-Py Architecture Reference
 
-The normative cross-module naming and edit invariants are collected in [Naming and Manual-Curation Workflows](naming_workflows.md).
+The normative cross-module naming and edit invariants are collected in [Naming and Manual-Curation Workflows](naming_workflows.md). Detector/tracker contracts, plugin rules, workflows, and the StarryNite migration plan are defined in the [Tracking Pipeline Specification](TRACKING_PIPELINE_SPEC.md).
 
 **Version 0.1.0** | Python reimplementation of AceTree for *C. elegans* embryogenesis
 
@@ -43,9 +43,19 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     nuclei_writer.py           # write_nuclei_zip()
     image_provider.py          # ImageProvider protocol + 7 providers
     auxinfo.py                 # AuxInfo (embryo orientation data)
+  tracking/                    # Headless image-analysis and proposal layer
+    api.py                     # Versioned requests, scopes, detections, links, results
+    registry.py                # Built-ins + installed detector/tracker entry points
+    detectors.py               # Anisotropic 3D DoG and LoG detectors
+    lap.py                     # One-to-one Simple LAP tracker with gap closing
+    pipeline.py                # Global and selected-forward orchestration
+    integration.py             # ApplyTrackingProposal undoable adapter
+    persistence.py             # Versioned .tracking.json sidecar
   gui/                         # napari GUI — all Qt/napari deps isolated here
     app.py                     # AceTreeApp (main application)
     viewer_integration.py      # ViewerIntegration (nucleus overlay)
+    auto_tracking_dialog.py    # Modeless Auto Forward configure/review workbench
+    tracking_preview.py        # Pure proposal/gap expansion for visual review
     lineage_widget.py          # LineageWidget (Sulston tree)
     lineage_layout.py          # Layout engine (pure computation)
     lineage_list.py            # LineageListWidget (hierarchical list)
@@ -55,7 +65,7 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     color_rules.py             # ColorRuleEngine, ColorRule, presets
     edit_panel.py              # EditPanel + dialog classes
     viewer_3d_window.py        # Viewer3DWindow (detached 3D viewer)
-    dataset_dialog.py          # DatasetCreationDialog (4-page wizard)
+    dataset_dialog.py          # DatasetCreationDialog (5-page wizard)
     measure_dialog.py          # MeasureDialog (channel + output picker)
   analysis/                    # Post-hoc analysis — no GUI dependencies
     expression.py              # Expression time series analysis
@@ -81,7 +91,7 @@ gui/  ──depends-on──►  core/  ◄──depends-on──  naming/
   └──depends-on──►    io/   ◄─────────────────────┘
 ```
 
-- **`core/`**, **`naming/`**, **`editing/`**, **`io/`** have zero GUI imports.
+- **`core/`**, **`naming/`**, **`editing/`**, **`io/`**, and **`tracking/`** have zero GUI imports.
 - **`gui/`** depends on all other packages, plus napari and qtpy.
 - This isolation means headless (CLI) operation works without Qt/napari.
 
@@ -167,7 +177,7 @@ Central orchestrator that owns `nuclei_record: list[list[Nucleus]]` (indexed `[t
 
 **Construction:**
 - `NucleiManager.from_config(config)` — load nuclei from ZIP file
-- `NucleiManager.new_empty(config, num_timepoints)` — create empty manager for manual annotation (no nuclei loaded, all timepoints initialized to empty lists)
+- `NucleiManager.new_empty(config, num_timepoints)` — create an empty manager for manual annotation or as the target of an accepted tracking proposal (all timepoints initialized to empty lists)
 
 **Processing pipeline (`process()`):**
 1. `set_all_successors()` — compute forward links from predecessor fields (only alive nuclei — dead nuclei with stale predecessor links are excluded to prevent false division signals)
@@ -222,6 +232,8 @@ nuclei/
 - `write_nuclei_zip(nuclei_record, path, start_time=1)` — writes new-format CSV to a temporary archive in the destination directory, then atomically replaces the destination. Atomic replacements preserve an existing destination's file mode; a new file uses the normal process umask rather than inheriting the private `0600` mode of its staging file.
 
 When a manager contains manual body axes, Save also writes the matching AuxInfo v2 sidecar. The archive and sidecar are fully staged before either visible file changes. The sidecar is committed first with a same-directory rollback copy, and the archive is committed last; if either commit raises, the prior archive/sidecar set is restored. Undoing a manual frame removes only an AceTree-created sidecar under the same transaction—acquisition-provided sidecars are retained. Save As updates the config's nuclei path only after the data save succeeds, then atomically rewrites the source XML so reopening that config follows the new ZIP. If XML persistence fails, the in-memory target and savepoint remain unchanged (the newly written ZIP is retained as a standalone safety copy).
+
+When at least one tracking proposal has been accepted, the application also writes the latest `TrackingResult` beside the nuclei ZIP as `<stem>.tracking.json`. This versioned JSON records the request, detections, links, warnings, and plugin provenance; the nuclei ZIP remains the authoritative curated dataset. Opening a dataset restores the optional sidecar for provenance, and a missing or malformed sidecar does not prevent the backward-compatible ZIP from opening.
 
 ### 3.3 Image Providers (`io/image_provider.py`)
 
@@ -360,6 +372,8 @@ The `structural` property (default `True`) indicates whether an edit can affect 
 | `SetBodyAxes`              | Install manual orientation and invalidate naming | Previous AuxInfo/frame state |
 | `CompositeCommand`         | Group one user gesture into one history entry | Ordered child commands |
 
+`tracking/integration.py` adds `ApplyTrackingProposal`, an `EditCommand` that validates an accepted proposal against curated nuclei, expands gap links into adjacent AceTree records, and commits all new records and links as one exact undo/redo unit. `AceTreeApp` also compares the edit-history revision captured before analysis with the current revision, so a stale proposal cannot overwrite edits made while analysis was running.
+
 ### 5.2 Undo/Redo (`editing/history.py`)
 
 `EditHistory` maintains two stacks:
@@ -484,7 +498,7 @@ Pure computational layout engine (no Qt dependency):
 | `PlayerControls`    | Time/plane navigation, play/pause, labels toggle, deselect, 3D mode, 3D window |
 | `CellInfoPanel`     | Cell info builder (used by hover tooltip)    |
 | `ContrastTools`     | Per-channel contrast sliders with visibility toggles, auto-contrast |
-| `EditPanel`         | Color mode toggle, edit buttons, body-axis landmarks, D-pad move (popup), relink, add/track, trails, screenshot/record, edit history (popup) |
+| `EditPanel`         | Color mode toggle, edit buttons, body-axis landmarks, D-pad move (popup), relink, manual/selected-forward tracking, trails, screenshot/record, edit history (popup) |
 | `ColorRulesDialog`  | Rule list editor popup: add/edit/delete/reorder rules, "All other cells" default color, apply to engine |
 | `_RuleEditorDialog` | Single rule editor: criterion, pattern, color mode, color picker, colormap settings, match mode help |
 
@@ -501,10 +515,18 @@ Pure computational layout engine (no Qt dependency):
 2. **Left-click** in viewer to place. Inherits diameter and predecessor. Automatic identity stays automatic; only an existing parent `assigned_id` propagates as forced state.
 3. Gap > 1 triggers automatic interpolation. Placement plus interpolation is one `CompositeCommand`.
 
-**Track mode** — Continuous click-to-place across timepoints:
-1. Select parent cell. Click **Track** (toggle).
+**Manual Track mode** — Continuous click-to-place across timepoints:
+1. Select parent cell. Click **Manual Track** (toggle).
 2. Navigate to later timepoints, **right-click** to place.
-3. Mode stays active until Esc or re-click Track.
+3. Mode stays active until Esc or re-click Manual Track.
+
+**Auto Forward** — A semiautomated, selected-cell proposal:
+1. Select a live nucleus and choose **Edit Tools > Auto Forward**.
+2. The modeless workbench builds a `selected_forward` request using DoG or LoG, Simple LAP, a moving local ROI, and an ambiguity threshold. Common settings, advanced filtering, and session-preserved refinements remain editable.
+3. Analysis reports per-frame progress and supports cancellation. The pipeline follows only the seeded continuation and stops rather than guessing at ambiguity or a likely division.
+4. `tracking_preview.py` expands gap links into the same interpolated positions acceptance will create. `ViewerIntegration` renders these in dedicated, read-only cyan/amber napari layers that never share callbacks or selection with curated `Nuclei`.
+5. The review table and image overlay remain available while users navigate time/Z, inspect the stopping frame, change parameters, and rerun. Changed settings or document edits disable acceptance until a fresh preview completes.
+6. Discard restores the original view and changes nothing. Accepting uses `ApplyTrackingProposal`, creates one undo entry, clears the temporary layers, and selects the new terminal nucleus.
 
 All modes are mutually exclusive and can be cancelled with **Escape**.
 
@@ -556,9 +578,15 @@ Multiple 3D windows can be open simultaneously. Each is tracked in `app._3d_wind
 
 ### 6.10 Dataset Creation
 
-`AceTreeApp.from_new_dataset(config, num_timepoints, output_dir)` creates an app with an empty `NucleiManager` for manual annotation. `AceTreeApp.from_dialog()` shows the `DatasetCreationDialog` wizard first.
+`AceTreeApp.from_new_dataset(config, num_timepoints, output_dir, tracking_request=None)` creates an empty `NucleiManager`. With no request it preserves the manual workflow. With a request it runs a global proposal and applies the result through `ApplyTrackingProposal`, leaving the complete initial draft as one undoable edit.
 
-The `create` CLI command (`__main__.py`) provides both interactive (wizard dialog) and non-interactive (CLI flags) paths to dataset creation.
+`AceTreeApp.from_dialog()` shows the five-page `DatasetCreationDialog`. Step 4 defaults to **Manual annotation** or can build a global **DoG/LoG + Simple LAP draft** before the viewer opens. The non-interactive `create` path also defaults to manual and accepts `--tracking dog-lap` or `--tracking log-lap` plus detector/linker settings.
+
+### 6.11 Tracking Pipeline Integration
+
+`TrackingRequest` combines versioned detector/tracker `ComponentSpec` values with a `TrackingScope` (`global` or `selected_forward`). `TrackingPipeline` resolves components through `TrackingRegistry`, runs image analysis without mutating `NucleiManager`, and returns an immutable `TrackingResult` proposal. Built-ins are anisotropy-aware 3D DoG/LoG detectors and a deterministic Simple LAP tracker with optional gap closing. Simple LAP is deliberately one-to-one: it supports neither divisions nor merges.
+
+`TrackingRegistry` also discovers installed plugins from the `acetree_py.tracking.detectors` and `acetree_py.tracking.trackers` entry-point groups; one broken plugin is reported without preventing other components from loading. The stable contracts, TrackMate-compatible settings vocabulary, plugin packaging rules, UI states, and future StarryNite adapter are specified in [Tracking Pipeline Specification](TRACKING_PIPELINE_SPEC.md).
 
 ---
 

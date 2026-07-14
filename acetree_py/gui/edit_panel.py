@@ -50,10 +50,13 @@ try:
         QWidget,
     )
 
+    from .auto_tracking_dialog import AutoTrackForwardDialog
+
     _QT_AVAILABLE = True
 except ImportError:
     _QT_AVAILABLE = False
     QWidget = object  # type: ignore[misc,assignment]
+    AutoTrackForwardDialog = object  # type: ignore[misc,assignment]
 
 
 class EditPanel(QWidget):  # type: ignore[misc]
@@ -81,6 +84,8 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._axis_landmarks: dict[
             str, tuple[int, int, str]
         ] = {}
+        self._auto_track_dialog: AutoTrackForwardDialog | None = None
+        self._auto_track_settings: dict[str, object] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -242,7 +247,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
         )
         self._btn_relink.clicked.connect(self._on_relink)
 
-        self._btn_track = QPushButton("Track")
+        self._btn_track = QPushButton("Manual Track")
         self._btn_track.setToolTip(
             "Click-to-place mode: select a parent cell first, then click Track.\n"
             "Right-click in the viewer to place nuclei along the track.\n"
@@ -252,8 +257,16 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._btn_track.setCheckable(True)
         self._btn_track.clicked.connect(self._on_track)
 
+        self._btn_auto_track = QPushButton("Auto Forward…")
+        self._btn_auto_track.setToolTip(
+            "Detect and follow only the selected cell in a moving local region.\n"
+            "Review the draft before accepting it as one undoable edit."
+        )
+        self._btn_auto_track.clicked.connect(self._on_auto_track_forward)
+
         link_layout.addWidget(self._btn_relink)
         link_layout.addWidget(self._btn_track)
+        link_layout.addWidget(self._btn_auto_track)
         layout.addWidget(link_group)
 
         # ── Anatomical body orientation ──
@@ -510,6 +523,13 @@ class EditPanel(QWidget):  # type: ignore[misc]
         vi = self.app._viewer_integration
         if vi is not None:
             self._chk_trails.setChecked(vi.trails_visible)
+
+        if self._auto_track_dialog is not None:
+            try:
+                self._auto_track_dialog.sync_document_revision()
+            except RuntimeError:
+                # The Qt object may already be queued for deletion.
+                self._auto_track_dialog = None
 
         self._refresh_body_axis_status()
 
@@ -1383,6 +1403,135 @@ class EditPanel(QWidget):  # type: ignore[misc]
         else:
             self.app.exit_placement_mode()
             self._status_label.setText("Exited tracking mode")
+
+    def _on_auto_track_forward(self) -> None:
+        """Open the modeless Auto Forward configuration and review workbench."""
+        if self._auto_track_dialog is not None:
+            try:
+                if self._auto_track_dialog.isVisible():
+                    self._auto_track_dialog.raise_()
+                    self._auto_track_dialog.activateWindow()
+                    return
+            except RuntimeError:
+                self._auto_track_dialog = None
+
+        selected = self.app.get_selected_nucleus()
+        if selected is None:
+            QMessageBox.information(
+                self,
+                "Select a Cell",
+                "Select the last nucleus of the cell you want to track forward.",
+            )
+            return
+        nucleus, seed_time, seed_index = selected
+        if not nucleus.is_alive:
+            QMessageBox.information(
+                self,
+                "Select a Live Cell",
+                "Auto Forward can only start from a live nucleus.",
+            )
+            return
+        if self.app.image_provider is None:
+            QMessageBox.warning(
+                self,
+                "Images Unavailable",
+                "Automated tracking needs a readable image source.",
+            )
+            return
+
+        terminal = self._resolve_auto_track_seed(seed_time, seed_index)
+        if terminal is None:
+            QMessageBox.information(
+                self,
+                "Choose a Daughter",
+                "The selected lineage reaches a division. Select the daughter "
+                "you want to follow; Auto Forward will never choose a branch for you.",
+            )
+            return
+        nucleus, seed_time, seed_index = terminal
+        anchor = (seed_time, seed_index)
+
+        end_time = min(
+            self.app.manager.num_timepoints,
+            self.app.image_provider.num_timepoints,
+        )
+        if seed_time >= end_time:
+            QMessageBox.information(
+                self,
+                "No Future Images",
+                "The selected nucleus is already at the last available timepoint.",
+            )
+            return
+
+        # Auto Forward is distinct from Add, Relink, and Manual Track. End a
+        # conflicting click mode before opening its modeless review tools.
+        self.app._exit_all_modes()
+        config = self.app.manager.config
+        xy_res = config.xy_res if config is not None else 1.0
+        seed_radius_um = max(xy_res, nucleus.size * xy_res / 2.0)
+        seed_label = nucleus.effective_name or f"nucleus {seed_index}"
+        dialog = AutoTrackForwardDialog(
+            start_time=seed_time,
+            end_time=end_time,
+            num_channels=max(1, self.app.image_provider.num_channels),
+            parent=self,
+            app=self.app,
+            seed_anchor=anchor,
+            seed_label=seed_label,
+            seed_radius_um=seed_radius_um,
+            initial_settings=self._auto_track_settings,
+        )
+        dialog.draftApplied.connect(self._on_auto_track_applied)
+        dialog.finished.connect(
+            lambda _result, dlg=dialog: self._auto_track_closed(dlg)
+        )
+        self._auto_track_dialog = dialog
+        self._status_label.setText(
+            f"Auto Forward ready for {seed_label} from t={seed_time}; "
+            "build a preview to begin"
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _resolve_auto_track_seed(self, time: int, index: int):
+        """Follow an existing one-child continuation to its safe terminal seed."""
+
+        record = self.app.manager.nuclei_record
+        current_time = time
+        current_index = index
+        while True:
+            if not (1 <= current_time <= len(record)):
+                return None
+            frame = record[current_time - 1]
+            if not (1 <= current_index <= len(frame)):
+                return None
+            nucleus = frame[current_index - 1]
+            successors = [
+                value
+                for value in (nucleus.successor1, nucleus.successor2)
+                if value > 0
+            ]
+            if len(successors) > 1:
+                return None
+            if not successors:
+                return nucleus, current_time, current_index
+            current_time += 1
+            current_index = successors[0]
+
+    def _on_auto_track_applied(self, count: int) -> None:
+        self._status_label.setText(
+            f"Accepted Auto Forward draft: {count} new position(s), one undoable edit"
+        )
+        self.refresh()
+
+    def _auto_track_closed(self, dialog: AutoTrackForwardDialog) -> None:
+        try:
+            self._auto_track_settings = dialog.export_settings()
+        except RuntimeError:
+            pass
+        if self._auto_track_dialog is dialog:
+            self._auto_track_dialog = None
 
 
 # ── Dialog classes ───────────────────────────────────────────────

@@ -22,12 +22,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from qtpy.QtCore import QTimer, Qt
 from qtpy.QtGui import QCursor
-from qtpy.QtWidgets import QAction, QLabel, QMenu
+from qtpy.QtWidgets import QLabel
 
 if TYPE_CHECKING:
-    import napari
-
+    from ..tracking.api import Calibration, TrackingResult
     from .app import AceTreeApp
+    from .tracking_preview import ExpandedTrackingPreview
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,16 @@ class ViewerIntegration:
         self._trails_layer = None
         self._trails_visible: bool = False
         self._trail_length: int = 10  # how many past timepoints to show
+        # Non-destructive Auto Forward proposal layers.  These are kept
+        # separate from ``Nuclei`` so draft points cannot be selected, moved,
+        # or deleted as if they were curated records.
+        self._tracking_preview_spots_layer = None
+        self._tracking_preview_links_layer = None
+        self._tracking_preview: ExpandedTrackingPreview | None = None
+        self._tracking_preview_calibration: Calibration | None = None
+        self._tracking_preview_visible: bool = False
+        self._tracking_preview_stale: bool = False
+        self._tracking_preview_highlight: str | None = None
         # Hover tooltip for cell info
         self._tooltip: QLabel | None = None
         self._tooltip_timer: QTimer | None = None
@@ -132,6 +142,34 @@ class ViewerIntegration:
         )
         self._trails_layer.data = []
 
+        # Auto Forward draft layers are read-only and hidden until a proposal
+        # is ready.  They never receive mouse callbacks and never become the
+        # active napari layer.
+        self._tracking_preview_links_layer = viewer.add_shapes(
+            data=dummy_line,
+            shape_type="line",
+            name="Auto Forward Draft Links",
+            edge_color="cyan",
+            edge_width=2,
+            opacity=0.9,
+            visible=False,
+        )
+        self._tracking_preview_links_layer.data = []
+        self._tracking_preview_links_layer.editable = False
+
+        self._tracking_preview_spots_layer = viewer.add_shapes(
+            data=dummy_trail,
+            shape_type="polygon",
+            name="Auto Forward Draft Positions",
+            edge_color="cyan",
+            face_color="transparent",
+            edge_width=2,
+            opacity=0.95,
+            visible=False,
+        )
+        self._tracking_preview_spots_layer.data = []
+        self._tracking_preview_spots_layer.editable = False
+
         # Set Nuclei as the active layer so clicks always reach it
         self._ensure_nuclei_active()
 
@@ -152,6 +190,9 @@ class ViewerIntegration:
 
     def update_overlays(self) -> None:
         """Refresh the nucleus overlay for the current view state."""
+        # Preview rendering is independent of curated nuclei.  In particular,
+        # it must remain visible on frames where the nuclei record is empty.
+        self._update_tracking_preview()
         overlay = self.app.get_nucleus_overlay_data()
 
         if self._shapes_layer is None:
@@ -196,7 +237,6 @@ class ViewerIntegration:
         new_selected_idx = -1
         if selected_idx >= 0:
             # Find the selected nucleus in the filtered list
-            sel_name = names[selected_idx] if selected_idx < len(names) else ""
             filter_idx = 0
             for i in range(len(centers)):
                 if radii[i] < 0.5:
@@ -253,6 +293,179 @@ class ViewerIntegration:
         self._update_ghost_trail()
 
         # Keep Nuclei layer active so mouse clicks always reach it
+        self._ensure_nuclei_active()
+
+    def show_tracking_preview(
+        self,
+        proposal: TrackingResult,
+        calibration: Calibration,
+        *,
+        visible: bool = True,
+        stale: bool = False,
+    ) -> None:
+        """Display an immutable tracking proposal without editing the dataset."""
+
+        from .tracking_preview import expand_tracking_preview
+
+        self._tracking_preview = expand_tracking_preview(proposal)
+        self._tracking_preview_calibration = calibration
+        self._tracking_preview_visible = visible
+        self._tracking_preview_stale = stale
+        self._tracking_preview_highlight = None
+        self._update_tracking_preview()
+
+    def clear_tracking_preview(self) -> None:
+        """Remove every temporary Auto Forward shape from the viewer."""
+
+        self._tracking_preview = None
+        self._tracking_preview_calibration = None
+        self._tracking_preview_visible = False
+        self._tracking_preview_stale = False
+        self._tracking_preview_highlight = None
+        for layer in (
+            self._tracking_preview_spots_layer,
+            self._tracking_preview_links_layer,
+        ):
+            if layer is not None:
+                layer.data = []
+                layer.visible = False
+        self._ensure_nuclei_active()
+
+    def set_tracking_preview_visible(self, visible: bool) -> None:
+        """Show or hide a draft without discarding its review state."""
+
+        self._tracking_preview_visible = bool(visible)
+        self._update_tracking_preview()
+
+    def highlight_tracking_preview(self, preview_id: str | None) -> None:
+        """Emphasize the table-selected draft position in the image overlay."""
+
+        self._tracking_preview_highlight = preview_id
+        self._update_tracking_preview()
+
+    @property
+    def has_tracking_preview(self) -> bool:
+        return self._tracking_preview is not None
+
+    def _update_tracking_preview(self) -> None:
+        """Render proposal positions and incoming links for the current frame/Z."""
+
+        spots_layer = self._tracking_preview_spots_layer
+        links_layer = self._tracking_preview_links_layer
+        if spots_layer is None or links_layer is None:
+            return
+        spots_layer.data = []
+        links_layer.data = []
+
+        preview = self._tracking_preview
+        calibration = self._tracking_preview_calibration
+        visible = bool(preview is not None and calibration is not None)
+        visible = visible and self._tracking_preview_visible
+        visible = visible and not bool(getattr(self.app, "_3d_mode", False))
+        spots_layer.visible = visible
+        links_layer.visible = visible
+        if not visible:
+            return
+
+        current_time = self.app.current_time
+        current_z_um = (
+            float(self.app.current_plane) - calibration.plane_start
+        ) * calibration.z_um
+        polygons = []
+        edge_colors = []
+        face_colors = []
+        edge_widths = []
+        visible_ids: set[str] = set()
+
+        for spot in preview.spots:
+            if spot.frame != current_time or spot.kind == "seed":
+                continue
+            dz_um = abs(spot.z_um - current_z_um)
+            if dz_um >= spot.radius_um:
+                continue
+            radius_px = math.sqrt(max(0.0, spot.radius_um**2 - dz_um**2))
+            radius_px /= calibration.xy_um
+            if radius_px < 0.5:
+                continue
+            x_px, y_px, _ = calibration.physical_to_pixel(
+                spot.x_um,
+                spot.y_um,
+                spot.z_um,
+            )
+            polygons.append(
+                make_circle_polygon(x_px, y_px, radius_px, CIRCLE_VERTICES)
+            )
+            if spot.preview_id == self._tracking_preview_highlight:
+                color = [1.0, 1.0, 1.0, 1.0]
+                width = 3.5
+            elif self._tracking_preview_stale:
+                color = [0.95, 0.65, 0.2, 0.85]
+                width = 2.0
+            elif spot.kind == "interpolated":
+                color = [1.0, 0.72, 0.2, 0.95]
+                width = 2.0
+            else:
+                color = [0.0, 0.9, 1.0, 0.95]
+                width = 2.5
+            edge_colors.append(color)
+            face_colors.append([0.0, 0.0, 0.0, 0.0])
+            edge_widths.append(width)
+            visible_ids.add(spot.preview_id)
+
+        if polygons:
+            try:
+                spots_layer.add(
+                    polygons,
+                    shape_type="polygon",
+                    edge_color=edge_colors,
+                    face_color=face_colors,
+                    edge_width=edge_widths,
+                )
+            except Exception as exc:
+                logger.debug("Error drawing Auto Forward positions: %s", exc)
+
+        by_id = preview.by_id
+        lines = []
+        line_colors = []
+        line_widths = []
+        for link in preview.links:
+            target = by_id[link.target_id]
+            if target.frame != current_time or target.preview_id not in visible_ids:
+                continue
+            source = by_id[link.source_id]
+            source_x, source_y, _ = calibration.physical_to_pixel(
+                source.x_um,
+                source.y_um,
+                source.z_um,
+            )
+            target_x, target_y, _ = calibration.physical_to_pixel(
+                target.x_um,
+                target.y_um,
+                target.z_um,
+            )
+            lines.append(np.array([[source_y, source_x], [target_y, target_x]]))
+            if self._tracking_preview_stale:
+                line_colors.append([0.95, 0.65, 0.2, 0.65])
+            elif link.kind == "gap":
+                line_colors.append([1.0, 0.72, 0.2, 0.85])
+            else:
+                line_colors.append([0.0, 0.9, 1.0, 0.8])
+            line_widths.append(
+                2.5
+                if target.preview_id == self._tracking_preview_highlight
+                else 2.0
+            )
+
+        if lines:
+            try:
+                links_layer.add(
+                    lines,
+                    shape_type="line",
+                    edge_color=line_colors,
+                    edge_width=line_widths,
+                )
+            except Exception as exc:
+                logger.debug("Error drawing Auto Forward links: %s", exc)
         self._ensure_nuclei_active()
 
     def _update_division_line(self) -> None:

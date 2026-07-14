@@ -2,7 +2,7 @@
 
 A practical guide to opening datasets, navigating the viewer, editing cells, and saving your work.
 
-For automatic-versus-forced names and the complete correction contract, see [Naming and Manual-Curation Workflows](naming_workflows.md).
+For automatic-versus-forced names and the complete correction contract, see [Naming and Manual-Curation Workflows](naming_workflows.md). For detector/tracker extension points and the longer-term StarryNite plan, see the [Tracking Pipeline Specification](TRACKING_PIPELINE_SPEC.md).
 
 ---
 
@@ -170,7 +170,7 @@ When a cell is selected and **tracking** is enabled (the default), the viewer au
 - **Right-click** on a nucleus circle → **select that cell** (makes it the active cell; viewer centers on it, cell info updates). The click must land within the drawn circle — clicking on empty space does nothing.
 - **Left-click** on a nucleus circle → **toggle the label on/off** (useful for decluttering the display). Also requires clicking within the drawn circle.
 - **Left-click** (in **Add mode**) → **place a new nucleus** at the click position (see Section 6.2)
-- **Right-click** (in **Track mode**) → **place a tracking nucleus** at the click position (see Section 6.5)
+- **Right-click** (in **Manual Track mode**) → **place a tracking nucleus** at the click position (see Section 6.5)
 - **Right-click** (in **Relink pick mode**) → **select relink target** (see Section 6.4)
 
 ### 5.2 In the Lineage Tree
@@ -216,7 +216,8 @@ All edits are **undoable** (`Ctrl+Z`) and **redoable** (`Ctrl+Y`). Up to 1000 ed
 │ [Rename] [Kill] [Resurrect]  │
 │                              │
 │ Link Operations              │
-│ [Relink] [Track]             │
+│ [Relink] [Manual Track]      │
+│ [Auto Forward...]            │
 │                              │
 │ Body Orientation             │
 │ Endpoint: [Anterior ▾]       │
@@ -308,21 +309,35 @@ The link must be alive, reciprocal, and unambiguous. AceTree rejects a relink th
 
 **Adjacent links (gap = 1 frame):** A simple predecessor change is made, no interpolation needed.
 
-#### Track Mode
+#### Manual Track Mode
 
-The **Track** button enables continuous click-to-place tracking across timepoints:
+The **Manual Track** button enables continuous click-to-place tracking across timepoints:
 
 1. Select a cell to track from (the parent).
-2. Click **Track** — the button stays pressed.
+2. Click **Manual Track** — the button stays pressed.
 3. Navigate to a later timepoint.
 4. **Right-click** in the viewer to place a nucleus. It is automatically linked to the parent cell. Existing manual override state is preserved; a merely automatic parent name is not locked.
 5. If there is a time gap > 1, intermediate nuclei are interpolated.
 6. The mode stays active so you can advance to the next timepoint and place again.
-7. Press **Esc** or click **Track** again to exit.
+7. Press **Esc** or click **Manual Track** again to exit.
 
-If no cell is selected, Track enters root mode: a single right-click places one independent nucleus and exits.
+If no cell is selected, Manual Track enters root mode: a single right-click places one independent nucleus and exits.
 
 When a placement creates a second daughter, AceTree evaluates the division rule for the **actual parent**. The preview can therefore propose `ABal/ABar`, `E/MS`, `C/P3`, or other parent-specific pairs rather than always proposing `a/p`. The preview reports its axis, confidence, and orientation source. Suggested names remain automatic (`identity`); use Rename only when you intend to force a correction. Low-confidence or ambiguous geometry is an invitation to inspect the body axes and daughter positions.
+
+#### Auto Forward Tracking Workbench
+
+**Edit Tools > Auto Forward** follows one selected cell without detecting or replacing the rest of the embryo:
+
+1. Select a live cell and click **Auto Forward**. If the selection is earlier in an existing one-child continuation, AceTree safely starts from its terminal nucleus. It never chooses a daughter at a division.
+2. In **1. Configure**, choose DoG or LoG detection, channel, approximate nucleus radius, detection threshold, search area, maximum movement, allowed missing frames, and caution for close choices. Tooltips explain whether increasing each value makes tracking broader or more selective. Advanced options expose subpixel refinement and median filtering.
+3. Click **Build Preview**. Progress is reported by frame and **Cancel analysis** stops without retaining a partial result or changing the dataset.
+4. In **2. Review**, inspect every proposed and interpolated position in the table. Cyan circles and links are temporary draft data; interpolated gap positions are amber. Click a row, **Previous**, **Next**, or **Go to stop** to navigate the main image viewer. The workbench is modeless, so normal time and Z navigation remain available.
+5. If the draft needs work, change any parameter. AceTree marks the old overlay as out of date and disables acceptance until **Update Preview** finishes. Settings are remembered when the workbench is reopened.
+6. Read the human-language stopping explanation. Auto Forward stops rather than guessing at similarly likely candidates, likely divisions, conflicts with existing annotations, or a lost continuation.
+7. Choose **Accept Draft** to add exactly the visible proposal as one undoable edit, or **Discard Draft** to restore the original view without editing anything. After acceptance, AceTree selects the new terminal nucleus so curation can continue immediately.
+
+The prototype Simple LAP tracker supports one-to-one continuations and short gaps. It does **not** create divisions or merges; curate daughter branches manually with **Manual Track** or **Relink**. A manual edit, Undo, or Redo while a draft is open makes that draft stale and requires **Update Preview** before it can be accepted.
 
 #### Curate a Known Sublineage: EMS to E to Ea/Ep
 
@@ -330,10 +345,10 @@ This workflow is supported even when the rest of the embryo is incomplete:
 
 1. At a clear reference frame, define **Body Orientation** using Posterior + Anterior and either Ventral + Dorsal or Right + Left, then click **Apply Axes**.
 2. Select any trusted nucleus in the EMS continuation, choose **Rename**, and enter `EMS`. The forced EMS identity propagates only along that one-successor continuation.
-3. Enter **Track** and place the EMS continuation through successive frames.
+3. Enter **Manual Track** and place the EMS continuation through successive frames.
 4. At the EMS division frame, place one daughter, then place the second daughter at the same frame. The second placement establishes the division. AceTree keeps `EMS` on the parent, removes the inherited EMS lock from the first daughter, and proposes `E` and `MS` from their geometry in the manual body frame.
-5. Exit Track, select `E`, and enter Track again to follow that branch. At the E division, place both daughters at the same frame; AceTree applies the E rule and proposes `Ea` and `Ep`.
-6. Repeat by selecting whichever automatically named daughter you want to follow. Re-selecting at a division is intentional: Track stays anchored to the branch that was selected when the mode began.
+5. Exit Manual Track, select `E`, and enter Manual Track again to follow that branch. At the E division, place both daughters at the same frame; AceTree applies the E rule and proposes `Ea` and `Ep`.
+6. Repeat by selecting whichever automatically named daughter you want to follow. Re-selecting at a division is intentional: Manual Track stays anchored to the branch that was selected when the mode began.
 
 `E`, `MS`, `Ea`, and `Ep` are automatic identities, not new manual locks. Correcting the body frame and clicking **Apply Axes** can therefore reorder them while preserving the forced `EMS` anchor. If one proposed daughter is independently known, Rename only that cell; **Use Automatic** later returns it to geometry-based naming. The status preview reports the rule axis, source, confidence, and ambiguity, so inspect uncertain calls before continuing deeply down the branch.
 
@@ -443,7 +458,7 @@ Multi-channel images are displayed as separate napari layers with green/magenta 
 - **Ctrl+S** or the **Save** button: Overwrites the original nuclei ZIP file.
 - **Ctrl+Shift+S** or **Save As**: Opens a file dialog to choose a new location, makes that location the target of subsequent Save operations, and updates the source XML config so reopening it follows the new ZIP. The retarget happens only after the data save and config rewrite both succeed.
 
-The saved file is a ZIP containing CSV-formatted nucleus data, one entry per timepoint. This is the standard AceTree nuclei format and can be opened by both AceTree-Py and the original Java AceTree. AceTree fully prepares the nuclei ZIP and any manual-orientation sidecar before committing them. A failure leaves the previous ZIP and sidecar together, rather than mixing one new file with one old file. Existing file permissions are retained across replacement.
+The saved file is a ZIP containing CSV-formatted nucleus data, one entry per timepoint. This is the standard AceTree nuclei format and can be opened by both AceTree-Py and the original Java AceTree. AceTree fully prepares the nuclei ZIP and any manual-orientation sidecar before committing them. A failure leaves the previous ZIP and sidecar together, rather than mixing one new file with one old file. Existing file permissions are retained across replacement. If an automated tracking run has been accepted, Save also writes the latest run beside the nuclei ZIP as `<stem>.tracking.json`.
 
 ### 8.2 What Gets Saved
 
@@ -451,6 +466,7 @@ The saved file is a ZIP containing CSV-formatted nucleus data, one entry per tim
 - All predecessor/successor links
 - Manual name overrides (`assigned_id`)
 - Manual body orientation in an AuxInfo v2 sidecar, including source, quality, and reference time
+- The latest accepted automated tracking run and provenance in `<stem>.tracking.json`, when present
 - Expression values
 
 Edits that haven't been saved are tracked against an explicit savepoint. Undoing a saved edit makes the dataset dirty; redoing exactly back to the saved state makes it clean again. A new edit after Undo creates a new branch and remains dirty even if the history happens to have the same number of entries. The savepoint advances only after a successful Save or Save As.
@@ -675,13 +691,14 @@ acetree-py export config.xml -f nucleus_csv -o my_nuclei.csv
 
 ---
 
-## 14. Manual Tracking & Dataset Creation
+## 14. Tracking & Dataset Creation
 
-AceTree-Py can create new datasets from raw TIFF images and provides interactive tools for manually placing, tracking, and linking nuclei. This is useful when:
+AceTree-Py can create new datasets from raw TIFF images and start either with empty manual annotation (the default) or an editable DoG/LoG plus Simple LAP draft. Interactive tools remain available for placing, tracking, and linking selected cells. This is useful when:
 
 - You have image data that hasn't been processed by StarryNite or another detection pipeline.
 - You want to manually annotate nuclei positions in a single frame (detection-only, no tracking).
 - You want to manually track a subset of cells across time.
+- You want an initial automated draft to curate rather than treating tracker output as ground truth.
 
 ### 14.1 Creating a New Dataset
 
@@ -691,7 +708,7 @@ AceTree-Py can create new datasets from raw TIFF images and provides interactive
 acetree-py create
 ```
 
-This opens a 4-page wizard dialog:
+This opens a 5-page wizard dialog:
 
 1. **Image directory** — select the folder containing your TIFF files. The wizard auto-detects the naming pattern and image dimensions.
 2. **Channel layout** — choose how channels are arranged:
@@ -703,7 +720,8 @@ This opens a 4-page wizard dialog:
      - **Planar** (all Z for channel 1, then all Z for channel 2) — plane-fastest.
    Set the flip checkbox if your images are mirrored horizontally.
 3. **Voxel parameters** — set XY resolution (µm/pixel), Z resolution (µm/plane), number of timepoints and planes (auto-filled from detection; for interleaved stacks the Z count is automatically `pages / num_channels`).
-4. **Output** — choose where to save the dataset config XML and nuclei ZIP.
+4. **Initial tracking** — keep the recommended **Manual annotation** default, or choose an automated draft using DoG or LoG detection plus Simple LAP. Configure the channel, expected nucleus radius, quality threshold, maximum displacement, and allowed missing frames. Simple LAP does not infer divisions or merges.
+5. **Output** — choose where to save the dataset config XML and nuclei ZIP.
 
 #### CLI (Non-Interactive)
 
@@ -723,6 +741,12 @@ Options:
 | `--interleaved`    | off     | Single TIFF per timepoint contains interleaved multichannel pages   |
 | `--num-channels`   | 1       | Number of channels (required with `--interleaved`, must be ≥ 2)    |
 | `--channel-order`  | `CZ`    | Page order for interleaved stacks: `CZ` (channel-fastest) or `ZC` |
+| `--tracking`       | `manual`| Initial workflow: `manual`, `dog-lap`, or `log-lap`                |
+| `--detection-channel` | 1    | One-based channel for automated detection                           |
+| `--nucleus-radius` | 4.0     | Expected physical nucleus radius in microns                         |
+| `--detection-threshold` | 5.0 | Minimum LoG/DoG response                                           |
+| `--linking-distance` | 8.0   | Maximum Simple LAP displacement in microns                          |
+| `--missing-frames` | 1       | Maximum missed frames to bridge                                     |
 
 **Examples:**
 
@@ -738,16 +762,23 @@ acetree-py create /data/embryo/multichannel/ --output /data/embryo/out/ --interl
 
 # Single-frame annotation (one TIFF file in the directory):
 acetree-py create /data/single_frame/
+
+# Build an initial DoG + Simple LAP draft for review:
+acetree-py create /data/embryo/images/ --tracking dog-lap --nucleus-radius 3.5 --linking-distance 7
 ```
 
 > `--interleaved` bypasses `--split`/`--flip` — channels are already resolved at the page level, so the horizontal split wrapper would halve a valid image.
 
-The `create` command:
+The `create` workflow:
 1. Scans the image directory for TIFF files and probes the first image for z-plane count.
 2. Generates an `AceTreeConfig` with the correct image paths and resolution.
 3. Creates an empty nuclei ZIP (no detections).
 4. Writes the XML config file to the output directory.
-5. Launches the GUI for interactive annotation.
+5. In automated wizard mode, builds and accepts the global DoG/LoG plus Simple LAP result as one undoable draft; manual mode leaves the dataset empty.
+6. Launches the GUI for review and curation.
+
+The non-interactive CLI also defaults to manual mode; select `dog-lap` or
+`log-lap` explicitly to build an automated draft.
 
 ### 14.2 Placing Nuclei (Add Mode)
 
@@ -777,19 +808,21 @@ Each press is individually undoable. The cell stays selected between presses for
 
 ### 14.4 Tracking Across Time
 
-For continuous tracking across many timepoints, use the **Track** button:
+For continuous manual tracking across many timepoints, use the **Manual Track** button:
 
 1. Select the cell you want to extend.
-2. Click **Track** to enter tracking mode.
+2. Click **Manual Track** to enter tracking mode.
 3. Advance to the next timepoint (right arrow).
 4. **Right-click** to place the next position. The nucleus is automatically linked.
 5. Repeat steps 3–4 for as many timepoints as needed.
 6. Press **Esc** to exit tracking mode.
 
-Track mode automatically handles:
+Manual Track mode automatically handles:
 - **Name continuity**: the current automatic identity can continue, while only a genuinely forced parent override is inherited as `assigned_id`.
 - **Predecessor linking**: direct link if adjacent, interpolation if there's a gap.
 - **Size inheritance**: the placed nucleus inherits the parent's diameter.
+
+To follow only one existing cell automatically, use **Edit Tools > Auto Forward** as described in Section 6.5. It searches a moving local ROI, shows a proposal summary, stops on ambiguity, and applies an accepted draft as one undoable edit.
 
 ### 14.5 Workflow for Single-Frame Annotation
 
@@ -805,7 +838,7 @@ acetree-py create /data/single_frame/
 3. Use **Rename** to assign cell identities.
 4. **Save** (`Ctrl+S`) to persist annotations.
 
-Each placed nucleus becomes an independent root cell. The Track button is not useful in single-frame mode (there are no future timepoints to track to).
+Each placed nucleus becomes an independent root cell. Manual Track and Auto Forward are not useful in single-frame mode (there are no future timepoints to track to).
 
 ### 14.6 Saving and Reloading
 
@@ -813,6 +846,7 @@ After annotation:
 
 - **Save** (`Ctrl+S`) writes the nuclei to the ZIP file and the config XML.
 - A manually applied body orientation is written as an AuxInfo v2 sidecar and loaded before automatic geometry next time.
+- If an automated run was accepted, the latest run is written beside the nuclei ZIP as `<stem>.tracking.json`.
 - To reopen later: `acetree-py gui path/to/output/config.xml`
 - The automatic naming pipeline runs on load. If enough cells have been placed for the 4→8 cell transition to be detected, Sulston names will be assigned automatically.
 
@@ -820,6 +854,6 @@ After annotation:
 
 - **Use the 3D view** (Section 6.6) to verify nucleus positions in three dimensions.
 - **Place nuclei on the z-plane where the nucleus is brightest** for the most accurate position.
-- **Use Track mode** for long cell tracks — it's much faster than individual Add operations.
+- **Use Manual Track** for curated long tracks, or **Auto Forward** for a reviewable draft of one continuation.
 - **Use Relink** to correct mistakes after the fact rather than undoing many steps.
 - **Save frequently** (`Ctrl+S`) — there is no autosave.
