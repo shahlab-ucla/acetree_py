@@ -1412,3 +1412,88 @@ class NumpyProvider:
     @property
     def image_shape(self) -> tuple[int, int]:
         return (self._data.shape[-2], self._data.shape[-1])
+
+
+def clone_image_provider_for_worker(
+    provider: ImageProvider,
+) -> ImageProvider | None:
+    """Create an independent built-in provider for background analysis.
+
+    Several disk-backed providers cache an open ZIP or TIFF handle. Sharing
+    those handles with video playback while tracking runs in another thread is
+    unsafe. This function reconstructs every built-in provider with the same
+    source settings but fresh caches. Unknown third-party providers return
+    ``None`` so callers can retain their existing compatibility fallback.
+    """
+
+    if isinstance(provider, ZipTiffProvider):
+        return ZipTiffProvider(
+            provider.tif_directory,
+            tif_prefix=provider.tif_prefix,
+            num_planes=provider._num_planes,
+            use_zip=provider.use_zip,
+            t_width=provider.t_width,
+            p_width=provider.p_width,
+        )
+    if isinstance(provider, TiffDirectoryProvider):
+        return TiffDirectoryProvider(
+            provider.directory,
+            pattern=provider.pattern,
+            num_planes=provider._num_planes,
+        )
+    if isinstance(provider, StackTiffProvider):
+        return StackTiffProvider(
+            provider.directory,
+            pattern=provider.pattern,
+            num_channels=provider._num_channels,
+            channel_order=provider._channel_order,
+        )
+    if isinstance(provider, OmeTiffProvider):
+        return OmeTiffProvider(provider.path)
+    if isinstance(provider, SplitChannelProvider):
+        inner = clone_image_provider_for_worker(provider._inner)
+        if inner is None:
+            return None
+        return SplitChannelProvider(
+            inner,
+            split=provider._split,
+            flip=provider._flip,
+        )
+    if isinstance(provider, MultiChannelFolderProvider):
+        channels = [
+            clone_image_provider_for_worker(channel)
+            for channel in provider._channels
+        ]
+        if any(channel is None for channel in channels):
+            return None
+        return MultiChannelFolderProvider(
+            [channel for channel in channels if channel is not None],
+            flip=provider._flip,
+        )
+    if isinstance(provider, NumpyProvider):
+        # The wrapper is independent; the immutable analysis path only reads
+        # the underlying array, so copying a potentially large volume is not
+        # necessary.
+        return NumpyProvider(provider._data)
+    return None
+
+
+def close_worker_image_provider(provider: ImageProvider) -> None:
+    """Release cached handles owned by a cloned background provider."""
+
+    if isinstance(provider, SplitChannelProvider):
+        close_worker_image_provider(provider._inner)
+        return
+    if isinstance(provider, MultiChannelFolderProvider):
+        for channel in provider._channels:
+            close_worker_image_provider(channel)
+        return
+    for attribute in ("_open_zip", "_open_tif"):
+        handle = getattr(provider, attribute, None)
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                logger.debug("Could not close background image handle", exc_info=True)
+            finally:
+                setattr(provider, attribute, None)

@@ -19,8 +19,10 @@ import numpy as np
 from ..core.nucleus import Nucleus
 from .api import (
     Calibration,
+    ComponentSpec,
     Detection,
     TrackEdge,
+    TrackingOutcome,
     TrackingRequest,
     TrackingResult,
 )
@@ -70,6 +72,79 @@ class TrackingPipeline:
                 cancelled=cancelled, progress=progress,
             )
         raise ValueError(f"Unsupported tracking scope: {kind!r}")
+
+    def detect_frame(
+        self,
+        image_provider: ImageProvider,
+        calibration: Calibration,
+        detector_spec: ComponentSpec,
+        *,
+        frame: int,
+        cancelled: CancelCallback | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> tuple[Detection, ...]:
+        """Run only one detector on one complete 3D frame.
+
+        This is the fast parameter-tuning path used by the whole-dataset
+        workbench.  It never constructs a tracker, creates links, or returns
+        an accept-capable tracking proposal.
+        """
+
+        frame = int(frame)
+        if frame < 1 or frame > image_provider.num_timepoints:
+            raise ValueError(
+                f"Detector preview frame {frame} is unavailable; the image source "
+                f"has {image_provider.num_timepoints} timepoint(s)"
+            )
+        channel = _target_channel_from_settings(detector_spec.settings)
+        if channel >= image_provider.num_channels:
+            raise ValueError(
+                f"TARGET_CHANNEL {channel + 1} is unavailable; the image source has "
+                f"{image_provider.num_channels} channel(s)"
+            )
+
+        _check_cancelled(cancelled)
+        detector = self.registry.create_detector(detector_spec.plugin_id)
+        _check_cancelled(cancelled)
+        if progress is not None:
+            progress(0, 1, f"Loading detector image at time {frame}")
+        stack = image_provider.get_stack(frame, channel)
+        _check_cancelled(cancelled)
+        detections = tuple(
+            detector.detect(
+                stack,
+                frame,
+                calibration,
+                detector_spec.settings,
+            )
+        )
+        _check_cancelled(cancelled)
+
+        if any(detection.frame != frame for detection in detections):
+            raise ValueError(
+                "A detector returned a position for a different frame during preview"
+            )
+        ids = [detection.detection_id for detection in detections]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Detector preview IDs must be unique")
+        ordered = tuple(
+            sorted(
+                detections,
+                key=lambda detection: (
+                    detection.z_um,
+                    detection.y_um,
+                    detection.x_um,
+                    detection.detection_id,
+                ),
+            )
+        )
+        if progress is not None:
+            progress(
+                1,
+                1,
+                f"Found {len(ordered)} detector candidate(s) at time {frame}",
+            )
+        return ordered
 
     def _run_global(
         self,
@@ -163,20 +238,30 @@ class TrackingPipeline:
         )
         allow_gap = bool(request.tracker.settings.get("ALLOW_GAP_CLOSING", True))
         ambiguity_ratio = max(1.0, float(request.scope.ambiguity_ratio))
+        search_radius_um = (
+            request.scope.roi_radius_um
+            if request.scope.roi_radius_um is not None
+            else 12.0
+        )
         total = request.scope.end_frame - seed_time
+        outcome: TrackingOutcome | None = None
+        last_attempt_frame: int | None = None
+        last_prediction: tuple[float, float, float] | None = None
+        last_review_candidates: tuple[Detection, ...] = ()
 
         for done, frame in enumerate(range(seed_time + 1, request.scope.end_frame + 1), start=1):
             _check_cancelled(cancelled)
             stack = np.asarray(image_provider.get_stack(frame, channel))
             predicted = _predict_position(previous, last, frame)
+            last_attempt_frame = frame
+            last_prediction = predicted
             crop, offset_zyx = _crop_around(
                 stack,
                 predicted,
                 calibration,
-                request.scope.roi_radius_um
-                if request.scope.roi_radius_um is not None else 12.0,
+                search_radius_um,
             )
-            candidates = list(
+            detected_candidates = list(
                 detector.detect(
                     crop,
                     frame,
@@ -185,9 +270,12 @@ class TrackingPipeline:
                     offset_zyx=offset_zyx,
                 )
             )
-            ranked_before_conflicts = _rank_candidates(last, candidates, request)
+            last_review_candidates = _ordered_review_candidates(detected_candidates)
+            ranked_before_conflicts = _rank_candidates(
+                last, detected_candidates, request
+            )
             candidates, collided_ids = _exclude_existing_detections(
-                candidates,
+                detected_candidates,
                 nuclei_record,
                 frame,
                 calibration,
@@ -200,18 +288,47 @@ class TrackingPipeline:
                     f"Stopped at t={frame}: a candidate overlaps an existing "
                     "curated nucleus"
                 )
+                outcome = _stopped_outcome(
+                    "conflict",
+                    frame,
+                    last,
+                    predicted,
+                    search_radius_um,
+                    detected_candidates,
+                )
                 break
 
             ranked = _rank_candidates(last, candidates, request)
-            if len(ranked) > 1 and _costs_are_ambiguous(ranked, ambiguity_ratio):
-                warnings.append(
-                    f"Stopped at t={frame}: two candidates had similar assignment costs"
-                )
-                break
+            last_review_candidates = _ordered_review_candidates(candidates)
+            # A close, balanced pair around the predicted position is more
+            # biologically actionable than the generic equal-cost condition.
+            # Diagnose the probable division first so review can show both
+            # daughter candidates with the appropriate explanation.
             if _looks_like_division(candidates, ranked, predicted):
                 warnings.append(
                     f"Stopped at t={frame}: two candidates form a probable division; "
                     "Simple LAP does not create daughter branches"
+                )
+                outcome = _stopped_outcome(
+                    "division",
+                    frame,
+                    last,
+                    predicted,
+                    search_radius_um,
+                    _ranked_review_candidates(candidates, ranked),
+                )
+                break
+            if len(ranked) > 1 and _costs_are_ambiguous(ranked, ambiguity_ratio):
+                warnings.append(
+                    f"Stopped at t={frame}: two candidates had similar assignment costs"
+                )
+                outcome = _stopped_outcome(
+                    "ambiguity",
+                    frame,
+                    last,
+                    predicted,
+                    search_radius_um,
+                    _ranked_review_candidates(candidates, ranked),
                 )
                 break
 
@@ -233,6 +350,14 @@ class TrackingPipeline:
                     warnings.append(
                         f"Stopped at t={frame}: no unique candidate passed the distance gate"
                     )
+                    outcome = _stopped_outcome(
+                        "lost",
+                        frame,
+                        last,
+                        predicted,
+                        search_radius_um,
+                        candidates,
+                    )
                     break
                 if progress is not None:
                     progress(done, total, f"No candidate at time {frame}; trying gap closure")
@@ -252,6 +377,35 @@ class TrackingPipeline:
             if progress is not None:
                 progress(done, total, f"Tracking selected cell at time {frame}")
 
+        if outcome is None:
+            if last.frame == request.scope.end_frame:
+                outcome = TrackingOutcome(
+                    code="completed",
+                    stop_frame=None,
+                    last_accepted_frame=last.frame,
+                    predicted_position_um=None,
+                    search_radius_um=search_radius_um,
+                )
+            else:
+                # A missing observation at the end of the requested range can
+                # be within the configured gap allowance, but there is no later
+                # frame available to close it.  Report it as lost instead of
+                # silently calling the shorter track complete.
+                if last_attempt_frame is None or last_prediction is None:
+                    raise RuntimeError("Selected-forward tracking made no attempt")
+                warnings.append(
+                    f"Stopped at t={last_attempt_frame}: no unique candidate "
+                    "passed the distance gate"
+                )
+                outcome = TrackingOutcome(
+                    code="lost",
+                    stop_frame=last_attempt_frame,
+                    last_accepted_frame=last.frame,
+                    predicted_position_um=last_prediction,
+                    search_radius_um=search_radius_um,
+                    review_candidates=last_review_candidates,
+                )
+
         return TrackingResult(
             request=request,
             detections=tuple(accepted),
@@ -259,12 +413,19 @@ class TrackingPipeline:
             existing_anchors={seed_id: (seed_time, seed_index)},
             warnings=tuple(warnings),
             provenance=_provenance(self.registry, request, mode="selected_forward"),
+            outcome=outcome,
         )
 
 
 def _target_channel(request: TrackingRequest) -> int:
     """Translate TrackMate's 1-based TARGET_CHANNEL to ImageProvider's 0-based API."""
-    channel_1based = int(request.detector.settings.get("TARGET_CHANNEL", 1))
+    return _target_channel_from_settings(request.detector.settings)
+
+
+def _target_channel_from_settings(settings) -> int:
+    """Translate detector settings' 1-based channel to the provider index."""
+
+    channel_1based = int(settings.get("TARGET_CHANNEL", 1))
     if channel_1based < 1:
         raise ValueError("TARGET_CHANNEL must be a positive 1-based channel number")
     return channel_1based - 1
@@ -415,6 +576,44 @@ def _costs_are_ambiguous(costs: Sequence[tuple[float, str]], ratio: float) -> bo
         return False
     best = max(float(costs[0][0]), 1e-12)
     return float(costs[1][0]) / best < ratio
+
+
+def _ordered_review_candidates(
+    candidates: Sequence[Detection],
+) -> tuple[Detection, ...]:
+    """Canonicalize unaccepted detector observations for review/persistence."""
+    return tuple(
+        sorted(candidates, key=lambda candidate: (candidate.frame, candidate.detection_id))
+    )
+
+
+def _ranked_review_candidates(
+    candidates: Sequence[Detection],
+    ranked: Sequence[tuple[float, str]],
+    limit: int = 2,
+) -> tuple[Detection, ...]:
+    """Return only the ranked observations that triggered a stop decision."""
+
+    by_id = {candidate.detection_id: candidate for candidate in candidates}
+    return tuple(by_id[detection_id] for _cost, detection_id in ranked[:limit])
+
+
+def _stopped_outcome(
+    code: str,
+    stop_frame: int,
+    last: Detection,
+    predicted: tuple[float, float, float],
+    search_radius_um: float,
+    candidates: Sequence[Detection],
+) -> TrackingOutcome:
+    return TrackingOutcome(
+        code=code,
+        stop_frame=stop_frame,
+        last_accepted_frame=last.frame,
+        predicted_position_um=predicted,
+        search_radius_um=search_radius_um,
+        review_candidates=_ordered_review_candidates(candidates),
+    )
 
 
 def _looks_like_division(

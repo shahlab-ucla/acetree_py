@@ -30,6 +30,7 @@ try:
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QMessageBox,
         QPushButton,
         QRadioButton,
         QSpinBox,
@@ -74,6 +75,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._stack.addWidget(self._page3)
         self._stack.addWidget(self._page4)
         self._stack.addWidget(self._page5)
+        self._stack.currentChanged.connect(self._update_nav_buttons)
 
         # Navigation buttons
         nav = QHBoxLayout()
@@ -90,6 +92,8 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         nav.addWidget(self._btn_next)
         layout.addLayout(nav)
 
+        self._connect_tracking_channel_controls()
+        self._sync_tracking_channel_range()
         self._update_nav_buttons()
 
     # ── Page 1: Image directory ───────────────────────────────────
@@ -115,6 +119,11 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._detect_label.setMaximumHeight(200)
         layout.addWidget(QLabel("Auto-detection results:"))
         layout.addWidget(self._detect_label)
+        self._image_validation_label = QLabel()
+        self._image_validation_label.setWordWrap(True)
+        self._image_validation_label.setAccessibleName("Image directory problem")
+        self._image_validation_label.setStyleSheet("QLabel { color: #a85f00; }")
+        layout.addWidget(self._image_validation_label)
         layout.addStretch()
         return page
 
@@ -156,7 +165,11 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         if d.get("num_timepoints"):
             self._timepoints_spin.setValue(d["num_timepoints"])
         if d.get("num_planes"):
-            self._planes_spin.setValue(d["num_planes"])
+            # Respect an already-selected multichannel layout when the user
+            # goes back and chooses a different image directory.  Writing the
+            # raw TIFF page count directly would save Z*C as the Z count.
+            self._recompute_planes()
+        self._refresh_tracking_validation()
 
     # ── Page 2: Image format ──────────────────────────────────────
 
@@ -215,6 +228,12 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._flip_check = QCheckBox("Flip left/right (mirror horizontally)")
         layout.addWidget(self._flip_check)
 
+        self._layout_validation_label = QLabel()
+        self._layout_validation_label.setWordWrap(True)
+        self._layout_validation_label.setAccessibleName("Image layout problem")
+        self._layout_validation_label.setStyleSheet("QLabel { color: #a85f00; }")
+        layout.addWidget(self._layout_validation_label)
+
         # Toggle visibility of sub-groups
         self._radio_separate.toggled.connect(self._sep_group.setVisible)
         self._radio_multistack.toggled.connect(self._stack_group.setVisible)
@@ -253,6 +272,158 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         d = QFileDialog.getExistingDirectory(self, "Select Channel 2 Directory")
         if d:
             self._ch2_dir_edit.setText(d)
+
+    def _connect_tracking_channel_controls(self) -> None:
+        """Keep the tracking channel choices synchronized with image layout."""
+
+        for radio in (
+            self._radio_single,
+            self._radio_split,
+            self._radio_separate,
+            self._radio_multistack,
+        ):
+            radio.toggled.connect(self._sync_tracking_channel_range)
+        self._n_channels_spin.valueChanged.connect(self._sync_tracking_channel_range)
+        self._ch2_dir_edit.textChanged.connect(self._refresh_tracking_validation)
+        self._dir_edit.textChanged.connect(self._refresh_tracking_validation)
+        self._output_edit.textChanged.connect(self._refresh_tracking_validation)
+        self._dataset_name_edit.textChanged.connect(self._refresh_tracking_validation)
+        self._radio_tracking_auto.toggled.connect(self._refresh_tracking_validation)
+        self._tracking_channel_spin.valueChanged.connect(
+            self._refresh_tracking_validation
+        )
+        self._tracking_detector_combo.currentIndexChanged.connect(
+            self._refresh_tracking_validation
+        )
+        self._tracking_tracker_combo.currentIndexChanged.connect(
+            self._refresh_tracking_validation
+        )
+
+    def _available_tracking_channels(self) -> int:
+        if self._radio_multistack.isChecked():
+            return self._n_channels_spin.value()
+        if self._radio_split.isChecked() or self._radio_separate.isChecked():
+            return 2
+        return 1
+
+    def _sync_tracking_channel_range(self, *_args) -> None:
+        """Clamp the detector channel immediately after a layout change."""
+
+        available = self._available_tracking_channels()
+        self._tracking_channel_spin.setRange(1, available)
+        self._tracking_channel_spin.setToolTip(
+            f"Available channels for the selected image layout: 1–{available}"
+        )
+        self._tracking_channel_spin.setAccessibleDescription(
+            f"The selected image layout provides {available} channel(s)"
+        )
+        self._refresh_tracking_validation()
+
+    def _tracking_validation_error(self) -> str:
+        layout_error = self._image_layout_validation_error()
+        if layout_error:
+            return layout_error
+        if not self._radio_tracking_auto.isChecked():
+            return ""
+        if self._tracking_detector_combo.count() == 0:
+            return "No compatible detector is installed; choose Manual annotation."
+        if self._tracking_tracker_combo.count() == 0:
+            return "No compatible tracker is installed; choose Manual annotation."
+
+        available = self._available_tracking_channels()
+        channel = self._tracking_channel_spin.value()
+        if not 1 <= channel <= available:
+            return (
+                f"Detection channel {channel} is unavailable for this layout; "
+                f"choose a channel from 1 to {available}."
+            )
+        return ""
+
+    def _image_source_validation_error(self) -> str:
+        """Return a blocking problem with the primary image directory."""
+
+        text = self._dir_edit.text().strip()
+        if not text:
+            return "Choose an image directory containing TIFF files."
+        directory = Path(text)
+        try:
+            if not directory.is_dir():
+                return "The selected image directory does not exist."
+        except OSError as exc:
+            return f"The selected image directory cannot be read: {exc}"
+        if not _tiff_files(directory):
+            return "The selected image directory contains no TIFF files."
+        error = self._detected.get("error")
+        if error:
+            return f"The image source could not be validated: {error}"
+        return ""
+
+    def _image_layout_validation_error(self) -> str:
+        """Validate the selected channel layout independent of tracker mode."""
+
+        if self._radio_separate.isChecked():
+            text = self._ch2_dir_edit.text().strip()
+            if not text:
+                return "Choose the Channel 2 directory for the separate-channel layout."
+            directory = Path(text)
+            try:
+                if not directory.is_dir():
+                    return "The Channel 2 directory does not exist."
+            except OSError as exc:
+                return f"The Channel 2 directory cannot be read: {exc}"
+            if not _tiff_files(directory):
+                return "The Channel 2 directory contains no TIFF files."
+
+        if self._radio_multistack.isChecked():
+            raw_pages = self._detected.get("num_planes")
+            channels = self._n_channels_spin.value()
+            if raw_pages and raw_pages % channels:
+                return (
+                    f"The detected stack has {raw_pages} pages, which cannot be "
+                    f"divided evenly across {channels} channels."
+                )
+        return ""
+
+    def _output_validation_error(self) -> str:
+        """Return a blocking output-path or dataset-name problem."""
+
+        text = self._output_edit.text().strip()
+        if not text:
+            return "Choose an output directory for the dataset files."
+        output = Path(text)
+        try:
+            if output.exists() and not output.is_dir():
+                return "The output location is a file, not a directory."
+            ancestor = output
+            while not ancestor.exists() and ancestor != ancestor.parent:
+                ancestor = ancestor.parent
+            if not ancestor.is_dir():
+                return "The output directory has no usable parent directory."
+        except OSError as exc:
+            return f"The output directory is not usable: {exc}"
+
+        name = self._dataset_name_edit.text().strip() or "dataset"
+        if name in {".", ".."} or re.search(r'[<>:"/\\|?*\x00-\x1f]', name):
+            return "Use a dataset name without path separators or reserved filename characters."
+        if name.endswith((" ", ".")):
+            return "The dataset name must not end with a space or period."
+        return ""
+
+    def _refresh_tracking_validation(self, *_args) -> None:
+        error = self._tracking_validation_error()
+        self._tracking_validation_label.setText(error)
+        self._tracking_validation_label.setVisible(bool(error))
+        image_error = self._image_source_validation_error()
+        self._image_validation_label.setText(image_error)
+        self._image_validation_label.setVisible(bool(image_error))
+        layout_error = self._image_layout_validation_error()
+        self._layout_validation_label.setText(layout_error)
+        self._layout_validation_label.setVisible(bool(layout_error))
+        output_error = self._output_validation_error()
+        self._output_validation_label.setText(output_error)
+        self._output_validation_label.setVisible(bool(output_error))
+        if hasattr(self, "_btn_next"):
+            self._update_nav_buttons()
 
     # ── Page 3: Parameters ────────────────────────────────────────
 
@@ -297,27 +468,30 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("<b>Step 4: Initial Tracking</b>"))
-        explanation = QLabel(
-            "Start with an empty dataset for manual annotation, or generate an "
-            "editable detection-and-tracking draft. Automated results are never "
-            "treated as biological ground truth: review them in AceTree and use "
-            "Undo to discard the whole draft."
+        self._tracking_explanation_label = QLabel(
+            "Start with an empty dataset for manual annotation, or open the tracking "
+            "review workbench to test the detector on one frame before building a full "
+            "draft. Automated results are never treated as biological ground truth, "
+            "and only Accept Draft adds reviewed positions."
         )
-        explanation.setWordWrap(True)
-        layout.addWidget(explanation)
+        self._tracking_explanation_label.setWordWrap(True)
+        self._tracking_explanation_label.setAccessibleName(
+            "Initial tracking review explanation"
+        )
+        layout.addWidget(self._tracking_explanation_label)
 
         mode_group = QGroupBox("Starting workflow")
         mode_layout = QVBoxLayout(mode_group)
         self._radio_tracking_manual = QRadioButton("Manual annotation (recommended)")
         self._radio_tracking_manual.setChecked(True)
         self._radio_tracking_auto = QRadioButton(
-            "Automated detector + tracker draft"
+            "Tune the detector and build an automated draft"
         )
         mode_layout.addWidget(self._radio_tracking_manual)
         mode_layout.addWidget(self._radio_tracking_auto)
         layout.addWidget(mode_group)
 
-        self._tracking_settings_group = QGroupBox("Prototype settings")
+        self._tracking_settings_group = QGroupBox("Draft settings")
         settings = QFormLayout(self._tracking_settings_group)
 
         from ..tracking.registry import get_default_registry
@@ -394,6 +568,15 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         )
         limitation.setWordWrap(True)
         layout.addWidget(limitation)
+
+        self._tracking_validation_label = QLabel()
+        self._tracking_validation_label.setWordWrap(True)
+        self._tracking_validation_label.setAccessibleName(
+            "Initial tracking settings problem"
+        )
+        self._tracking_validation_label.setStyleSheet("QLabel { color: #a85f00; }")
+        self._tracking_validation_label.hide()
+        layout.addWidget(self._tracking_validation_label)
         layout.addStretch()
         return page
 
@@ -401,7 +584,9 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("<b>Step 5: Output Location</b>"))
-        layout.addWidget(QLabel("Choose where to save the dataset files (nuclei ZIP + config XML)."))
+        layout.addWidget(
+            QLabel("Choose where to save the dataset files (nuclei ZIP + config XML).")
+        )
 
         dir_row = QHBoxLayout()
         self._output_edit = QLineEdit()
@@ -426,6 +611,12 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         layout.addWidget(QLabel("Summary:"))
         layout.addWidget(self._summary_label)
 
+        self._output_validation_label = QLabel()
+        self._output_validation_label.setWordWrap(True)
+        self._output_validation_label.setAccessibleName("Dataset output problem")
+        self._output_validation_label.setStyleSheet("QLabel { color: #a85f00; }")
+        layout.addWidget(self._output_validation_label)
+
         layout.addStretch()
         return page
 
@@ -444,20 +635,74 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
     def _go_next(self) -> None:
         idx = self._stack.currentIndex()
+        page = self._stack.widget(idx)
+        error = self._page_validation_error(page)
+        if error:
+            self._show_page_validation_error(page, error)
+            self._update_nav_buttons()
+            return
         if idx < self._stack.count() - 1:
             self._stack.setCurrentIndex(idx + 1)
             if idx + 1 == self._stack.count() - 1:
                 self._update_summary()
         else:
             # Last page — "Create" pressed
+            if not self._confirm_overwrite():
+                return
             self.accept()
         self._update_nav_buttons()
 
-    def _update_nav_buttons(self) -> None:
+    def _update_nav_buttons(self, *_args) -> None:
         idx = self._stack.currentIndex()
         self._btn_back.setEnabled(idx > 0)
         is_last = idx == self._stack.count() - 1
         self._btn_next.setText("Create" if is_last else "Next")
+        self._btn_next.setEnabled(not bool(self._page_validation_error(self._stack.widget(idx))))
+
+    def _page_validation_error(self, page: QWidget) -> str:
+        if page is self._page1:
+            return self._image_source_validation_error()
+        if page is self._page2:
+            return self._image_layout_validation_error()
+        if page is self._page4:
+            return self._tracking_validation_error()
+        if page is self._page5:
+            return self._output_validation_error()
+        return ""
+
+    def _show_page_validation_error(self, page: QWidget, error: str) -> None:
+        if page is self._page1:
+            label = self._image_validation_label
+        elif page is self._page2:
+            label = self._layout_validation_label
+        elif page is self._page4:
+            label = self._tracking_validation_label
+        else:
+            label = self._output_validation_label
+        label.setText(error)
+        label.show()
+
+    def _confirm_overwrite(self) -> bool:
+        """Require an explicit opt-in before replacing either dataset file."""
+
+        output = Path(self._output_edit.text().strip())
+        name = self.get_dataset_name()
+        existing = [
+            path for path in (output / f"{name}.zip", output / f"{name}.xml")
+            if path.exists()
+        ]
+        if not existing:
+            return True
+        files = "\n".join(f"• {path.name}" for path in existing)
+        reply = QMessageBox.question(
+            self,
+            "Replace Existing Dataset?",
+            "Creating this dataset will replace the following existing file(s):\n\n"
+            f"{files}\n\nThis cannot be undone. Replace them?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
 
     def _update_summary(self) -> None:
         lines = [
@@ -489,6 +734,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         if not self._radio_tracking_auto.isChecked():
             return "Manual annotation"
         return (
+            "Uncommitted review: "
             f"{self._tracking_detector_combo.currentText()} + "
             f"{self._tracking_tracker_combo.currentText()} draft "
             f"(radius={self._tracking_radius_spin.value():g} µm, "
@@ -499,6 +745,12 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
     def get_config(self) -> AceTreeConfig:
         """Build an AceTreeConfig from the dialog's current values."""
+        validation_error = (
+            self._image_source_validation_error()
+            or self._image_layout_validation_error()
+        )
+        if validation_error:
+            raise ValueError(validation_error)
         d = self._detected
         image_dir = Path(self._dir_edit.text())
 
@@ -515,7 +767,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             image_file = image_dir / f"{prefix}1.tif"
         else:
             # Fallback: use first tif in directory
-            tifs = sorted(image_dir.glob("*.tif")) + sorted(image_dir.glob("*.tiff"))
+            tifs = _tiff_files(image_dir)
             image_file = tifs[0] if tifs else image_dir / "image_t001.tif"
 
         # Multi-channel config
@@ -527,10 +779,10 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             num_channels = 2
             image_channels[1] = image_file
             ch2_dir = Path(self._ch2_dir_edit.text())
-            if ch2_dir.exists():
-                ch2_tifs = sorted(ch2_dir.glob("*.tif")) + sorted(ch2_dir.glob("*.tiff"))
-                if ch2_tifs:
-                    image_channels[2] = ch2_tifs[0]
+            # Layout validation above guarantees that a real Channel 2 TIFF is
+            # present.  Never degrade a requested two-channel dataset to one
+            # channel and silently clamp the detector to Channel 1 later.
+            image_channels[2] = _tiff_files(ch2_dir)[0]
         elif self._radio_multistack.isChecked():
             num_channels = self._n_channels_spin.value()
             stack_interleaved = True
@@ -567,7 +819,10 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         return config
 
     def get_output_directory(self) -> Path:
-        return Path(self._output_edit.text())
+        validation_error = self._output_validation_error()
+        if validation_error:
+            raise ValueError(validation_error)
+        return Path(self._output_edit.text().strip())
 
     def get_dataset_name(self) -> str:
         return self._dataset_name_edit.text().strip() or "dataset"
@@ -579,6 +834,10 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         """Return an initial global tracking request, or ``None`` for manual mode."""
         if not self._radio_tracking_auto.isChecked():
             return None
+
+        validation_error = self._tracking_validation_error()
+        if validation_error:
+            raise ValueError(validation_error)
 
         from ..tracking.api import ComponentSpec, TrackingRequest, TrackingScope
         from ..tracking.registry import get_default_registry
@@ -635,6 +894,19 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 # ── Auto-detection helpers ────────────────────────────────────────
 
 
+def _tiff_files(directory: Path) -> list[Path]:
+    """Return TIFF files with case-insensitive suffix handling."""
+
+    try:
+        return sorted(
+            path
+            for path in directory.iterdir()
+            if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+        )
+    except OSError:
+        return []
+
+
 def _auto_detect_format(directory: Path) -> dict:
     """Probe a directory to guess image format, timepoints, and planes.
 
@@ -644,15 +916,7 @@ def _auto_detect_format(directory: Path) -> dict:
     """
     result: dict = {"num_files": 0, "error": None}
 
-    tifs = sorted(directory.glob("*.tif")) + sorted(directory.glob("*.tiff"))
-    # Deduplicate (in case .tif and .tiff overlap)
-    seen = set()
-    unique_tifs = []
-    for t in tifs:
-        if t.name not in seen:
-            seen.add(t.name)
-            unique_tifs.append(t)
-    tifs = unique_tifs
+    tifs = _tiff_files(directory)
     result["num_files"] = len(tifs)
 
     if not tifs:

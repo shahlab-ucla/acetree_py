@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..tracking.api import TrackingResult
+from ..tracking.api import Detection, TrackingResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +26,7 @@ class PreviewSpot:
     z_um: float
     radius_um: float
     quality: float
-    kind: str  # ``seed``, ``detection``, or ``interpolated``
+    kind: str  # ``seed``, ``detection``, ``interpolated``, or ``candidate``
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,23 +40,48 @@ class PreviewLink:
 
 
 @dataclass(frozen=True, slots=True)
+class PreviewSearchRegion:
+    """Stopped-frame physical search region displayed for diagnosis."""
+
+    frame: int
+    x_um: float
+    y_um: float
+    z_um: float
+    radius_um: float
+    outcome_code: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExpandedTrackingPreview:
     """Materialized, display-only view of a :class:`TrackingResult`."""
 
     spots: tuple[PreviewSpot, ...]
     links: tuple[PreviewLink, ...]
+    candidates: tuple[PreviewSpot, ...] = ()
+    outcome_code: str | None = None
+    search_region: PreviewSearchRegion | None = None
 
     @property
     def by_id(self) -> dict[str, PreviewSpot]:
-        return {spot.preview_id: spot for spot in self.spots}
+        return {spot.preview_id: spot for spot in self.review_spots}
+
+    @property
+    def review_spots(self) -> tuple[PreviewSpot, ...]:
+        """Proposal spots followed by non-committable diagnostic candidates."""
+        return (*self.spots, *self.candidates)
 
     @property
     def proposed_count(self) -> int:
-        return sum(spot.kind != "seed" for spot in self.spots)
+        return sum(spot.kind in {"detection", "interpolated"} for spot in self.spots)
 
     @property
     def interpolated_count(self) -> int:
         return sum(spot.kind == "interpolated" for spot in self.spots)
+
+    @property
+    def candidate_count(self) -> int:
+        """Number of explanatory observations that will not be committed."""
+        return len(self.candidates)
 
 
 def expand_tracking_preview(result: TrackingResult) -> ExpandedTrackingPreview:
@@ -82,9 +107,45 @@ def expand_tracking_preview(result: TrackingResult) -> ExpandedTrackingPreview:
                 z_um=detection.z_um,
                 radius_um=detection.radius_um,
                 quality=detection.quality,
-                kind=("seed" if detection.detection_id in result.existing_anchors else "detection"),
+                kind=(
+                    "seed"
+                    if detection.detection_id in result.existing_anchors
+                    else "detection"
+                ),
             )
         )
+
+    outcome = result.outcome
+    candidates: list[PreviewSpot] = []
+    search_region = None
+    if outcome is not None:
+        for candidate in outcome.review_candidates:
+            candidates.append(
+                PreviewSpot(
+                    preview_id=f"__review_candidate__:{candidate.detection_id}",
+                    detection_id=candidate.detection_id,
+                    frame=candidate.frame,
+                    x_um=candidate.x_um,
+                    y_um=candidate.y_um,
+                    z_um=candidate.z_um,
+                    radius_um=candidate.radius_um,
+                    quality=candidate.quality,
+                    kind="candidate",
+                )
+            )
+        if (
+            outcome.stop_frame is not None
+            and outcome.predicted_position_um is not None
+        ):
+            x_um, y_um, z_um = outcome.predicted_position_um
+            search_region = PreviewSearchRegion(
+                frame=outcome.stop_frame,
+                x_um=x_um,
+                y_um=y_um,
+                z_um=z_um,
+                radius_um=outcome.search_radius_um,
+                outcome_code=outcome.code,
+            )
 
     links: list[PreviewLink] = []
     for edge_number, edge in enumerate(result.edges):
@@ -127,6 +188,7 @@ def expand_tracking_preview(result: TrackingResult) -> ExpandedTrackingPreview:
         )
 
     spots.sort(key=lambda spot: (spot.frame, spot.preview_id))
+    candidates.sort(key=lambda spot: (spot.frame, spot.preview_id))
     frame_by_id = {spot.preview_id: spot.frame for spot in spots}
     links.sort(
         key=lambda link: (
@@ -134,7 +196,40 @@ def expand_tracking_preview(result: TrackingResult) -> ExpandedTrackingPreview:
             link.target_id,
         )
     )
-    return ExpandedTrackingPreview(tuple(spots), tuple(links))
+    return ExpandedTrackingPreview(
+        spots=tuple(spots),
+        links=tuple(links),
+        candidates=tuple(candidates),
+        outcome_code=None if outcome is None else outcome.code,
+        search_region=search_region,
+    )
+
+
+def expand_detector_preview(
+    detections: tuple[Detection, ...],
+) -> ExpandedTrackingPreview:
+    """Build a transient, non-committable current-frame detector overlay.
+
+    Detector tests deliberately do not masquerade as ``TrackingResult``
+    objects.  Prefixing their presentation IDs keeps them distinct from a
+    stale whole-dataset draft that may remain visible for comparison.
+    """
+
+    spots = tuple(
+        PreviewSpot(
+            preview_id=f"__detector_test__:{detection.detection_id}",
+            detection_id=detection.detection_id,
+            frame=detection.frame,
+            x_um=detection.x_um,
+            y_um=detection.y_um,
+            z_um=detection.z_um,
+            radius_um=detection.radius_um,
+            quality=detection.quality,
+            kind="detector_test",
+        )
+        for detection in detections
+    )
+    return ExpandedTrackingPreview(spots=spots, links=())
 
 
 def _lerp(first: float, second: float, fraction: float) -> float:

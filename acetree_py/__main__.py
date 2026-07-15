@@ -394,7 +394,8 @@ def create(
                 scope=TrackingScope("global", 1, num_timepoints),
             )
             typer.echo(
-                f"Building {tracking_mode} tracking draft across {num_timepoints} timepoints…"
+                f"Preparing {tracking_mode} settings for reviewed tracking across "
+                f"{num_timepoints} timepoints…"
             )
 
         try:

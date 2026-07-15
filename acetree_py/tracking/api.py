@@ -15,6 +15,9 @@ from typing import Any, Mapping
 
 TRACKING_API_VERSION = "1.0"
 TRACKING_API_MAJOR = 1
+TRACKING_OUTCOME_CODES = frozenset(
+    {"completed", "lost", "ambiguity", "division", "conflict"}
+)
 
 
 def _immutable_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
@@ -184,6 +187,141 @@ class Detection:
 
 
 @dataclass(frozen=True, slots=True)
+class TrackingOutcome:
+    """Structured selected-forward completion or stopping diagnostic.
+
+    ``review_candidates`` are detector observations that explain why tracking
+    stopped.  They are intentionally separate from ``TrackingResult.detections``
+    and are never materialized when a proposal is accepted.
+    """
+
+    code: str
+    stop_frame: int | None
+    last_accepted_frame: int
+    predicted_position_um: tuple[float, float, float] | None
+    search_radius_um: float
+    review_candidates: tuple[Detection, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.code not in TRACKING_OUTCOME_CODES:
+            raise ValueError(f"Unsupported tracking outcome code: {self.code!r}")
+        if (
+            isinstance(self.last_accepted_frame, bool)
+            or not isinstance(self.last_accepted_frame, int)
+            or self.last_accepted_frame < 1
+        ):
+            raise ValueError("last_accepted_frame must be a positive integer")
+        if self.stop_frame is not None and (
+            isinstance(self.stop_frame, bool)
+            or not isinstance(self.stop_frame, int)
+            or self.stop_frame < 1
+        ):
+            raise ValueError("stop_frame must be a positive integer or None")
+
+        if self.code == "completed":
+            if self.stop_frame is not None:
+                raise ValueError("A completed outcome cannot have a stop_frame")
+            if self.predicted_position_um is not None:
+                raise ValueError(
+                    "A completed outcome cannot have a stopped-frame prediction"
+                )
+        else:
+            if self.stop_frame is None:
+                raise ValueError(f"{self.code} outcome requires a stop_frame")
+            if self.stop_frame <= self.last_accepted_frame:
+                raise ValueError("stop_frame must follow last_accepted_frame")
+            if self.predicted_position_um is None:
+                raise ValueError(
+                    f"{self.code} outcome requires predicted_position_um"
+                )
+
+        if self.predicted_position_um is not None:
+            position = tuple(float(value) for value in self.predicted_position_um)
+            if len(position) != 3:
+                raise ValueError("predicted_position_um must contain x, y, and z")
+            for name, value in zip(("x", "y", "z"), position):
+                _require_finite(f"predicted_position_um.{name}", value)
+            object.__setattr__(self, "predicted_position_um", position)
+
+        search_radius_um = float(self.search_radius_um)
+        _require_finite("search_radius_um", search_radius_um)
+        if search_radius_um <= 0:
+            raise ValueError("search_radius_um must be positive")
+        object.__setattr__(self, "search_radius_um", search_radius_um)
+
+        candidates = tuple(self.review_candidates)
+        if any(not isinstance(candidate, Detection) for candidate in candidates):
+            raise TypeError("review_candidates must contain Detection values")
+        ids = [candidate.detection_id for candidate in candidates]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Review candidate IDs must be unique")
+        if self.stop_frame is None and candidates:
+            raise ValueError("A completed outcome cannot have review candidates")
+        if self.stop_frame is not None and any(
+            candidate.frame != self.stop_frame for candidate in candidates
+        ):
+            raise ValueError("Review candidates must belong to the stop frame")
+        object.__setattr__(self, "review_candidates", candidates)
+
+    @property
+    def stopped_early(self) -> bool:
+        return self.code != "completed"
+
+    @property
+    def frame(self) -> int | None:
+        """Compatibility alias for stopped-frame presentation code."""
+        return self.stop_frame
+
+    @property
+    def candidates(self) -> tuple[Detection, ...]:
+        """Compatibility alias for review-only detector observations."""
+        return self.review_candidates
+
+    def to_dict(self) -> dict[str, Any]:
+        position = self.predicted_position_um
+        return {
+            "code": self.code,
+            "stop_frame": self.stop_frame,
+            "last_accepted_frame": self.last_accepted_frame,
+            "predicted_position_um": (
+                None
+                if position is None
+                else {"x_um": position[0], "y_um": position[1], "z_um": position[2]}
+            ),
+            "search_radius_um": self.search_radius_um,
+            "review_candidates": [
+                candidate.to_dict() for candidate in self.review_candidates
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> TrackingOutcome:
+        position_data = data.get("predicted_position_um")
+        position = None
+        if position_data is not None:
+            if not isinstance(position_data, Mapping):
+                raise TypeError("predicted_position_um must be a mapping")
+            position = (
+                float(position_data["x_um"]),
+                float(position_data["y_um"]),
+                float(position_data["z_um"]),
+            )
+        return cls(
+            code=str(data["code"]),
+            stop_frame=(
+                None if data.get("stop_frame") is None else int(data["stop_frame"])
+            ),
+            last_accepted_frame=int(data["last_accepted_frame"]),
+            predicted_position_um=position,
+            search_radius_um=float(data["search_radius_um"]),
+            review_candidates=tuple(
+                Detection.from_dict(item)
+                for item in data.get("review_candidates", ())
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TrackEdge:
     """A directed temporal link between two detection IDs."""
 
@@ -337,6 +475,7 @@ class TrackingResult:
     existing_anchors: Mapping[str, tuple[int, int]] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
     provenance: Mapping[str, Any] = field(default_factory=dict)
+    outcome: TrackingOutcome | None = None
 
     def __post_init__(self) -> None:
         detections = tuple(self.detections)
@@ -355,6 +494,48 @@ class TrackingResult:
             raise ValueError("Existing anchors must reference result detections")
         if any(t < 1 or i < 1 for t, i in anchors.values()):
             raise ValueError("Existing anchors must be positive and 1-based")
+        if self.outcome is not None:
+            if not isinstance(self.outcome, TrackingOutcome):
+                raise TypeError("outcome must be a TrackingOutcome or None")
+            scope = self.request.scope
+            if scope.kind != "selected_forward":
+                raise ValueError(
+                    "Structured outcomes are only valid for selected-forward results"
+                )
+            if not detections:
+                raise ValueError(
+                    "A selected-forward outcome requires its accepted seed detection"
+                )
+            final_detection_frame = max(detection.frame for detection in detections)
+            if self.outcome.last_accepted_frame != final_detection_frame:
+                raise ValueError(
+                    "Outcome last_accepted_frame must match the final proposal detection"
+                )
+            if not (
+                scope.start_frame
+                <= self.outcome.last_accepted_frame
+                <= scope.end_frame
+            ):
+                raise ValueError(
+                    "Outcome last_accepted_frame must be inside the tracking scope"
+                )
+            if self.outcome.code == "completed":
+                if self.outcome.last_accepted_frame != scope.end_frame:
+                    raise ValueError(
+                        "A completed outcome must reach the tracking scope end frame"
+                    )
+            elif not (
+                scope.start_frame < self.outcome.stop_frame <= scope.end_frame
+            ):
+                raise ValueError("Outcome stop_frame must be inside the tracking scope")
+            review_ids = {
+                candidate.detection_id
+                for candidate in self.outcome.review_candidates
+            }
+            if known & review_ids:
+                raise ValueError(
+                    "Review-only candidates cannot also be proposal detections"
+                )
         object.__setattr__(self, "detections", detections)
         object.__setattr__(self, "edges", edges)
         object.__setattr__(self, "existing_anchors", MappingProxyType(anchors))
@@ -375,6 +556,7 @@ class TrackingResult:
             },
             "warnings": list(self.warnings),
             "provenance": dict(self.provenance),
+            "outcome": None if self.outcome is None else self.outcome.to_dict(),
         }
 
     @classmethod
@@ -389,4 +571,9 @@ class TrackingResult:
             },
             warnings=tuple(data.get("warnings", ())),
             provenance=data.get("provenance", {}),
+            outcome=(
+                None
+                if data.get("outcome") is None
+                else TrackingOutcome.from_dict(data["outcome"])
+            ),
         )

@@ -237,8 +237,10 @@ class EditPanel(QWidget):  # type: ignore[misc]
         layout.addWidget(cell_group)
 
         # ── Link operations ──
-        link_group = QGroupBox("Link Operations")
-        link_layout = QHBoxLayout(link_group)
+        link_group = QGroupBox("Tracking & Links")
+        link_layout = QVBoxLayout(link_group)
+        manual_row = QHBoxLayout()
+        automated_row = QHBoxLayout()
 
         self._btn_relink = QPushButton("Relink")
         self._btn_relink.setToolTip(
@@ -264,9 +266,19 @@ class EditPanel(QWidget):  # type: ignore[misc]
         )
         self._btn_auto_track.clicked.connect(self._on_auto_track_forward)
 
-        link_layout.addWidget(self._btn_relink)
-        link_layout.addWidget(self._btn_track)
-        link_layout.addWidget(self._btn_auto_track)
+        self._btn_global_track = QPushButton("Whole Dataset…")
+        self._btn_global_track.setToolTip(
+            "Detect and link nuclei throughout an empty dataset.\n"
+            "Review every frame in 2D or 3D before accepting the draft."
+        )
+        self._btn_global_track.clicked.connect(self._on_global_track)
+
+        manual_row.addWidget(self._btn_relink)
+        manual_row.addWidget(self._btn_track)
+        automated_row.addWidget(self._btn_auto_track)
+        automated_row.addWidget(self._btn_global_track)
+        link_layout.addLayout(manual_row)
+        link_layout.addLayout(automated_row)
         layout.addWidget(link_group)
 
         # ── Anatomical body orientation ──
@@ -527,6 +539,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
         if self._auto_track_dialog is not None:
             try:
                 self._auto_track_dialog.sync_document_revision()
+                self._auto_track_dialog.sync_viewer_position()
             except RuntimeError:
                 # The Qt object may already be queued for deletion.
                 self._auto_track_dialog = None
@@ -1493,6 +1506,16 @@ class EditPanel(QWidget):  # type: ignore[misc]
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _on_global_track(self) -> None:
+        """Open reviewed whole-dataset tracking for a still-empty dataset."""
+
+        self.app._exit_all_modes()
+        dialog = self.app.open_global_tracking_workbench()
+        if dialog is not None:
+            self._status_label.setText(
+                "Whole-dataset tracking ready; configure and build an uncommitted preview"
+            )
 
     def _resolve_auto_track_seed(self, time: int, index: int):
         """Follow an existing one-child continuation to its safe terminal seed."""

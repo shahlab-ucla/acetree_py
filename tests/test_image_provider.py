@@ -11,12 +11,42 @@ import pytest
 
 from acetree_py.io.image_provider import (
     ImageProvider,
+    MultiChannelFolderProvider,
     NumpyProvider,
     OmeTiffProvider,
+    SplitChannelProvider,
     StackTiffProvider,
     TiffDirectoryProvider,
     ZipTiffProvider,
+    clone_image_provider_for_worker,
 )
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected_type"),
+    [
+        (ZipTiffProvider("images", tif_prefix="emb"), ZipTiffProvider),
+        (TiffDirectoryProvider("images"), TiffDirectoryProvider),
+        (StackTiffProvider("images", num_channels=2), StackTiffProvider),
+        (OmeTiffProvider("images.ome.tif"), OmeTiffProvider),
+        (
+            SplitChannelProvider(TiffDirectoryProvider("images")),
+            SplitChannelProvider,
+        ),
+        (
+            MultiChannelFolderProvider(
+                [TiffDirectoryProvider("red"), TiffDirectoryProvider("green")]
+            ),
+            MultiChannelFolderProvider,
+        ),
+        (NumpyProvider(np.zeros((1, 1, 2, 2))), NumpyProvider),
+    ],
+)
+def test_builtin_provider_can_be_cloned_for_worker(provider, expected_type) -> None:
+    clone = clone_image_provider_for_worker(provider)
+
+    assert isinstance(clone, expected_type)
+    assert clone is not provider
 
 
 # ── NumpyProvider tests ─────────────────────────────────────────

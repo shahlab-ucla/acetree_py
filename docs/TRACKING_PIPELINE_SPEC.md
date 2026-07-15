@@ -24,14 +24,18 @@ eventually a backward-compatible StarryNite replacement.
 The repository currently implements the immutable physical-coordinate values,
 component registry, SciPy LoG/DoG detectors, Simple LAP tracker, global creation
 option, selected-forward local search, stale-preview check, atomic proposal
-command, exact undo/redo, single-latest-run JSON sidecar, and a modeless Auto
-Forward review workbench described here. Selected-forward drafts appear in
-dedicated read-only napari position/link layers, including positions created by
-gap interpolation; users can navigate time and Z, adjust parameters, rerun,
-cancel between frames, accept, or discard. The richer
-`acetree.tracking/v1alpha1` request envelope, background worker, global review
-workbench, multi-run transactional provenance ledger, division-aware tracker,
-and TrackMate/StarryNite adapters remain staged requirements. Sections that
+command, exact undo/redo, single-latest-run JSON sidecar, and modeless review
+workbenches for both Auto Forward and whole-dataset tracking, plus a lightweight
+current-frame detector test. Analysis runs on a cancellable background worker
+and remains uncommitted until the user explicitly accepts a full draft. Draft
+positions, links, interpolation, review-only candidates, predicted search
+regions, and separate detector-test rings appear in dedicated read-only napari
+layers in the 2D, embedded 3D, and detached 3D viewers; navigation and detached
+time sync are preserved while users inspect, adjust, rerun, accept, or discard.
+
+The richer `acetree.tracking/v1alpha1` request envelope, multi-run transactional
+provenance ledger, division-aware tracker, third-party worker image-source factory contract, and
+TrackMate/StarryNite adapters remain staged requirements. Sections that
 describe those pieces are the target contract, not claims about current code.
 The implemented Python interfaces in `acetree_py/tracking/api.py` are the
 authoritative prototype wire shape until the alpha envelope is ratified.
@@ -100,7 +104,7 @@ and accepted tracking provenance.
 
 ```mermaid
 flowchart LR
-    UI["Dataset wizard or Tracking panel"] --> CTRL["TrackingController"]
+    UI["Dataset wizard or Edit Tools"] --> CTRL["TrackingController"]
     CTRL --> REG["ComponentRegistry"]
     CTRL --> RUN["PipelineRunner (worker)"]
     REG --> DET["Detector plugin"]
@@ -422,6 +426,22 @@ class ProposalConflict:
     existing_anchors: tuple[tuple[int, int], ...]
     resolutions: tuple[str, ...]
 
+class TrackingOutcomeCode(str, Enum):
+    COMPLETED = "completed"
+    LOST = "lost"
+    AMBIGUITY = "ambiguity"
+    DIVISION = "division"
+    CONFLICT = "conflict"
+
+@dataclass(frozen=True)
+class TrackingOutcome:
+    code: TrackingOutcomeCode
+    stop_frame: int | None
+    last_accepted_frame: int
+    predicted_position_um: tuple[float, float, float] | None
+    search_radius_um: float
+    review_candidates: tuple[Detection, ...]
+
 @dataclass(frozen=True)
 class TrackingProposal:
     api_version: ApiVersion
@@ -437,7 +457,18 @@ class TrackingProposal:
     created_at_utc: str
     proposal_hash: str
     status: ProposalStatus
+    outcome: TrackingOutcome | None
 ```
+
+The implemented `TrackingResult` uses the optional `TrackingOutcome` directly.
+It is present only for selected-forward results; global results and older
+sidecars may omit it. A completed outcome has no stop frame, prediction, or
+review candidates and reaches the requested end frame. A stopped outcome has a
+stop frame inside the request after its last accepted detection, a physical
+prediction and positive search radius, and zero or more review-only detections
+from that stop frame. Review candidates never become accepted nuclei. For an
+ambiguity or likely division, they are the two ranked observations that caused
+the stop decision.
 
 The proposal hash is computed from canonical JSON containing the request,
 detections, edges, component identities, and input fingerprint. Timestamps and
@@ -623,27 +654,34 @@ No tracking plugin is required or loaded in this path.
    component's JSON Schema and validated before **Create** is enabled.
 4. AceTree first creates a valid empty dataset and launches it. Failure or
    cancellation therefore leaves a usable manual dataset.
-5. A worker-local image source runs detection and linking with visible progress
-   and cancellation.
-6. Results are host-validated and opened as a proposal preview.
-7. The user inspects across frames and chooses **Accept** or **Discard**.
-8. Accept creates one undoable edit. Save is still explicit.
+5. A worker-local image source first runs only the detector on the first
+   requested frame's complete 3D stack. The transient rings cannot be accepted.
+6. The user MAY navigate to representative frames, adjust detector settings,
+   and choose **Test Detector at t=N** again. Tracker/range settings do not
+   invalidate a detector-only result.
+7. The user explicitly chooses **Build Full Draft**. A worker-local image source
+   runs detection and linking with visible progress and cancellation.
+8. Results are host-validated and opened as a proposal preview.
+9. The user inspects across frames and chooses **Accept** or **Discard**.
+10. Accept creates one undoable edit. Save is still explicit.
 
 The wizard MUST remember selected settings for the session but MUST NOT suggest
 that the result has been saved merely because analysis completed.
 
 ### 11.3 Existing dataset: Global proposal
 
-The Tracking panel offers **Run globally…**. Default conflict policy is
-`PRESERVE_EXISTING`, so it can populate empty frames or propose independent
-tracks without replacing curated work. Replacement policies live under an
-advanced disclosure and show a destructive confirmation.
+The long-term contract permits a global proposal over curated data using a
+`PRESERVE_EXISTING` conflict policy and explicit advanced replacement choices.
+The current prototype deliberately exposes **Edit Tools > Whole Dataset…** only
+while the nuclei record is empty; this prevents duplicate embryo-wide tracks.
+After curation begins, use **Auto Forward** for a selected branch or Undo the
+accepted initial proposal before rerunning whole-dataset tracking.
 
 ### 11.4 Selected-cell forward tracking
 
 1. User right-clicks/selects a concrete live nucleus.
-2. User chooses **Track selected forward…** in the Tracking panel. This is
-   distinct from the existing **Manual Track** button.
+2. User chooses **Edit Tools > Auto Forward**. This is distinct from the
+   existing **Manual Track** button.
 3. The host captures the physical seed anchor, current revision, and seed state.
 4. User chooses end time, channel, detector, tracker, ROI radius, maximum
    displacement, and branch policy.
@@ -652,8 +690,10 @@ advanced disclosure and show a destructive confirmation.
    motion prediction. The prototype uses last position or constant velocity.
 7. LAP links the seed/frontier only to candidates in this local request. The
    pipeline MUST NOT populate unrelated global nuclei as a side effect.
-8. Tracking stops at the first missing, gated-out, ambiguous, conflicting, or
-   division-like transition under the default `BranchPolicy.STOP`.
+8. Tracking stops when the configured missing-frame allowance is exhausted,
+   when a requested range ends with an unclosed gap, or at the first ambiguous,
+   conflicting, gated-out, or division-like transition. Stop behavior is fixed
+   in the prototype; a configurable branch-policy API is future work.
 9. The preview explains why and where it stopped. Accepted points extend the
    selected lineage and retain the parent continuation's manual naming state
    through the normal host naming rules.
@@ -662,12 +702,50 @@ This workflow aligns conceptually with TrackMate's documented
 [semi-automatic tracking tool](https://imagej.net/plugins/trackmate/tutorials/manual-tracking),
 but its implementation and AceTree-specific safety rules are independent.
 
-Ambiguity is defined by configurable absolute cost and cost-margin thresholds.
-If the best and second-best candidates differ by less than the margin, the
-pipeline stops instead of guessing. Later `FOLLOW_BEST` and `FOLLOW_BOTH`
-policies require explicit user selection and division-capable components.
+Prototype ambiguity uses the same squared physical-distance costs as Simple
+LAP: tracking stops when `second_cost / max(best_cost, 1e-12)` is less than the
+scope's `ambiguity_ratio`. Before that generic test, a conservative probable-
+division check examines the two best candidates for separation no greater than
+three radii, midpoint error no greater than 1.5 radii, and a minimum quality
+ratio of 0.25. Later `FOLLOW_BEST` and `FOLLOW_BOTH` policies require explicit
+user selection and division-capable components.
+
+### 11.5 Current-frame detector test
+
+`TrackingPipeline.detect_frame(image_provider, calibration, detector_spec,
+frame=..., cancelled=..., progress=...)` is the headless detector-test contract.
+It MUST:
+
+1. Validate the 1-based frame and TrackMate-style `TARGET_CHANNEL`.
+2. Instantiate only the selected detector; it MUST NOT construct or invoke a
+   tracker.
+3. Read exactly one complete ZYX stack for the captured frame/channel and call
+   the detector once with the same settings used by a full run.
+4. Check cooperative cancellation before image loading, before detection, and
+   after detection. Current plugins are not interruptible inside one filter
+   call, so cancellation copy MUST say it finishes after the current frame.
+5. Reject cross-frame detections and duplicate IDs, return an immutable,
+   deterministic `tuple[Detection, ...]`, and retain no partial result.
+
+The GUI captures detector settings, frame, document revision, and monotonic
+change counter before starting. It uses a minimal `DetectorPreviewSnapshot`
+with no nuclei-record copy. Completion is ignored if the viewer changed frame,
+the document token changed, the run was canceled, or a newer run superseded it.
+The result is expanded only into GUI-local `detector_test` spots in dedicated
+read-only layers. It MUST NOT create a `TrackingResult`, populate the full-draft
+table, enable Accept, modify nuclei/history, or enter AuxInfo/tracking-sidecar
+persistence. Starting a full run clears this transient layer. A valid empty
+result is displayed as zero candidates rather than treated as failure.
 
 ## 12. Reference LoG/DoG detector
+
+This section is the target public component contract. The shipped prototype is
+narrower: separate `acetree.log3d` and `acetree.dog3d` plugins accept the
+TrackMate-style keys `TARGET_CHANNEL`, physical `RADIUS`, `THRESHOLD`,
+`DO_SUBPIXEL_LOCALIZATION`, and `DO_MEDIAN_FILTERING`. They assume bright spots,
+use anisotropic physical spacing, and generate deterministic coordinate-based
+IDs. Background subtraction, polarity, border exclusion, and multi-scale
+selection remain future capabilities.
 
 The detector is an independent implementation using the documented SciPy
 primitives
@@ -708,6 +786,15 @@ selection is a later compatible extension.
 
 ## 13. Reference simple LAP tracker
 
+This section is the target public component contract. The shipped
+`acetree.simple_lap` prototype accepts `LINKING_MAX_DISTANCE`,
+`LINKING_FEATURE_PENALTIES`, `ALLOW_GAP_CLOSING`,
+`GAP_CLOSING_MAX_DISTANCE`, `GAP_CLOSING_FEATURE_PENALTIES`, `MAX_FRAME_GAP`,
+the split/merge flags (which must remain false), and
+`ALTERNATIVE_LINKING_COST_FACTOR`. Its cost is squared physical distance after
+TrackMate-style normalized feature penalties; explicit alternative assignment
+costs represent unmatched spots.
+
 The reference linker independently uses
 [`scipy.optimize.linear_sum_assignment`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linear_sum_assignment.html).
 Its behavior is inspired by the public Simple LAP concept: squared distance,
@@ -743,8 +830,9 @@ stable.
 
 Prototype capabilities are continuations, births, deaths, and optional gap
 closing. It declares `supports_divisions=False` and `supports_merges=False`.
-Division-like candidate patterns are warnings in global mode and stopping
-events in selected-forward mode. A later lineage-aware LAP component can add
+Division-like candidate patterns are classified as stopping events only in
+selected-forward mode; the global prototype does not infer division warnings.
+A later lineage-aware LAP component can add
 two-child division hypotheses without changing the proposal model.
 
 ## 14. TrackMate alignment and licensing boundary
@@ -783,21 +871,22 @@ review any future adapter dependency separately.
 
 ### 14.2 Spot mapping
 
-AceTree's internal proposal retains pixel/plane coordinates for lossless commit.
-A TrackMate interchange adapter maps calibrated features as follows:
+AceTree detections retain physical coordinates in microns. Commit converts them
+through `Calibration`, including `plane_start`. A future TrackMate interchange
+adapter maps those calibrated features as follows:
 
 | AceTree proposal | TrackMate-style feature |
 |---|---|
-| `time` | `FRAME = time - 1`; `POSITION_T` from acquisition interval when known |
-| `x_px` | `POSITION_X = x_px * xy_um_per_px` |
-| `y_px` | `POSITION_Y = y_px * xy_um_per_px` |
-| `z_plane` | `POSITION_Z = (z_plane - 1) * z_um_per_plane` |
-| `diameter_px` | `RADIUS = diameter_px * xy_um_per_px / 2` |
+| `frame` | `FRAME = frame - 1`; `POSITION_T` from acquisition interval when known |
+| `x_um` | `POSITION_X = x_um` |
+| `y_um` | `POSITION_Y = y_um` |
+| `z_um` | `POSITION_Z = z_um` |
+| `radius_um` | `RADIUS = radius_um` |
 | `quality` | `QUALITY` |
 | `id` | `ACETREE_DETECTION_ID` string feature/side mapping |
 
-The adapter also stores `ACETREE_TIME`, `ACETREE_Z_PLANE`, and
-`ACETREE_DIAMETER_PX` so a round trip does not depend on unit reconstruction.
+The adapter also stores `ACETREE_TIME` and the physical AceTree values so a
+round trip does not depend on TrackMate display-unit reconstruction.
 Imported TrackMate merges are rejected; gap edges are materialized; split events
 are allowed only when they satisfy AceTree's two-daughter constraint.
 
@@ -826,8 +915,10 @@ software may ignore the tracking sidecar and still open the accepted lineage.
 The implemented v1 sidecar stores one complete latest proposal using root
 fields `schema: "acetree.tracking-proposal"`, `schema_version: 1`, `request`,
 and `result`. The result includes physical detections, directed edges, existing
-seed anchors, warnings, and component provenance. It is strict JSON and rejects
-NaN/Infinity. The multi-run ledger below is the planned additive successor:
+seed anchors, warnings, component provenance, and an optional structured
+selected-forward outcome with review-only candidates. It is strict JSON and
+rejects NaN/Infinity. The multi-run ledger below is the planned additive
+successor:
 
 ```json
 {
@@ -865,7 +956,8 @@ NaN/Infinity. The multi-run ledger below is the planned additive successor:
 }
 ```
 
-Unknown fields and unavailable component settings are preserved. Secrets,
+Settings, detection features, and provenance mappings are preserved. The v1
+loader does not preserve unknown envelope fields. Secrets,
 credentials, access tokens, and arbitrary environment variables MUST NOT be
 written. Paths SHOULD be relative to the config where possible; provenance may
 store a redacted display path and a fingerprint separately.
@@ -893,9 +985,13 @@ satisfied:
 
 ## 16. Concurrency and resource safety
 
-The current prototype runner is synchronous. The rules below are required for
-the production worker/controller phase; they intentionally prevent scaling the
-prototype by merely sharing the viewer's cached file handles across threads.
+The GUI prototype runs analysis in a cancellable `QThread` worker. The GUI
+thread first captures copied nuclei, calibration, request settings, document
+revision, and a monotonic document-change token; only an unchanged proposal can
+be accepted. Every built-in provider is reconstructed with independent cached
+file handles for the worker. A formal clone/factory capability remains required
+before third-party image providers can participate without a compatibility
+fallback.
 
 1. Pipeline work runs off the GUI thread.
 2. Each worker owns and closes its image source. It does not share cached TIFF
@@ -921,8 +1017,8 @@ prototype by merely sharing the viewer's cached file handles across threads.
   cell from t=42 to t=80.”
 - Presets are editable starting points, not hidden magic. Always expose the
   active channel, expected diameter, threshold, and maximum displacement.
-- A quick detector-only preview on the current frame SHOULD be available before
-  a global run.
+- A quick detector-only test on the current frame MUST be available before a
+  global run and MUST be visually distinct from an accept-capable draft.
 - Never auto-accept on completion.
 - Explain stops in human terms: “No plausible nucleus within 8 µm at t=57” or
   “Two candidates were nearly tied at t=63.”
@@ -987,7 +1083,9 @@ identity where algorithms intentionally differ.
 
 - Approve this API and terminology.
 - Add synthetic 3D images and hand-authored expected proposal fixtures.
-- Add a document revision public API and image-source clone/factory contract.
+- Implemented: document revision and monotonic change token.
+- Implemented for built-ins: worker-local image-provider cloning and handle
+  cleanup. A formal third-party image-source factory capability remains.
 
 ### Phase 1 — headless tracking core
 
@@ -1003,17 +1101,25 @@ identity where algorithms intentionally differ.
 - Add tracking provenance state and dataset-level transactional save.
 - Test automatic naming and forced-name preservation after commit.
 
-### Phase 3 — global GUI workflow
+### Phase 3 — global GUI workflow (prototype implemented)
 
-- Add Tracking panel, worker controller, current-frame detection preview, full
-  proposal layers, review summary, accept/discard, and stale handling.
-- Add Manual/Automated page to dataset creation and matching CLI options.
+- Implemented: Edit Tools entry point, worker controller, full proposal
+  layers, per-frame review summary, accept/discard, cancellation, and stale
+  handling.
+- Implemented: Manual/Automated page in dataset creation and matching CLI
+  options. Automated creation opens an uncommitted workbench after the viewer.
+- Implemented: one-frame detector-only worker path, automatic first-frame test
+  after automated dataset creation, separate 2D/main-3D/detached-3D rings,
+  cancellation/stale guards, and an explicit **Build Full Draft** transition.
 
-### Phase 4 — selected-forward workflow
+### Phase 4 — selected-forward workflow (prototype implemented)
 
-- Add physical-seed capture, local ROI detection, motion prediction, ambiguity
-  stopping, and `BranchPolicy.STOP`.
-- Add correction/rerun flow from the stopping frame.
+- Implemented: physical-seed capture, local ROI detection, motion prediction,
+  and fixed ambiguity/division/conflict/lost stopping.
+- Implemented: stop-frame navigation, diagnostic candidates and search region,
+  parameter adjustment, rerun, and a documented manual continuation path.
+- Remaining: trimming an accepted prefix inside the workbench before commit;
+  the current draft accepts its reliable prefix as generated.
 
 ### Phase 5 — ecosystem adapters
 
@@ -1105,29 +1211,17 @@ The prototype is complete only when all of the following hold:
 10. The shipped implementation and artifacts contain no copied or vendored
     TrackMate GPL code.
 
-## 22. Current-code insertion points
+## 22. Implementation map
 
-These references describe the repository at the time this specification was
-written:
-
-- Add the Initial tracking wizard page near
-  `acetree_py/gui/dataset_dialog.py:49-76`, between parameter construction at
-  `:259-292` and output construction at `:296-326`.
-- Carry `DatasetCreationOptions` through `AceTreeApp.from_dialog()` and
-  `from_new_dataset()` at `acetree_py/gui/app.py:176-256`.
-- Consume image stacks through `ImageProvider` at
-  `acetree_py/io/image_provider.py:34-85`; construct a second worker-local
-  provider through the factory at `:863-943`.
-- Seed selected-forward tracking through the physical selection helpers at
-  `acetree_py/gui/app.py:605-760`.
-- Preserve the existing Manual Track path at `acetree_py/gui/edit_panel.py:245-257`
-  and `acetree_py/gui/app.py:1267-1503`.
-- Dock a dedicated Tracking panel alongside the widgets assembled at
-  `acetree_py/gui/app.py:271-329`.
-- Implement acceptance as a structural command beside `CompositeCommand` in
-  `acetree_py/editing/commands.py:108-170`, executed through `EditHistory` at
-  `acetree_py/editing/history.py:33-100`.
-- Reuse the single post-edit rebuild path at `acetree_py/gui/app.py:2153-2181`.
-- Extend persistence above the ZIP/AuxInfo transaction at
-  `acetree_py/core/nuclei_manager.py:248-331` and preserve Save As retargeting
-  semantics at `acetree_py/gui/app.py:381-440`.
+- `tracking/api.py`, `registry.py`, `detectors.py`, `lap.py`, and `pipeline.py`
+  define the headless prototype.
+- `tracking/integration.py` applies one reviewed proposal as one undoable edit;
+  `tracking/persistence.py` owns the versioned sidecar.
+- `gui/tracking_worker.py` runs immutable snapshots away from the Qt thread.
+- `gui/auto_tracking_dialog.py` and `gui/global_tracking_dialog.py` own the two
+  modeless review workflows.
+- `gui/tracking_preview.py`, `viewer_integration.py`, and
+  `viewer_3d_window.py` render the same proposal and diagnostics in 2D, main
+  3D, and detached 3D views.
+- `gui/dataset_dialog.py`, `edit_panel.py`, and `app.py` expose creation,
+  selected-forward, whole-dataset, commit, and lifecycle entry points.

@@ -12,6 +12,7 @@ from acetree_py.tracking.api import (
     ComponentSpec,
     Detection,
     TrackEdge,
+    TrackingOutcome,
     TrackingRequest,
     TrackingResult,
     TrackingScope,
@@ -22,6 +23,7 @@ from acetree_py.tracking.persistence import (
     TrackingProposalFormatError,
     read_tracking_proposal,
     tracking_result_from_dict,
+    tracking_result_to_dict,
     tracking_sidecar_path,
     write_tracking_proposal,
 )
@@ -55,6 +57,16 @@ def _result(*, settings: dict | None = None) -> TrackingResult:
         Detection("seed", 3, 1.0, 2.0, 3.0, 2.5, 99.0, {"manual": 1.0}),
         Detection("next", 4, 1.5, 2.5, 3.5, 2.4, 8.0, {"response": 8.0}),
     )
+    review_candidate = Detection(
+        "ambiguous-next",
+        5,
+        2.0,
+        3.0,
+        4.0,
+        2.3,
+        7.5,
+        {"review_only": True},
+    )
     return TrackingResult(
         request=request,
         detections=detections,
@@ -69,6 +81,14 @@ def _result(*, settings: dict | None = None) -> TrackingResult:
             },
             "command": ["acetree", "track"],
         },
+        outcome=TrackingOutcome(
+            code="ambiguity",
+            stop_frame=5,
+            last_accepted_frame=4,
+            predicted_position_um=(2.1, 3.1, 4.1),
+            search_radius_um=12.5,
+            review_candidates=(review_candidate,),
+        ),
     )
 
 
@@ -93,6 +113,24 @@ def test_tracking_proposal_round_trip_is_lossless(tmp_path: Path):
     assert payload["result"]["provenance"]["plugins"]["tracker"][
         "version"
     ] == "4.5.6"
+    assert payload["result"]["outcome"]["code"] == "ambiguity"
+    assert payload["result"]["outcome"]["predicted_position_um"] == {
+        "x_um": 2.1,
+        "y_um": 3.1,
+        "z_um": 4.1,
+    }
+    assert payload["result"]["outcome"]["review_candidates"][0][
+        "detection_id"
+    ] == "ambiguous-next"
+
+
+def test_v1_sidecar_without_outcome_remains_readable():
+    payload = tracking_result_to_dict(_result())
+    payload["result"].pop("outcome")
+
+    loaded = tracking_result_from_dict(payload)
+
+    assert loaded.outcome is None
 
 
 def test_tracking_sidecar_path_uses_dataset_stem(tmp_path: Path):

@@ -55,7 +55,9 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
     app.py                     # AceTreeApp (main application)
     viewer_integration.py      # ViewerIntegration (nucleus overlay)
     auto_tracking_dialog.py    # Modeless Auto Forward configure/review workbench
-    tracking_preview.py        # Pure proposal/gap expansion for visual review
+    global_tracking_dialog.py  # Modeless whole-dataset draft workbench
+    tracking_worker.py         # Cancellable Qt-thread analysis adapter
+    tracking_preview.py        # Proposal/gap/diagnostic expansion for review
     lineage_widget.py          # LineageWidget (Sulston tree)
     lineage_layout.py          # Layout engine (pure computation)
     lineage_list.py            # LineageListWidget (hierarchical list)
@@ -233,7 +235,7 @@ nuclei/
 
 When a manager contains manual body axes, Save also writes the matching AuxInfo v2 sidecar. The archive and sidecar are fully staged before either visible file changes. The sidecar is committed first with a same-directory rollback copy, and the archive is committed last; if either commit raises, the prior archive/sidecar set is restored. Undoing a manual frame removes only an AceTree-created sidecar under the same transaction—acquisition-provided sidecars are retained. Save As updates the config's nuclei path only after the data save succeeds, then atomically rewrites the source XML so reopening that config follows the new ZIP. If XML persistence fails, the in-memory target and savepoint remain unchanged (the newly written ZIP is retained as a standalone safety copy).
 
-When at least one tracking proposal has been accepted, the application also writes the latest `TrackingResult` beside the nuclei ZIP as `<stem>.tracking.json`. This versioned JSON records the request, detections, links, warnings, and plugin provenance; the nuclei ZIP remains the authoritative curated dataset. Opening a dataset restores the optional sidecar for provenance, and a missing or malformed sidecar does not prevent the backward-compatible ZIP from opening.
+When at least one tracking proposal has been accepted, the application also writes the latest `TrackingResult` beside the nuclei ZIP as `<stem>.tracking.json`. This versioned JSON records the request, detections, links, warnings, plugin provenance, and optional selected-forward `TrackingOutcome` (stop reason, prediction, search radius, and review-only candidates); the nuclei ZIP remains the authoritative curated dataset. Opening a dataset restores the optional sidecar for provenance, and a missing or malformed sidecar does not prevent the backward-compatible ZIP from opening.
 
 ### 3.3 Image Providers (`io/image_provider.py`)
 
@@ -498,7 +500,7 @@ Pure computational layout engine (no Qt dependency):
 | `PlayerControls`    | Time/plane navigation, play/pause, labels toggle, deselect, 3D mode, 3D window |
 | `CellInfoPanel`     | Cell info builder (used by hover tooltip)    |
 | `ContrastTools`     | Per-channel contrast sliders with visibility toggles, auto-contrast |
-| `EditPanel`         | Color mode toggle, edit buttons, body-axis landmarks, D-pad move (popup), relink, manual/selected-forward tracking, trails, screenshot/record, edit history (popup) |
+| `EditPanel`         | Color mode toggle, edit buttons, body-axis landmarks, D-pad move (popup), relink, manual/selected-forward/empty-dataset tracking, trails, screenshot/record, edit history (popup) |
 | `ColorRulesDialog`  | Rule list editor popup: add/edit/delete/reorder rules, "All other cells" default color, apply to engine |
 | `_RuleEditorDialog` | Single rule editor: criterion, pattern, color mode, color picker, colormap settings, match mode help |
 
@@ -524,7 +526,7 @@ Pure computational layout engine (no Qt dependency):
 1. Select a live nucleus and choose **Edit Tools > Auto Forward**.
 2. The modeless workbench builds a `selected_forward` request using DoG or LoG, Simple LAP, a moving local ROI, and an ambiguity threshold. Common settings, advanced filtering, and session-preserved refinements remain editable.
 3. Analysis reports per-frame progress and supports cancellation. The pipeline follows only the seeded continuation and stops rather than guessing at ambiguity or a likely division.
-4. `tracking_preview.py` expands gap links into the same interpolated positions acceptance will create. `ViewerIntegration` renders these in dedicated, read-only cyan/amber napari layers that never share callbacks or selection with curated `Nuclei`.
+4. `tracking_preview.py` expands gap links into the same interpolated positions acceptance will create and retains diagnostic candidates/search regions separately. `ViewerIntegration` renders them in dedicated read-only napari layers with redundant color and circle/diamond/cross/path/ring symbols that never share callbacks or selection with curated `Nuclei`.
 5. The review table and image overlay remain available while users navigate time/Z, inspect the stopping frame, change parameters, and rerun. Changed settings or document edits disable acceptance until a fresh preview completes.
 6. Discard restores the original view and changes nothing. Accepting uses `ApplyTrackingProposal`, creates one undo entry, clears the temporary layers, and selects the new terminal nucleus.
 
@@ -560,31 +562,36 @@ Toggled via the **3D** button in player controls. Switches napari to `ndisplay=3
 - In editing mode: white=selected, purple=named, orange=unnamed (Nuc\*), gray=no name.
 - In visualization mode: colors from the active `ColorRuleEngine` rules.
 
-All channels are loaded as 3D stacks when entering 3D mode. Click-to-select and relink pick mode work in 3D.
+All channels are loaded as 3D stacks when entering 3D mode. Click-to-select and relink pick mode work in 3D. Tracking proposals use separate read-only napari Points and Shapes/path layers, with ring/diamond/cross symbols for detections, interpolation, and diagnostic candidates. A stopped selected-forward search is a calibrated three-ring wireframe sphere. Proposal rendering normalizes Z to stack-local coordinates; the current image-provider/navigation contract still assumes datasets begin at plane 1, so non-default `plane_start` is not advertised as an end-to-end loading feature.
 
 ### 6.9 Detached 3D Viewer (`gui/viewer_3d_window.py`)
 
 A standalone `QWidget` window containing an embedded napari viewer, always in 3D mode with visualization-mode coloring. Launched via the **3D Window** button in player controls.
 
 **Features:**
-- **Time sync:** Time slider/spinner with a Sync toggle. When Sync is on, the window follows the main viewer's timepoint. When off, it navigates independently.
+- **Time sync:** Time slider/spinner with a Sync toggle. When Sync is on, the window follows the main viewer's timepoint. When off, its image, curated nuclei, trails, and proposal layers all navigate independently.
 - **Color preset selector:** Dropdown for switching visualization presets (lineage depth, expression).
 - **Per-channel contrast:** Same controls as main viewer — visibility checkboxes, min/max sliders, auto/reset per channel.
 - **Label controls:** Left-click on a 3D sphere toggles its label. "Labels: ON/OFF" button for global toggle. "Clear Labels" to remove all.
 - **Ghost trails:** Mirrors the main viewer's trail visibility settings.
 - **Multi-channel:** Loads all image channels with green/magenta colormaps.
+- **Tracking visualization mirroring:** Receives proposal visibility, stale styling, selected review point, diagnostic candidates, paths, search-region state, and the separate current-frame detector-test rings from `ViewerIntegration` without changing its local time.
 
 Multiple 3D windows can be open simultaneously. Each is tracked in `app._3d_windows` and refreshed by `update_display()`.
 
 ### 6.10 Dataset Creation
 
-`AceTreeApp.from_new_dataset(config, num_timepoints, output_dir, tracking_request=None)` creates an empty `NucleiManager`. With no request it preserves the manual workflow. With a request it runs a global proposal and applies the result through `ApplyTrackingProposal`, leaving the complete initial draft as one undoable edit.
+`AceTreeApp.from_new_dataset(config, num_timepoints, output_dir, tracking_request=None)` creates and writes an empty `NucleiManager`. With no request it preserves the manual workflow. With a request it retains the settings until `launch()` has initialized the image viewer and preview layers, then opens `GlobalTrackingDialog` and schedules a detector-only test on the first requested frame. The user explicitly starts the full tracking draft after tuning. Both modes run through `TrackingAnalysisWorker`; only a reviewed full draft can invoke `ApplyTrackingProposal` as one undoable edit.
 
-`AceTreeApp.from_dialog()` shows the five-page `DatasetCreationDialog`. Step 4 defaults to **Manual annotation** or can build a global **DoG/LoG + Simple LAP draft** before the viewer opens. The non-interactive `create` path also defaults to manual and accepts `--tracking dog-lap` or `--tracking log-lap` plus detector/linker settings.
+`AceTreeApp.from_dialog()` shows the five-page `DatasetCreationDialog`. Step 4 defaults to **Manual annotation** or can request a global **DoG/LoG + Simple LAP draft** for pre-commit review after the viewer opens. Image-layout changes update the valid channel range immediately and block invalid automated configurations. The non-interactive `create` path also defaults to manual and accepts `--tracking dog-lap` or `--tracking log-lap` plus detector/linker settings.
 
 ### 6.11 Tracking Pipeline Integration
 
-`TrackingRequest` combines versioned detector/tracker `ComponentSpec` values with a `TrackingScope` (`global` or `selected_forward`). `TrackingPipeline` resolves components through `TrackingRegistry`, runs image analysis without mutating `NucleiManager`, and returns an immutable `TrackingResult` proposal. Built-ins are anisotropy-aware 3D DoG/LoG detectors and a deterministic Simple LAP tracker with optional gap closing. Simple LAP is deliberately one-to-one: it supports neither divisions nor merges.
+`TrackingRequest` combines versioned detector/tracker `ComponentSpec` values with a `TrackingScope` (`global` or `selected_forward`). `TrackingPipeline` resolves components through `TrackingRegistry`, runs image analysis against a copied nucleus snapshot without mutating `NucleiManager`, and returns an immutable `TrackingResult` proposal. Its separate `detect_frame()` operation accepts only a detector spec and one timepoint, loads one complete ZYX stack, and returns immutable detections without constructing a tracker. `DetectorPreviewSnapshot` intentionally omits the nuclei copy, keeping this tuning path lightweight.
+
+GUI workbenches run both modes through a cancellable `TrackingAnalysisWorker` and a GUI-thread callback relay; built-in image providers are reconstructed with independent TIFF/ZIP handle caches so playback and analysis do not share a file handle. A monotonic edit/change token prevents an edit→Undo cycle from reviving a stale result. Built-ins are anisotropy-aware 3D DoG/LoG detectors and a deterministic Simple LAP tracker with optional gap closing. Simple LAP is deliberately one-to-one: it supports neither divisions nor merges.
+
+Selected-forward results also carry a structured `TrackingOutcome`: completed, lost, ambiguity, likely division, or curated-data conflict, plus the stop frame, last accepted frame, predicted physical position, search radius, and non-committable review candidates. `ExpandedTrackingPreview` materializes accepted interpolation separately from those diagnostics. Current-frame detector results are GUI-local and transient: `expand_detector_preview()` marks them as non-committable and `ViewerIntegration` renders them in separate purple, read-only Shapes/Points layers. Proposal and detector-test state both mirror into the main 2D/3D view and detached 3D windows while preserving the active editing layer, but detector tests never enter persistence or edit history.
 
 `TrackingRegistry` also discovers installed plugins from the `acetree_py.tracking.detectors` and `acetree_py.tracking.trackers` entry-point groups; one broken plugin is reported without preventing other components from loading. The stable contracts, TrackMate-compatible settings vocabulary, plugin packaging rules, UI states, and future StarryNite adapter are specified in [Tracking Pipeline Specification](TRACKING_PIPELINE_SPEC.md).
 

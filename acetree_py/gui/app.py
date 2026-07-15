@@ -15,6 +15,7 @@ Ported from: org.rhwlab.acetree.AceTree (the monolithic 4000+ line Java class)
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,12 +23,24 @@ import numpy as np
 
 if TYPE_CHECKING:
     import napari
-    from ..tracking.api import TrackingRequest, TrackingResult
+    from ..core.nucleus import Nucleus
+    from ..tracking.api import (
+        Calibration,
+        ComponentSpec,
+        Detection,
+        TrackingRequest,
+        TrackingResult,
+    )
 
 from ..core.nuclei_manager import NucleiManager
 from ..editing.history import EditHistory
 from ..io.config import AceTreeConfig, load_config
-from ..io.image_provider import ImageProvider, create_image_provider_from_config
+from ..io.image_provider import (
+    ImageProvider,
+    clone_image_provider_for_worker,
+    close_worker_image_provider,
+    create_image_provider_from_config,
+)
 from .color_rules import ColorRuleEngine
 
 logger = logging.getLogger(__name__)
@@ -40,6 +53,40 @@ logger = logging.getLogger(__name__)
 # the true centroid — visible symptom: the slice follows a selected cell
 # across time but stops one plane short of the nucleus.  Set to 0.
 NUCZINDEXOFFSET = 0
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingAnalysisSnapshot:
+    """Immutable document context consumed by a background tracking run.
+
+    Every nucleus is copied on the GUI thread before the worker starts. The
+    provider is a template: built-in providers are cloned with independent
+    file-handle caches in the worker. The monotonic change counter catches
+    edit→undo sequences that return to the same history revision.
+    """
+
+    request: TrackingRequest
+    image_provider: ImageProvider
+    calibration: Calibration
+    nuclei_record: list[list[Nucleus]]
+    revision: int
+    change_counter: int
+
+
+@dataclass(frozen=True, slots=True)
+class DetectorPreviewSnapshot:
+    """Minimal immutable context for one background detector test.
+
+    Unlike a tracking snapshot, this deliberately carries no nuclei-record
+    copy because current-frame detection reads only the image and calibration.
+    """
+
+    detector: ComponentSpec
+    frame: int
+    image_provider: ImageProvider
+    calibration: Calibration
+    revision: int
+    change_counter: int
 
 
 class AceTreeApp:
@@ -98,6 +145,14 @@ class AceTreeApp:
         # legacy XML/nuclei ZIP contract.
         self._tracking_results: list[TrackingResult] = []
         self._tracking_sidecar_managed: bool = False
+        # Whole-dataset tracking is always proposal-first.  Dataset creation
+        # retains the wizard request until the viewer exists so the result can
+        # be inspected in the same 2D/3D overlays used for curation.
+        self._pending_initial_tracking_request: TrackingRequest | None = None
+        self._last_global_tracking_request: TrackingRequest | None = None
+        self._global_tracking_dialog = None
+        self._global_tracking_jobs: dict[tuple[int, int], tuple] = {}
+        self._tracking_shutdown_connected = False
 
         # GUI components (initialized in launch())
         self.viewer: napari.Viewer | None = None
@@ -116,6 +171,7 @@ class AceTreeApp:
 
         # 3D view state
         self._3d_mode: bool = False
+        self._changing_ndisplay: bool = False
         self._points_layer = None  # napari Points layer for 3D nuclei
         self._trail_points_layer = None  # 3D ghost trail Points layer
 
@@ -213,8 +269,10 @@ class AceTreeApp:
             config: Configuration built from DatasetCreationDialog.
             num_timepoints: Number of timepoints detected from images.
             output_dir: Where to save the nuclei ZIP and config XML.
-            tracking_request: Optional automated draft to generate. ``None``
-                preserves the manual-annotation workflow.
+            tracking_request: Optional automated draft settings. The request
+                remains uncommitted until the launched viewer's global review
+                workbench explicitly accepts it. ``None`` preserves the
+                manual-annotation workflow.
 
         Returns:
             A fully initialized AceTreeApp ready for manual annotation.
@@ -252,7 +310,8 @@ class AceTreeApp:
         else:
             app.current_plane = max(1, (manager.movie.num_planes or 30) // 2)
         if tracking_request is not None:
-            app.run_tracking_request(tracking_request)
+            app._pending_initial_tracking_request = tracking_request
+            app._last_global_tracking_request = tracking_request
         return app
 
     @classmethod
@@ -265,7 +324,7 @@ class AceTreeApp:
         from .dataset_dialog import DatasetCreationDialog
 
         # Need a QApplication for the dialog
-        from qtpy.QtWidgets import QApplication, QMessageBox
+        from qtpy.QtWidgets import QApplication
         qt_app = QApplication.instance()
         if qt_app is None:
             qt_app = QApplication([])
@@ -283,34 +342,12 @@ class AceTreeApp:
         # Set zip_file name from dataset name
         config.zip_file = output_dir / f"{dataset_name}.zip"
 
-        try:
-            return cls.from_new_dataset(
-                config,
-                num_timepoints,
-                output_dir,
-                tracking_request=tracking_request,
-            )
-        except Exception as exc:
-            if tracking_request is None:
-                raise
-            logger.exception("Initial automated tracking failed")
-            reply = QMessageBox.question(
-                dlg,
-                "Automated Draft Failed",
-                f"The automated draft could not be generated:\n\n{exc}\n\n"
-                "The empty dataset files are valid. Open them for manual "
-                "annotation instead?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if reply != QMessageBox.Yes:
-                return None
-            return cls.from_new_dataset(
-                config,
-                num_timepoints,
-                output_dir,
-                tracking_request=None,
-            )
+        return cls.from_new_dataset(
+            config,
+            num_timepoints,
+            output_dir,
+            tracking_request=tracking_request,
+        )
 
     def launch(self) -> None:
         """Create the napari viewer and add all dock widgets.
@@ -332,6 +369,17 @@ class AceTreeApp:
         from .viewer_integration import ViewerIntegration
 
         self.viewer = napari.Viewer(title="AceTree")
+        if not self._tracking_shutdown_connected:
+            from qtpy.QtWidgets import QApplication
+
+            qt_app = QApplication.instance()
+            if qt_app is not None:
+                qt_app.aboutToQuit.connect(self._shutdown_global_tracking_workers)
+                self._tracking_shutdown_connected = True
+        try:
+            self.viewer.dims.events.ndisplay.connect(self._on_native_ndisplay_changed)
+        except (AttributeError, TypeError):
+            logger.debug("napari does not expose an ndisplay change event")
 
         # Hide napari's default layer list and layer controls — they're
         # rarely needed and consume valuable dock space.  Still accessible
@@ -400,6 +448,14 @@ class AceTreeApp:
         # Initial display
         self.update_display()
 
+        if self._pending_initial_tracking_request is not None:
+            # The review workbench needs ViewerIntegration's preview layers,
+            # and image analysis must not start before Qt's event loop is able
+            # to deliver progress and cancellation signals.
+            from qtpy.QtCore import QTimer
+
+            QTimer.singleShot(0, self._open_pending_initial_tracking)
+
         logger.info("AceTree GUI launched")
 
     def run(self) -> None:
@@ -431,7 +487,27 @@ class AceTreeApp:
         progress=None,
         cancelled=None,
     ) -> tuple[TrackingResult, int]:
-        """Return an uncommitted proposal and its source document revision."""
+        """Return an uncommitted proposal and its source document revision.
+
+        Synchronous callers retain the original API.  GUI workbenches call
+        :meth:`prepare_tracking_analysis` on the GUI thread, then execute the
+        returned snapshot in a worker with :meth:`analyze_prepared_tracking`.
+        """
+
+        snapshot = self.prepare_tracking_analysis(request)
+        proposal = self.analyze_prepared_tracking(
+            snapshot,
+            progress=progress,
+            cancelled=cancelled,
+        )
+        return proposal, snapshot.revision
+
+    def prepare_tracking_analysis(
+        self,
+        request: TrackingRequest,
+    ) -> TrackingAnalysisSnapshot:
+        """Capture a worker-safe, immutable view of the current document."""
+
         if self.image_provider is None:
             raise ValueError("This dataset has no readable image source")
         config = self.manager.config
@@ -439,27 +515,147 @@ class AceTreeApp:
             raise ValueError("Tracking requires dataset calibration")
 
         from ..tracking.api import Calibration
-        from ..tracking.pipeline import TrackingPipeline
 
         revision = self.edit_history.revision
+        change_counter = self.edit_history.change_counter
         calibration = Calibration(
             xy_um=config.xy_res,
             z_um=config.z_res,
             plane_start=config.plane_start,
         )
-        proposal = TrackingPipeline().run(
-            self.image_provider,
-            calibration,
-            request,
-            nuclei_record=self.manager.nuclei_record,
-            progress=progress,
-            cancelled=cancelled,
+        nuclei_snapshot = [
+            [nucleus.copy() for nucleus in frame]
+            for frame in self.manager.nuclei_record
+        ]
+        return TrackingAnalysisSnapshot(
+            request=request,
+            image_provider=self.image_provider,
+            calibration=calibration,
+            nuclei_record=nuclei_snapshot,
+            revision=revision,
+            change_counter=change_counter,
         )
-        if self.edit_history.revision != revision:
+
+    def analyze_prepared_tracking(
+        self,
+        snapshot: TrackingAnalysisSnapshot,
+        *,
+        progress=None,
+        cancelled=None,
+    ) -> TrackingResult:
+        """Analyze a previously captured snapshot, normally in a worker."""
+
+        from ..tracking.pipeline import TrackingPipeline
+
+        if (
+            self.edit_history.revision != snapshot.revision
+            or self.edit_history.change_counter != snapshot.change_counter
+        ):
+            raise RuntimeError(
+                "The dataset changed before tracking started; recompute the draft"
+            )
+        worker_provider = clone_image_provider_for_worker(snapshot.image_provider)
+        owns_provider = worker_provider is not None
+        if worker_provider is None:
+            # Compatibility for external/in-memory providers that predate the
+            # clone contract. Built-in disk providers never take this path.
+            worker_provider = snapshot.image_provider
+        try:
+            proposal = TrackingPipeline().run(
+                worker_provider,
+                snapshot.calibration,
+                snapshot.request,
+                nuclei_record=snapshot.nuclei_record,
+                progress=progress,
+                cancelled=cancelled,
+            )
+        finally:
+            if owns_provider:
+                close_worker_image_provider(worker_provider)
+        if (
+            self.edit_history.revision != snapshot.revision
+            or self.edit_history.change_counter != snapshot.change_counter
+        ):
             raise RuntimeError(
                 "The dataset changed while tracking was running; recompute the draft"
             )
-        return proposal, revision
+        return proposal
+
+    def prepare_detector_preview(
+        self,
+        detector: ComponentSpec,
+        frame: int,
+    ) -> DetectorPreviewSnapshot:
+        """Capture the small worker-safe context for a one-frame detector test."""
+
+        if self.image_provider is None:
+            raise ValueError("This dataset has no readable image source")
+        config = self.manager.config
+        if config is None:
+            raise ValueError("Detector preview requires dataset calibration")
+        frame = int(frame)
+        if frame < 1 or frame > self.image_provider.num_timepoints:
+            raise ValueError(
+                f"Detector preview frame {frame} is outside the image source"
+            )
+
+        from ..tracking.api import Calibration
+
+        return DetectorPreviewSnapshot(
+            detector=detector,
+            frame=frame,
+            image_provider=self.image_provider,
+            calibration=Calibration(
+                xy_um=config.xy_res,
+                z_um=config.z_res,
+                plane_start=config.plane_start,
+            ),
+            revision=self.edit_history.revision,
+            change_counter=self.edit_history.change_counter,
+        )
+
+    def analyze_prepared_detector_preview(
+        self,
+        snapshot: DetectorPreviewSnapshot,
+        *,
+        progress=None,
+        cancelled=None,
+    ) -> tuple[Detection, ...]:
+        """Run one detector without copying nuclei or constructing a tracker."""
+
+        from ..tracking.pipeline import TrackingPipeline
+
+        if (
+            self.edit_history.revision != snapshot.revision
+            or self.edit_history.change_counter != snapshot.change_counter
+        ):
+            raise RuntimeError(
+                "The dataset changed before detector preview started; run it again"
+            )
+        worker_provider = clone_image_provider_for_worker(snapshot.image_provider)
+        owns_provider = worker_provider is not None
+        if worker_provider is None:
+            worker_provider = snapshot.image_provider
+        try:
+            detections = TrackingPipeline().detect_frame(
+                worker_provider,
+                snapshot.calibration,
+                snapshot.detector,
+                frame=snapshot.frame,
+                progress=progress,
+                cancelled=cancelled,
+            )
+        finally:
+            if owns_provider:
+                close_worker_image_provider(worker_provider)
+        if (
+            self.edit_history.revision != snapshot.revision
+            or self.edit_history.change_counter != snapshot.change_counter
+        ):
+            raise RuntimeError(
+                "The dataset changed while detector preview was running; run it again"
+            )
+        return detections
 
     def accept_tracking_proposal(
         self,
@@ -487,6 +683,293 @@ class AceTreeApp:
         command = ApplyTrackingProposal(result=proposal, calibration=calibration)
         self.edit_history.do(command)
         return command.detection_mapping
+
+    def _open_pending_initial_tracking(self) -> None:
+        """Open the wizard request and test its detector on one frame first."""
+
+        request = self._pending_initial_tracking_request
+        if request is not None:
+            self.set_time(request.scope.start_frame)
+            dialog = self.open_global_tracking_workbench(
+                initial_request=request,
+                auto_preview_current_frame=True,
+            )
+            if dialog is not None:
+                self._pending_initial_tracking_request = None
+
+    def open_global_tracking_workbench(
+        self,
+        *,
+        initial_request: TrackingRequest | None = None,
+        auto_start: bool = False,
+        auto_preview_current_frame: bool = False,
+    ):
+        """Show proposal-first whole-dataset tracking for an empty dataset."""
+
+        if self._global_tracking_dialog is not None:
+            try:
+                if self._global_tracking_dialog.isVisible():
+                    self._global_tracking_dialog.raise_()
+                    self._global_tracking_dialog.activateWindow()
+                    return self._global_tracking_dialog
+            except RuntimeError:
+                self._global_tracking_dialog = None
+
+        from qtpy.QtWidgets import QMessageBox
+
+        if self._global_tracking_jobs:
+            parent = None
+            if self.viewer is not None:
+                parent = self.viewer.window._qt_window
+            QMessageBox.information(
+                parent,
+                "Previous Analysis Is Stopping",
+                "Please wait for the previous whole-dataset analysis to finish "
+                "canceling before starting another run.",
+            )
+            return None
+        if self.viewer is None:
+            logger.warning("Global tracking review requires the launched viewer")
+            return None
+
+        if self.image_provider is None:
+            QMessageBox.warning(
+                self.viewer.window._qt_window,
+                "Images Unavailable",
+                "Whole-dataset tracking needs a readable image source.",
+            )
+            return None
+        if any(frame for frame in self.manager.nuclei_record):
+            QMessageBox.information(
+                self.viewer.window._qt_window,
+                "Dataset Is Not Empty",
+                "Whole-dataset tracking currently adds a new initial draft and is only "
+                "available before curation begins. Undo the accepted initial draft, or "
+                "use Auto Forward for a selected cell.",
+            )
+            return None
+
+        from qtpy.QtCore import QTimer
+
+        from ..tracking.api import Calibration
+        from .global_tracking_dialog import GlobalTrackingDialog
+
+        config = self.manager.config
+        if config is None:
+            QMessageBox.warning(
+                self.viewer.window._qt_window,
+                "Calibration Unavailable",
+                "Whole-dataset tracking needs pixel and Z calibration.",
+            )
+            return None
+        end_time = min(
+            self.manager.num_timepoints,
+            self.image_provider.num_timepoints,
+        )
+        request = initial_request or self._last_global_tracking_request
+        dialog = GlobalTrackingDialog(
+            start_time=1,
+            end_time=max(1, end_time),
+            num_channels=max(1, self.image_provider.num_channels),
+            parent=self.viewer.window._qt_window,
+            initial_request=request,
+            viewer_integration=self._viewer_integration,
+            calibration=Calibration(
+                config.xy_res,
+                config.z_res,
+                config.plane_start,
+            ),
+            analysis_starter=self._start_global_tracking_analysis,
+            detector_preview_starter=self._start_global_detector_preview,
+            accept_callback=lambda proposal, revision: self.accept_tracking_proposal(
+                proposal,
+                expected_revision=int(revision),
+            ),
+            revision_getter=lambda: (
+                self.edit_history.revision,
+                self.edit_history.change_counter,
+            ),
+            navigate_to_frame=self.set_time,
+            current_frame_getter=lambda: self.current_time,
+            dataset_empty_getter=lambda: not any(
+                frame for frame in self.manager.nuclei_record
+            ),
+        )
+        dialog.finished.connect(
+            lambda _result, dlg=dialog: self._global_tracking_dialog_closed(dlg)
+        )
+        dialog.draftAccepted.connect(
+            lambda count: self._set_tracking_status(
+                f"Accepted {count} reviewed whole-dataset positions"
+            )
+        )
+        dialog.draftDiscarded.connect(
+            lambda: self._set_tracking_status(
+                "Discarded the whole-dataset draft; no positions were added"
+            )
+        )
+        self._global_tracking_dialog = dialog
+        self._pause_playback_for_tracking_review()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        if auto_start:
+            QTimer.singleShot(0, dialog.start_analysis)
+        elif auto_preview_current_frame:
+            QTimer.singleShot(0, dialog.start_detector_preview)
+        return dialog
+
+    def _start_global_tracking_analysis(self, request, run_id: int, dialog):
+        """Start one cancellable worker and return its cancellation handle."""
+
+        snapshot = self.prepare_tracking_analysis(request)
+
+        def analysis(progress, cancelled):
+            proposal = self.analyze_prepared_tracking(
+                snapshot,
+                progress=progress,
+                cancelled=cancelled,
+            )
+            return (
+                proposal,
+                snapshot.revision,
+                run_id,
+                (snapshot.revision, snapshot.change_counter),
+            )
+
+        return self._start_global_tracking_worker(
+            analysis,
+            run_id,
+            dialog,
+            success_slot=dialog.finish_worker_result,
+            failure_slot=dialog.fail_analysis,
+        )
+
+    def _start_global_detector_preview(
+        self,
+        detector,
+        frame: int,
+        run_id: int,
+        dialog,
+    ):
+        """Start one lightweight detector-only current-frame worker."""
+
+        snapshot = self.prepare_detector_preview(detector, frame)
+
+        def analysis(progress, cancelled):
+            detections = self.analyze_prepared_detector_preview(
+                snapshot,
+                progress=progress,
+                cancelled=cancelled,
+            )
+            return (
+                detections,
+                snapshot.frame,
+                run_id,
+                (snapshot.revision, snapshot.change_counter),
+            )
+
+        return self._start_global_tracking_worker(
+            analysis,
+            run_id,
+            dialog,
+            success_slot=dialog.finish_detector_preview_worker_result,
+            failure_slot=dialog.fail_detector_preview,
+        )
+
+    def _start_global_tracking_worker(
+        self,
+        analysis,
+        run_id: int,
+        dialog,
+        *,
+        success_slot,
+        failure_slot,
+    ):
+        """Run either tracking mode with kind-safe queued Qt callbacks."""
+
+        from threading import Event
+
+        from qtpy.QtCore import QThread
+
+        from .tracking_worker import TrackingAnalysisWorker, TrackingWorkerRelay
+
+        cancel_event = Event()
+
+        thread = QThread()
+        worker = TrackingAnalysisWorker(analysis, cancel_event)
+        relay = TrackingWorkerRelay(
+            run_id,
+            dialog.update_analysis_progress,
+            success_slot,
+            failure_slot,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(relay.progress)
+        worker.succeeded.connect(relay.succeeded)
+        worker.failed.connect(relay.failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(relay.deleteLater)
+        job_key = (id(dialog), run_id)
+        thread.finished.connect(
+            lambda key=job_key: self._global_tracking_jobs.pop(key, None)
+        )
+        self._global_tracking_jobs[job_key] = (
+            thread,
+            worker,
+            cancel_event,
+            relay,
+        )
+        thread.start()
+        return cancel_event.set
+
+    def _global_tracking_dialog_closed(self, dialog) -> None:
+        try:
+            self._last_global_tracking_request = dialog.get_request()
+        except (AttributeError, RuntimeError, ValueError):
+            pass
+        if self._global_tracking_dialog is dialog:
+            self._global_tracking_dialog = None
+
+    def _shutdown_global_tracking_workers(self, timeout_ms: int = 1500) -> None:
+        """Cancel global workers and allow a bounded cooperative shutdown."""
+
+        import time
+
+        jobs = list(self._global_tracking_jobs.values())
+        for _thread, _worker, cancel_event, *_relay in jobs:
+            cancel_event.set()
+        deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
+        for thread, _worker, _cancel_event, *_relay in jobs:
+            try:
+                if not thread.isRunning():
+                    continue
+                thread.quit()
+                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                if remaining_ms:
+                    thread.wait(remaining_ms)
+                if thread.isRunning():
+                    logger.warning(
+                        "A tracking plugin did not stop within the shutdown timeout"
+                    )
+            except RuntimeError:
+                # Qt may already have released a thread that finished while
+                # shutdown callbacks were being delivered.
+                continue
+
+    def _pause_playback_for_tracking_review(self) -> None:
+        player = self._player_controls
+        if player is not None and bool(getattr(player, "_playing", False)):
+            stop = getattr(player, "_stop_play", None)
+            if callable(stop):
+                stop()
+
+    def _set_tracking_status(self, message: str) -> None:
+        if self._edit_panel is not None:
+            self._edit_panel._status_label.setText(message)
 
     # ── Save ──────────────────────────────────────────────────────
 
@@ -1657,15 +2140,66 @@ class AceTreeApp:
 
     # ── 3D view toggle ─────────────────────────────────────────────
 
+    def stack_z_from_plane(self, plane: float) -> float:
+        """Translate AceTree's absolute Z-plane coordinate to stack-local Z."""
+
+        config = self.manager.config
+        plane_start = config.plane_start if config is not None else 1
+        return float(plane) - float(plane_start)
+
+    def physical_to_stack_coordinates(
+        self,
+        x_um: float,
+        y_um: float,
+        z_um: float,
+    ) -> tuple[float, float, float]:
+        """Return napari ``(z, y, x)`` coordinates for a physical position."""
+
+        config = self.manager.config
+        if config is None:
+            return float(z_um), float(y_um), float(x_um)
+        return (
+            float(z_um) / config.z_res,
+            float(y_um) / config.xy_res,
+            float(x_um) / config.xy_res,
+        )
+
     def toggle_3d(self) -> None:
         """Toggle between 2D slice view and 3D volume view."""
+        self.set_3d_mode(not self._3d_mode)
+
+    def set_3d_mode(self, enabled: bool) -> None:
+        """Idempotently synchronize AceTree and napari display modes."""
+
         if self.viewer is None:
+            self._3d_mode = False
             return
-        self._3d_mode = not self._3d_mode
-        if self._3d_mode:
-            self._enter_3d()
-        else:
-            self._exit_3d()
+        enabled = bool(enabled)
+        if enabled == self._3d_mode:
+            expected = 3 if enabled else 2
+            if int(getattr(self.viewer.dims, "ndisplay", expected)) == expected:
+                return
+        self._3d_mode = enabled
+        self._changing_ndisplay = True
+        try:
+            if enabled:
+                self._enter_3d()
+            else:
+                self._exit_3d()
+        finally:
+            self._changing_ndisplay = False
+        if self._player_controls is not None:
+            self._player_controls.refresh()
+
+    def _on_native_ndisplay_changed(self, event) -> None:
+        """Route napari's built-in 2D/3D button through AceTree setup."""
+
+        if self._changing_ndisplay:
+            return
+        value = int(getattr(event, "value", getattr(self.viewer.dims, "ndisplay", 2)))
+        desired = value == 3
+        if desired != self._3d_mode:
+            self.set_3d_mode(desired)
 
     def _enter_3d(self) -> None:
         """Switch to 3D volume rendering with nucleus spheres."""
@@ -1709,6 +2243,8 @@ class AceTreeApp:
 
         # Switch viewer to 3D
         self.viewer.dims.ndisplay = 3
+        if self._viewer_integration:
+            self._viewer_integration.refresh_tracking_preview()
 
     def _exit_3d(self) -> None:
         """Switch back to 2D slice view."""
@@ -1746,7 +2282,7 @@ class AceTreeApp:
                 self._viewer_integration._division_line_layer.visible = True
             if self._viewer_integration._trails_layer:
                 self._viewer_integration._trails_layer.visible = True
-            self._viewer_integration._update_tracking_preview()
+            self._viewer_integration.refresh_tracking_preview()
 
         # Reload 2D plane
         self.update_display()
@@ -1765,7 +2301,7 @@ class AceTreeApp:
 
         for nuc in nuclei:
             # Points coords in (z, y, x) — z in pixel units, scaled by layer
-            coords.append([nuc.z, nuc.y, nuc.x])
+            coords.append([self.stack_z_from_plane(nuc.z), nuc.y, nuc.x])
             sizes.append(nuc.size)
             names_list.append(nuc.effective_name or f"Nuc{nuc.index}")
 
@@ -1869,7 +2405,7 @@ class AceTreeApp:
                 continue
             age = self.current_time - t
             alpha = max(0.15, 0.6 * (1.0 - age / (trail_len + 1)))
-            coords.append([nuc.z, nuc.y, nuc.x])
+            coords.append([self.stack_z_from_plane(nuc.z), nuc.y, nuc.x])
             sizes.append(nuc.size * 0.6)  # slightly smaller than live nuclei
             colors.append([0.3, 0.8, 1.0, alpha])
 
@@ -1984,8 +2520,11 @@ class AceTreeApp:
         """Refresh all visual components for the current state."""
         self._load_image()
 
-        if self._viewer_integration and not self._3d_mode:
-            self._viewer_integration.update_overlays()
+        if self._viewer_integration:
+            if self._3d_mode:
+                self._viewer_integration.refresh_tracking_preview()
+            else:
+                self._viewer_integration.update_overlays()
 
         if self._contrast_tools:
             self._contrast_tools.refresh()
@@ -1995,6 +2534,13 @@ class AceTreeApp:
 
         if self._edit_panel:
             self._edit_panel.refresh()
+
+        if self._global_tracking_dialog is not None:
+            try:
+                self._global_tracking_dialog.sync_document_revision()
+                self._global_tracking_dialog.sync_viewer_position(self.current_time)
+            except RuntimeError:
+                self._global_tracking_dialog = None
 
         for lw in self._lineage_widgets:
             lw.refresh_selection()
@@ -2718,6 +3264,15 @@ class AceTreeApp:
                 pass
             if changed:
                 self._edit_panel._status_label.setText("Exited mode")
+
+        dialog = self._global_tracking_dialog
+        if dialog is not None:
+            try:
+                if dialog.isVisible():
+                    dialog.reject()
+                    changed = True
+            except RuntimeError:
+                self._global_tracking_dialog = None
 
     def _bind_keys(self) -> None:
         """Bind keyboard shortcuts to the napari viewer."""

@@ -20,6 +20,7 @@ from .api import (
     ComponentSpec,
     Detection,
     TrackEdge,
+    TrackingOutcome,
     TrackingRequest,
     TrackingResult,
     TrackingScope,
@@ -127,16 +128,7 @@ def tracking_result_to_dict(result: TrackingResult) -> dict[str, Any]:
         },
         "result": {
             "detections": [
-                {
-                    "detection_id": detection.detection_id,
-                    "frame": detection.frame,
-                    "x_um": detection.x_um,
-                    "y_um": detection.y_um,
-                    "z_um": detection.z_um,
-                    "radius_um": detection.radius_um,
-                    "quality": detection.quality,
-                    "features": _json_value(detection.features),
-                }
+                _detection_to_dict(detection)
                 for detection in result.detections
             ],
             "edges": [
@@ -155,6 +147,7 @@ def tracking_result_to_dict(result: TrackingResult) -> dict[str, Any]:
             },
             "warnings": list(result.warnings),
             "provenance": _json_value(result.provenance),
+            "outcome": _outcome_to_dict(result.outcome),
         },
     }
 
@@ -257,6 +250,12 @@ def tracking_result_from_dict(payload: Any) -> TrackingResult:
         provenance = dict(
             _mapping(result_data.get("provenance", {}), "result.provenance")
         )
+        outcome_data = result_data.get("outcome")
+        outcome = (
+            None
+            if outcome_data is None
+            else _outcome_from_dict(outcome_data)
+        )
         return TrackingResult(
             request=request,
             detections=detections,
@@ -264,6 +263,7 @@ def tracking_result_from_dict(payload: Any) -> TrackingResult:
             existing_anchors=anchors,
             warnings=warnings,
             provenance=provenance,
+            outcome=outcome,
         )
     except TrackingProposalFormatError:
         raise
@@ -288,6 +288,19 @@ def _component_from_dict(value: Any, label: str) -> ComponentSpec:
     )
 
 
+def _detection_to_dict(detection: Detection) -> dict[str, Any]:
+    return {
+        "detection_id": detection.detection_id,
+        "frame": detection.frame,
+        "x_um": detection.x_um,
+        "y_um": detection.y_um,
+        "z_um": detection.z_um,
+        "radius_um": detection.radius_um,
+        "quality": detection.quality,
+        "features": _json_value(detection.features),
+    }
+
+
 def _detection_from_dict(value: Any) -> Detection:
     data = _mapping(value, "detection")
     return Detection(
@@ -310,6 +323,77 @@ def _edge_from_dict(value: Any) -> TrackEdge:
         cost=_number(data.get("cost"), "edge.cost"),
         kind=_string(data.get("kind"), "edge.kind"),
         features=dict(_mapping(data.get("features", {}), "edge.features")),
+    )
+
+
+def _outcome_to_dict(outcome: TrackingOutcome | None) -> dict[str, Any] | None:
+    if outcome is None:
+        return None
+    position = outcome.predicted_position_um
+    return {
+        "code": outcome.code,
+        "stop_frame": outcome.stop_frame,
+        "last_accepted_frame": outcome.last_accepted_frame,
+        "predicted_position_um": (
+            None
+            if position is None
+            else {"x_um": position[0], "y_um": position[1], "z_um": position[2]}
+        ),
+        "search_radius_um": outcome.search_radius_um,
+        "review_candidates": [
+            _detection_to_dict(candidate)
+            for candidate in outcome.review_candidates
+        ],
+    }
+
+
+def _outcome_from_dict(value: Any) -> TrackingOutcome:
+    data = _mapping(value, "result.outcome")
+    stop_value = data.get("stop_frame")
+    position_value = data.get("predicted_position_um")
+    position = None
+    if position_value is not None:
+        position_data = _mapping(
+            position_value,
+            "result.outcome.predicted_position_um",
+        )
+        position = (
+            _number(
+                position_data.get("x_um"),
+                "result.outcome.predicted_position_um.x_um",
+            ),
+            _number(
+                position_data.get("y_um"),
+                "result.outcome.predicted_position_um.y_um",
+            ),
+            _number(
+                position_data.get("z_um"),
+                "result.outcome.predicted_position_um.z_um",
+            ),
+        )
+    return TrackingOutcome(
+        code=_string(data.get("code"), "result.outcome.code"),
+        stop_frame=(
+            None
+            if stop_value is None
+            else _integer(stop_value, "result.outcome.stop_frame")
+        ),
+        last_accepted_frame=_integer(
+            data.get("last_accepted_frame"),
+            "result.outcome.last_accepted_frame",
+        ),
+        predicted_position_um=position,
+        search_radius_um=_number(
+            data.get("search_radius_um"),
+            "result.outcome.search_radius_um",
+        ),
+        review_candidates=tuple(
+            _detection_from_dict(candidate)
+            for candidate in _sequence(
+                data.get("review_candidates", []),
+                "result.outcome.review_candidates",
+            )
+        ),
     )
 
 

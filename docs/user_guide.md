@@ -331,13 +331,29 @@ When a placement creates a second daughter, AceTree evaluates the division rule 
 
 1. Select a live cell and click **Auto Forward**. If the selection is earlier in an existing one-child continuation, AceTree safely starts from its terminal nucleus. It never chooses a daughter at a division.
 2. In **1. Configure**, choose DoG or LoG detection, channel, approximate nucleus radius, detection threshold, search area, maximum movement, allowed missing frames, and caution for close choices. Tooltips explain whether increasing each value makes tracking broader or more selective. Advanced options expose subpixel refinement and median filtering.
-3. Click **Build Preview**. Progress is reported by frame and **Cancel analysis** stops without retaining a partial result or changing the dataset.
-4. In **2. Review**, inspect every proposed and interpolated position in the table. Cyan circles and links are temporary draft data; interpolated gap positions are amber. Click a row, **Previous**, **Next**, or **Go to stop** to navigate the main image viewer. The workbench is modeless, so normal time and Z navigation remain available.
+3. Click **Build Preview**. Analysis runs in the background, progress is reported by frame, and **Cancel analysis** stops cooperatively without retaining a partial result or changing the dataset. Closing the window during analysis requests cancellation before its worker is released.
+4. In **2. Review**, inspect every proposed and interpolated position in the table. The overlay uses both shape and color: circles are proposed detections, diamonds are interpolated gaps, square/cross marks are diagnostic candidates that will not be accepted, and paths show movement. When a run stops, a ring/crosshair in 2D or wireframe search sphere in 3D shows the predicted search region. Click or keyboard-select a row, use **Previous**, **Next**, **Play Draft**, or **Go to stop**, and optionally center the camera on the selected position.
 5. If the draft needs work, change any parameter. AceTree marks the old overlay as out of date and disables acceptance until **Update Preview** finishes. Settings are remembered when the workbench is reopened.
-6. Read the human-language stopping explanation. Auto Forward stops rather than guessing at similarly likely candidates, likely divisions, conflicts with existing annotations, or a lost continuation.
+6. Read the human-language stopping explanation. Auto Forward stops rather than guessing at similarly likely candidates, likely divisions, conflicts with existing annotations, or a lost continuation. The stopped frame, last accepted frame, predicted location, search radius, and review-only candidates are structured proposal data and remain available after save/reload of the tracking sidecar.
 7. Choose **Accept Draft** to add exactly the visible proposal as one undoable edit, or **Discard Draft** to restore the original view without editing anything. After acceptance, AceTree selects the new terminal nucleus so curation can continue immediately.
 
+Use **Solo detection channel while reviewing** when other fluorescence channels obscure the detector input; it applies to the main and all open detached viewers, then restores each layer's prior visibility on close. Draft layers remain read-only and visible in editing colors, visualization-rule colors, the main 3D volume, and every detached 3D window. Detached windows honor their own timepoint when Sync is off, and changing a review highlight updates only draft layers rather than rereading the image stacks.
+
 The prototype Simple LAP tracker supports one-to-one continuations and short gaps. It does **not** create divisions or merges; curate daughter branches manually with **Manual Track** or **Relink**. A manual edit, Undo, or Redo while a draft is open makes that draft stale and requires **Update Preview** before it can be accepted.
+
+#### Whole-Dataset Tracking Workbench
+
+Choosing automated tracking in the dataset wizard creates the empty ZIP/XML first, launches the viewer, and opens **Review Initial Tracking Draft**. The requested DoG/LoG and Simple LAP settings are prefilled, then AceTree runs a fast detector test on the first requested frame. This test reads that frame's complete 3D stack but does not run LAP, create links, populate the review table, or enable **Accept Draft**.
+
+Use **Test Detector at t=N** while viewing a representative frame. Purple read-only rings show the detector candidates in 2D, main 3D, and synced detached 3D windows. Adjust channel, radius, threshold, subpixel localization, or median filtering and retest; changing only the tracker, gap, displacement, or requested time range does not invalidate a detector test. Moving to another timepoint clears the transient rings so a result cannot be mistaken for the new current frame. A successful zero-candidate test is still useful feedback.
+
+When the detector looks sane on representative frames, choose **Build Full Draft**. That clears the transient detector-test layer, runs detection across the requested time range, and invokes Simple LAP to build links. Only this full result can enable **Accept Draft**. Cancellation, failure, closing the workbench, or a document/time change during a detector test retains no partial overlay and never changes nuclei, undo history, AuxInfo, or the tracking sidecar.
+
+Before creation, the wizard verifies every requested channel source, multichannel stack divisibility, output folder, and dataset name. If the target ZIP or XML already exists, AceTree asks before replacing it and defaults to keeping the existing files.
+
+The per-frame table appears only for a full draft and includes every requested frame, including frames with no detections, interpolated gap positions, new track starts, mean quality, and warnings. Select rows by mouse or keyboard while inspecting the same read-only overlay in 2D, main 3D, or detached 3D. Change settings and choose **Update Full Draft** as often as needed; the previous overlay is visibly stale and cannot be accepted after a setting or document change. **Accept Draft** is the only action that adds positions, as one undoable edit. **Discard Draft**, cancellation, failure, or closing the window leaves the dataset empty.
+
+For discoverability, **Edit Tools > Tracking & Links > Whole Dataset…** reopens this workbench while the dataset is still empty. Once any nucleus record exists, use **Auto Forward** for a selected lineage or Undo the accepted initial draft before rerunning whole-dataset tracking. This restriction prevents an embryo-wide run from duplicating curated nuclei.
 
 #### Curate a Known Sublineage: EMS to E to Ea/Ep
 
@@ -386,7 +402,7 @@ In 3D mode, all nuclei at the current timepoint are displayed as colored spheres
 
 **Visualization mode:** Colors are determined by the active color rules (see Section 6.8).
 
-All image channels are loaded as 3D stacks when entering 3D mode. Clicking on a sphere selects the corresponding cell. Relink pick mode and track mode also work in 3D.
+All image channels are loaded as 3D stacks when entering 3D mode. Clicking on a sphere selects the corresponding cell. Relink pick mode and track mode also work in 3D. An open tracking proposal changes to read-only napari Points and 3D path layers automatically; diagnostic candidates use a cross symbol and a stopped search region is shown as three calibrated wireframe rings. Switching back to 2D restores the slice overlay without changing the proposal.
 
 ### 6.7 Detached 3D Viewer Window
 
@@ -399,6 +415,7 @@ Click **3D Window** in the player controls to open a separate 3D viewer window. 
 - **Labels: ON/OFF**: Toggle label visibility globally.
 - **Clear Labels**: Remove all shown labels.
 - **Left-click** on a 3D sphere: Toggle that cell's label on/off.
+- **Tracking drafts**: The current proposal, selected review point, diagnostic candidates, paths, and stopped search region mirror the main viewer. With Sync off they render at this window's independent timepoint.
 
 Multiple 3D windows can be open simultaneously.
 
@@ -720,7 +737,7 @@ This opens a 5-page wizard dialog:
      - **Planar** (all Z for channel 1, then all Z for channel 2) — plane-fastest.
    Set the flip checkbox if your images are mirrored horizontally.
 3. **Voxel parameters** — set XY resolution (µm/pixel), Z resolution (µm/plane), number of timepoints and planes (auto-filled from detection; for interleaved stacks the Z count is automatically `pages / num_channels`).
-4. **Initial tracking** — keep the recommended **Manual annotation** default, or choose an automated draft using DoG or LoG detection plus Simple LAP. Configure the channel, expected nucleus radius, quality threshold, maximum displacement, and allowed missing frames. Simple LAP does not infer divisions or merges.
+4. **Initial tracking** — keep the recommended **Manual annotation** default, or choose an automated draft using DoG or LoG detection plus Simple LAP. Configure the channel, expected nucleus radius, quality threshold, maximum displacement, and allowed missing frames. The channel range follows the selected image layout, and unusable plugin/channel/stack combinations block creation with an explanation. Simple LAP does not infer divisions or merges.
 5. **Output** — choose where to save the dataset config XML and nuclei ZIP.
 
 #### CLI (Non-Interactive)
@@ -774,11 +791,11 @@ The `create` workflow:
 2. Generates an `AceTreeConfig` with the correct image paths and resolution.
 3. Creates an empty nuclei ZIP (no detections).
 4. Writes the XML config file to the output directory.
-5. In automated wizard mode, builds and accepts the global DoG/LoG plus Simple LAP result as one undoable draft; manual mode leaves the dataset empty.
-6. Launches the GUI for review and curation.
+5. Launches the GUI with an empty nuclei record. In automated mode it opens the modeless whole-dataset workbench, runs analysis in the background, and shows the result in the 2D/3D image viewers before any commit.
+6. Adds the global result only after **Accept Draft**; discard, cancellation, failure, or window close leaves the valid dataset empty for manual annotation.
 
 The non-interactive CLI also defaults to manual mode; select `dog-lap` or
-`log-lap` explicitly to build an automated draft.
+`log-lap` explicitly to open an automated draft in the same pre-commit review workbench.
 
 ### 14.2 Placing Nuclei (Add Mode)
 

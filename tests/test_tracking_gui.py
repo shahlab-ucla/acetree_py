@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -167,6 +169,7 @@ def test_auto_forward_starts_safe_and_supports_adjust_rerun(qtbot):
     assert not dialog._accept_button.isEnabled()
 
     dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
     first = dialog.proposal
     assert dialog.state == dialog.READY
     assert dialog._accept_button.isEnabled()
@@ -178,11 +181,13 @@ def test_auto_forward_starts_safe_and_supports_adjust_rerun(qtbot):
     assert app._viewer_integration.shown[-1][2]["stale"] is True
 
     dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
     assert dialog.state == dialog.READY
     assert dialog.proposal is not first
     assert len(app.analysis_calls) == 2
 
     dialog._accept_button.click()
+    qtbot.waitUntil(lambda: app._viewer_integration.cleared == 1)
     assert len(app.accept_calls) == 1
     assert app.accept_calls[0][0] is not first
     assert app._viewer_integration.cleared == 1
@@ -199,10 +204,12 @@ def test_auto_forward_discard_restores_view_and_never_commits(qtbot):
     )
     qtbot.addWidget(dialog)
     dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
     dialog._navigate_to_row(1)
     assert app.current_time == 2
 
     dialog.reject()
+    qtbot.waitUntil(lambda: app._viewer_integration.cleared == 1)
 
     assert app.current_time == 1
     assert app.current_plane == 2
@@ -224,11 +231,62 @@ def test_cancelled_auto_forward_stays_open_for_refinement(qtbot):
     qtbot.addWidget(dialog)
 
     dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state != dialog.RUNNING)
 
     assert dialog.state == dialog.CONFIGURING
     assert not dialog._accept_button.isEnabled()
     assert "No changes" in dialog._banner.text()
     assert app.accept_calls == []
+    dialog.reject()
+
+
+def test_close_during_background_analysis_requests_cancel_before_cleanup(qtbot):
+    from acetree_py.tracking.pipeline import TrackingCancelled
+
+    app = _TrackingDialogApp()
+    started = threading.Event()
+    worker_threads = []
+
+    def slow_analysis(request, *, progress=None, cancelled=None):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        while cancelled is None or not cancelled():
+            time.sleep(0.005)
+        raise TrackingCancelled("cancelled")
+
+    app.analyze_tracking_request = slow_analysis
+    dialog = AutoTrackForwardDialog(1, 3, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+    dialog.show()
+    main_thread = threading.get_ident()
+
+    dialog._preview_button.click()
+    qtbot.waitUntil(started.is_set)
+    dialog.reject()
+
+    assert dialog._close_after_run is True
+    assert worker_threads != [main_thread]
+    qtbot.waitUntil(lambda: app._viewer_integration.cleared == 1)
+
+
+def test_keyboard_row_navigation_and_bounded_draft_playback_follow_viewer(qtbot):
+    app = _TrackingDialogApp()
+    dialog = AutoTrackForwardDialog(1, 3, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+    dialog._review_timer.setInterval(10)
+    dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
+
+    dialog._table.setCurrentCell(1, 0)
+    assert app.current_time == 2
+    assert not dialog._next_button.isEnabled()
+    assert dialog._previous_button.isEnabled()
+
+    dialog._navigate_to_row(0)
+    dialog._play_button.click()
+    qtbot.waitUntil(lambda: app.current_time == 2)
+    qtbot.waitUntil(lambda: not dialog._review_timer.isActive())
+    assert not dialog._play_button.isChecked()
     dialog.reject()
 
 
@@ -252,6 +310,7 @@ def test_no_continuation_keeps_settings_available_for_rerun(qtbot):
     dialog = AutoTrackForwardDialog(1, 3, app=app, seed_anchor=(1, 1))
     qtbot.addWidget(dialog)
     dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.EMPTY)
 
     assert dialog.state == dialog.EMPTY
     assert not dialog._accept_button.isEnabled()
@@ -271,6 +330,7 @@ def test_document_edit_makes_auto_forward_draft_stale_even_after_undo(qtbot):
     )
     qtbot.addWidget(dialog)
     dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
     assert dialog.state == dialog.READY
 
     app.edit_history.do(AddNucleus(time=2, x=1, y=1, z=1.0, size=2))
