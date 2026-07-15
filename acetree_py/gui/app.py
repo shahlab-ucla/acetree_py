@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     )
 
 from ..core.nuclei_manager import NucleiManager
-from ..editing.history import EditHistory
+from ..editing.history import EditHistory, PostCommitCallbackError
 from ..io.config import AceTreeConfig, load_config
 from ..io.image_provider import (
     ImageProvider,
@@ -42,6 +42,13 @@ from ..io.image_provider import (
     create_image_provider_from_config,
 )
 from .color_rules import ColorRuleEngine
+from .marker_layers import (
+    configure_curated_points_layer,
+    passed_drag_threshold,
+    point_anchor,
+    pointer_position,
+    replace_points_layer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +152,11 @@ class AceTreeApp:
         # legacy XML/nuclei ZIP contract.
         self._tracking_results: list[TrackingResult] = []
         self._tracking_sidecar_managed: bool = False
+        # A rendering failure happens after an edit has already crossed the
+        # history boundary. Retain the most recent failure so proposal
+        # acceptance can make one redraw retry without executing the command
+        # again (which would duplicate detections/markers).
+        self._last_post_commit_refresh_error: Exception | None = None
         # Whole-dataset tracking is always proposal-first.  Dataset creation
         # retains the wizard request until the viewer exists so the result can
         # be inspected in the same 2D/3D overlays used for curation.
@@ -681,8 +693,37 @@ class AceTreeApp:
             plane_start=config.plane_start,
         )
         command = ApplyTrackingProposal(result=proposal, calibration=calibration)
-        self.edit_history.do(command)
-        return command.detection_mapping
+        self._last_post_commit_refresh_error = None
+        try:
+            self.edit_history.do(command)
+        except PostCommitCallbackError as error:
+            # ``EditHistory`` raises this only after data, revision, and undo
+            # state have committed. Reading the mapping also verifies that
+            # this particular proposal is applied before we report success.
+            # Retry only the post-commit work -- never execute the command a
+            # second time, which would create overlapping duplicate nuclei.
+            mapping = command.detection_mapping
+            self._report_committed_refresh_failure(
+                command,
+                error.__cause__ or error,
+            )
+            try:
+                self._on_edit()
+            except Exception as retry_error:
+                self._report_committed_refresh_failure(command, retry_error)
+            return mapping
+
+        mapping = command.detection_mapping
+        if self._last_post_commit_refresh_error is not None:
+            # Structural/model rebuilding completed, but the presentation
+            # refresh failed. One direct redraw retry is safe and avoids an
+            # expensive second naming pass. A failed retry remains a warning
+            # because the proposal itself is already committed and undoable.
+            try:
+                self.update_display()
+            except Exception as retry_error:
+                self._report_committed_refresh_failure(command, retry_error)
+        return mapping
 
     def _open_pending_initial_tracking(self) -> None:
         """Open the wizard request and test its detector on one frame first."""
@@ -1527,12 +1568,19 @@ class AceTreeApp:
 
     def enter_add_mode(self) -> None:
         """Enter click-to-add mode. Left-click places a nucleus."""
+        switch_from_3d = self._3d_mode
         if self._relink_pick_mode:
             self.cancel_relink_pick_mode()
         self.exit_placement_mode()
         if self._edit_panel is not None:
             self._edit_panel._btn_track.setChecked(False)
         self._add_mode = True
+        if switch_from_3d:
+            # A 3D camera ray does not supply an unambiguous Z placement.
+            # Arm Add before switching so the toolbar remains checked when
+            # the 2D view refreshes.
+            self.set_3d_mode(False)
+            self._say("Add placement uses the 2D slice view")
         self._focus_viewer_canvas()
 
     def exit_add_mode(self) -> None:
@@ -1553,6 +1601,14 @@ class AceTreeApp:
         """
         if self.viewer is None:
             return
+        if self._3d_mode and self._points_layer is not None:
+            self._make_curated_points_read_only(self._points_layer)
+            try:
+                self.viewer.layers.selection.active = self._points_layer
+            except Exception:
+                pass
+        elif self._viewer_integration is not None:
+            self._viewer_integration._ensure_nuclei_active()
         try:
             qt_viewer = self.viewer.window.qt_viewer  # type: ignore[attr-defined]
         except Exception:
@@ -1891,10 +1947,11 @@ class AceTreeApp:
                 )
                 commands.append(interp_cmd)
 
-        self.edit_history.do(CompositeCommand(
+        command = CompositeCommand(
             commands=commands,
             label=f"Add nucleus at t={time}",
-        ))
+        )
+        self._run_edit_action(self.edit_history.do, command)
 
         return True
 
@@ -1911,6 +1968,7 @@ class AceTreeApp:
             parent_name: Name of parent cell to extend, or None for root mode.
             default_size: Default nucleus diameter for placed nuclei.
         """
+        switch_from_3d = self._3d_mode
         if self._relink_pick_mode:
             self.cancel_relink_pick_mode()
         self.exit_add_mode()
@@ -1924,6 +1982,12 @@ class AceTreeApp:
             if selected_cell is not None and selected_cell.name == parent_name:
                 self._placement_parent_anchor = self.selection_anchor
         self._placement_default_size = default_size
+        if switch_from_3d:
+            # Track placement needs the current image plane for a definite Z.
+            # Arm Track before switching so its checked state survives the
+            # 2D-view refresh and the next right click works immediately.
+            self.set_3d_mode(False)
+            self._say("Manual Track placement uses the 2D slice view")
         self._focus_viewer_canvas()
 
     def exit_placement_mode(self) -> None:
@@ -2123,10 +2187,11 @@ class AceTreeApp:
                 )
                 commands.append(interp_cmd)
 
-        self.edit_history.do(CompositeCommand(
+        command = CompositeCommand(
             commands=commands,
             label=f"Track nucleus at t={time}",
-        ))
+        )
+        self._run_edit_action(self.edit_history.do, command)
 
         # Mode continuation
         if parent_name is None:
@@ -2175,6 +2240,21 @@ class AceTreeApp:
             self._3d_mode = False
             return
         enabled = bool(enabled)
+        if enabled and (self._add_mode or self._placement_mode):
+            # Manual placement requires a definite image plane. Do not carry
+            # an armed 2D click mode into 3D, where the same buttons would be
+            # interpreted as label/camera interactions.
+            self.exit_add_mode()
+            self.exit_placement_mode()
+            if self._edit_panel is not None:
+                try:
+                    self._edit_panel._btn_add.setChecked(False)
+                    self._edit_panel._btn_track.setChecked(False)
+                except Exception:
+                    pass
+            self._say(
+                "Exited Add/Manual Track because placement uses the 2D slice view"
+            )
         if enabled == self._3d_mode:
             expected = 3 if enabled else 2
             if int(getattr(self.viewer.dims, "ndisplay", expected)) == expected:
@@ -2294,6 +2374,18 @@ class AceTreeApp:
 
         nuclei = self.manager.alive_nuclei_at(self.current_time)
         z_scale = self.manager.z_pix_res
+        selection_resolver = getattr(self, "get_selected_nucleus", None)
+        resolved_selection = (
+            selection_resolver(self.current_time)
+            if callable(selection_resolver)
+            else None
+        )
+        selected_nucleus = (
+            resolved_selection[0]
+            if resolved_selection is not None
+            and resolved_selection[1] == self.current_time
+            else None
+        )
 
         coords = []
         sizes = []
@@ -2310,15 +2402,28 @@ class AceTreeApp:
             colors = [
                 list(c) for c in self.color_engine.colors_for_frame(
                     nuclei, self.manager, self.current_time,
-                    selected_name=self.current_cell_name,
+                    # Forced names need not be unique while a conflict is
+                    # being corrected. Highlight the physically anchored
+                    # nucleus below instead of every matching name.
+                    selected_name="",
                 )
             ]
+            selected_color = list(
+                getattr(
+                    self.color_engine,
+                    "selected_color",
+                    (1.0, 1.0, 1.0, 1.0),
+                )
+            )
+            for i, nuc in enumerate(nuclei):
+                if nuc is selected_nucleus:
+                    colors[i] = selected_color
         else:
             # Editing mode — status-based palette
             colors = []
             for nuc in nuclei:
                 name = nuc.effective_name or ""
-                if name == self.current_cell_name and name:
+                if nuc is selected_nucleus:
                     colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
                 elif name.startswith("Nuc"):
                     colors.append([1.0, 0.6, 0.15, 0.8])  # Orange — unnamed
@@ -2329,7 +2434,29 @@ class AceTreeApp:
 
         if not coords:
             if self._points_layer is not None:
-                self._points_layer.data = np.empty((0, 3))
+                try:
+                    completed = replace_points_layer(
+                        self._points_layer,
+                        data=np.empty((0, 3)),
+                        size=np.empty(0),
+                        face_color=np.empty((0, 4)),
+                        features={
+                            "name": [],
+                            "acetree_time": [],
+                            "acetree_index": [],
+                        },
+                    )
+                    if not completed:
+                        raise RuntimeError(
+                            "Centroid marker redraw failed; the previous "
+                            "complete marker set was restored"
+                        )
+                finally:
+                    self._make_curated_points_read_only(self._points_layer)
+            # Trails are a separate native layer.  They still need to be
+            # cleared when the current frame contains no live nuclei;
+            # otherwise positions from the previous frame remain visible.
+            self._update_3d_trail()
             return
 
         coords_arr = np.array(coords)
@@ -2344,9 +2471,17 @@ class AceTreeApp:
                 display_names.append(n)
             else:
                 display_names.append("")
+        point_features = {
+            "name": display_names,
+            "acetree_time": [self.current_time] * len(nuclei),
+            "acetree_index": [nuc.index for nuc in nuclei],
+        }
 
         if self._points_layer is None:
-            self._points_layer = self.viewer.add_points(
+            # Create once, then lock the returned layer. Retrying a broad
+            # TypeError with different kwargs can duplicate a layer if napari
+            # partially completed the first constructor call.
+            layer = self.viewer.add_points(
                 coords_arr,
                 size=sizes_arr,
                 face_color=colors_arr,
@@ -2354,23 +2489,63 @@ class AceTreeApp:
                 name="Nuclei 3D",
                 scale=(z_scale, 1.0, 1.0),
                 opacity=0.7,
+                features=point_features,
             )
-            self._points_layer.features = {"name": display_names}
-            self._points_layer.text = {
-                "string": "{name}",
-                "color": "white",
-                "size": 10,
-            }
-            # Click callback for 3D selection
-            self._points_layer.mouse_drag_callbacks.append(self._on_3d_click)
+            self._points_layer = layer
+            configure_curated_points_layer(
+                layer,
+                callback=self._on_3d_click,
+                lock=self._make_curated_points_read_only,
+            )
         else:
-            self._points_layer.data = coords_arr
-            self._points_layer.size = sizes_arr
-            self._points_layer.face_color = colors_arr
-            self._points_layer.features = {"name": display_names}
+            # Retry text/callback setup before replacing marker state. A
+            # transient failure during initial creation must not leave this
+            # layer permanently non-interactive.
+            configure_curated_points_layer(
+                self._points_layer,
+                callback=self._on_3d_click,
+                lock=self._make_curated_points_read_only,
+            )
+            try:
+                completed = replace_points_layer(
+                    self._points_layer,
+                    data=coords_arr,
+                    size=sizes_arr,
+                    face_color=colors_arr,
+                    features=point_features,
+                )
+                if not completed:
+                    raise RuntimeError(
+                        "Centroid marker redraw failed; the previous "
+                        "complete marker set was restored"
+                    )
+            finally:
+                self._make_curated_points_read_only(self._points_layer)
+
+        # ``Nuclei 3D`` is a projection of the curated record, not an editing
+        # surface.  Keep custom click/label callbacks, but prevent napari's
+        # native point add/move/delete modes from creating marker-only edits.
+        self._make_curated_points_read_only(self._points_layer)
 
         # Ghost trail in 3D
         self._update_3d_trail()
+
+    @staticmethod
+    def _make_curated_points_read_only(layer) -> None:
+        """Lock a curated 3D marker layer without removing click callbacks."""
+
+        try:
+            layer.editable = False
+        except Exception:
+            pass
+        try:
+            layer.selected_data = set()
+        except Exception:
+            pass
+        try:
+            layer.mode = "pan_zoom"
+        except Exception:
+            pass
 
     def _update_3d_trail(self) -> None:
         """Update 3D ghost trail points for the selected cell's past positions."""
@@ -2386,7 +2561,7 @@ class AceTreeApp:
                 self._trail_points_layer.data = np.empty((0, 3))
             return
 
-        cell = self.manager.get_cell(cell_name)
+        cell = self.get_selected_cell()
         if cell is None:
             if self._trail_points_layer is not None:
                 self._trail_points_layer.data = np.empty((0, 3))
@@ -2443,8 +2618,9 @@ class AceTreeApp:
 
         Also supports relink pick mode and placement (track) mode in 3D.
 
-        This is a generator callback (yields once) so that napari properly
-        finalises the drag/pan cycle after the click is handled.
+        Picking happens on press, but selection/redraw is queued only after
+        mouse release so a camera drag cannot toggle a label or strand
+        napari's active drag generator.
         """
         if event.type != "mouse_press":
             return
@@ -2461,58 +2637,126 @@ class AceTreeApp:
             dims_displayed=dims_displayed,
             world=True,
         )
-        nuc = None
+        anchor = None
         if idx is not None and isinstance(idx, (int, np.integer)):
-            nuclei = self.manager.alive_nuclei_at(self.current_time)
-            if 0 <= idx < len(nuclei):
-                nuc = nuclei[idx]
-
-        # --- Relink pick mode (any click selects relink target) ---
-        # Defer callback via QTimer so napari finalises the click event
-        # before the modal confirmation dialog opens.
-        if self._relink_pick_mode and self._relink_pick_callback is not None:
-            if nuc is not None:
-                cb = self._relink_pick_callback
-                t = self.current_time
-                self.exit_relink_pick_mode()
-                from qtpy.QtCore import QTimer
-                QTimer.singleShot(0, lambda: cb(t, nuc))
-            yield  # release drag cycle
-            return
+            anchor = point_anchor(layer, int(idx))
+            if anchor is None:
+                # Compatibility with a layer created before anchor features
+                # were introduced; the next redraw will publish them.
+                nuclei = self.manager.alive_nuclei_at(self.current_time)
+                if 0 <= idx < len(nuclei):
+                    anchor = (self.current_time, nuclei[int(idx)].index)
 
         button = event.button  # 1 = left, 2 = right
+        time = self.current_time
+        history = getattr(self, "edit_history", None)
+        change_counter = getattr(history, "change_counter", None)
+        relink_callback = self._relink_pick_callback
+        mode_context = (
+            self._relink_pick_mode,
+            self._add_mode,
+            self._placement_mode,
+        )
 
-        # --- Placement / track mode (right-click places a nucleus) ---
-        # In 3D we cannot reliably determine the (x, y, z) data position
-        # from the click ray, so placement is only supported in 2D.
-        if self._placement_mode and button == 2:
+        if self._relink_pick_mode:
+            intent = "relink"
+        elif self._placement_mode and button == 2:
+            # A ray does not define one unambiguous placement depth.
+            intent = None
+        elif button == 2:
+            intent = "select"
+        else:
+            intent = "label"
+
+        press_pointer = pointer_position(event)
+        dragged = False
+        yield
+        while event.type == "mouse_move":
+            dragged = dragged or passed_drag_threshold(event, press_pointer)
             yield
+        dragged = dragged or passed_drag_threshold(event, press_pointer)
+        if dragged or intent is None:
             return
 
-        if button == 2:
-            # --- Right-click: select cell and show its label ---
-            if nuc is not None:
-                name = nuc.effective_name
-                if name:
-                    self._set_selection_from_nucleus(self.current_time, nuc)
-                    if self._viewer_integration:
-                        self._viewer_integration._shown_labels.add(name)
-                    self._update_3d_points()
-                    for lw in self._lineage_widgets:
-                        lw.refresh_selection()
-                    if self._lineage_list:
-                        self._lineage_list.refresh_selection()
-        else:
-            # --- Left-click: toggle label for clicked cell ---
-            if nuc is not None and self._viewer_integration:
-                name = nuc.effective_name or f"Nuc{nuc.index}"
-                if name in self._viewer_integration._shown_labels:
-                    self._viewer_integration._shown_labels.discard(name)
-                else:
-                    self._viewer_integration._shown_labels.add(name)
-                self._update_3d_points()
+        from qtpy.QtCore import QTimer
 
-        yield  # release drag cycle
+        QTimer.singleShot(
+            0,
+            lambda: self._apply_deferred_3d_click(
+                layer=layer,
+                intent=intent,
+                anchor=anchor,
+                time=time,
+                change_counter=change_counter,
+                relink_callback=relink_callback,
+                mode_context=mode_context,
+            ),
+        )
+
+    def _apply_deferred_3d_click(
+        self,
+        *,
+        layer,
+        intent: str,
+        anchor: tuple[int, int] | None,
+        time: int,
+        change_counter: int | None,
+        relink_callback,
+        mode_context: tuple[bool, bool, bool],
+    ) -> None:
+        """Apply a stable 3D pick after napari has closed the drag cycle."""
+
+        history = getattr(self, "edit_history", None)
+        if (
+            self._points_layer is not layer
+            or self.current_time != time
+            or getattr(history, "change_counter", None) != change_counter
+            or anchor is None
+            or anchor[0] != time
+        ):
+            return
+        nuc = self._nucleus_at_anchor(anchor)
+        if nuc is None or not nuc.is_alive:
+            return
+
+        if intent == "relink":
+            if (
+                not self._relink_pick_mode
+                or self._relink_pick_callback is not relink_callback
+                or relink_callback is None
+            ):
+                return
+            self.exit_relink_pick_mode()
+            self._run_edit_action(relink_callback, time, nuc)
+            return
+
+        current_modes = (
+            self._relink_pick_mode,
+            self._add_mode,
+            self._placement_mode,
+        )
+        if current_modes != mode_context:
+            return
+
+        if intent == "select":
+            self._set_selection_from_nucleus(time, nuc)
+            if self._viewer_integration:
+                display_name = nuc.effective_name or f"Nuc{nuc.index}"
+                self._viewer_integration._shown_labels.add(display_name)
+            self._update_3d_points()
+            for lineage_widget in self._lineage_widgets:
+                lineage_widget.refresh_selection()
+            if self._lineage_list:
+                self._lineage_list.refresh_selection()
+            return
+
+        if intent == "label" and self._viewer_integration:
+            name = nuc.effective_name or f"Nuc{nuc.index}"
+            if name in self._viewer_integration._shown_labels:
+                self._viewer_integration._shown_labels.discard(name)
+            else:
+                self._viewer_integration._shown_labels.add(name)
+            self._update_3d_points()
 
     # ── Display ───────────────────────────────────────────────────
 
@@ -2553,8 +2797,18 @@ class AceTreeApp:
             try:
                 if win.isVisible():
                     win.refresh()
-            except RuntimeError:
-                pass  # window was deleted
+            except RuntimeError as error:
+                # Qt raises RuntimeError when its C++ widget was deleted.
+                # Other RuntimeErrors (including an atomic centroid redraw
+                # rollback) are real refresh failures and must reach the
+                # post-commit warning boundary instead of being hidden.
+                message = str(error).lower()
+                deleted_qt_object = (
+                    "deleted" in message
+                    and ("c/c++ object" in message or "c++ object" in message)
+                )
+                if not deleted_qt_object:
+                    raise
 
     def _update_display_plane_only(self) -> None:
         """Refresh only z-plane-sensitive components (skip lineage tree).
@@ -2581,7 +2835,7 @@ class AceTreeApp:
         if not self.current_cell_name:
             return "No cell selected"
 
-        cell = self.manager.get_cell(self.current_cell_name)
+        cell = self.get_selected_cell()
         if cell is None:
             return f"Cell '{self.current_cell_name}' not in lineage tree"
 
@@ -2642,12 +2896,20 @@ class AceTreeApp:
                 "selected_idx": -1,
             }
 
+        resolved_selection = self.get_selected_nucleus(self.current_time)
+        selected_nucleus = (
+            resolved_selection[0]
+            if resolved_selection is not None
+            and resolved_selection[1] == self.current_time
+            else None
+        )
+
         # Pre-compute visualization-mode colors for the whole frame
         # (batched for efficiency; skipped in editing mode).
         if self._viz_mode:
             viz_colors = self.color_engine.colors_for_frame(
                 nuclei, self.manager, self.current_time,
-                selected_name=self.current_cell_name,
+                selected_name="",
             )
 
         centers = []
@@ -2667,16 +2929,20 @@ class AceTreeApp:
             radii.append(diam / 2.0)
             ename = nuc.effective_name or f"Nuc{nuc.index}"
             names.append(ename)
+            is_selected = nuc is selected_nucleus
 
             if self._viz_mode:
                 # Visualization mode — rule-engine colors
-                r, g, b, a = viz_colors[viz_idx]
+                if is_selected:
+                    r, g, b, a = self.color_engine.selected_color
+                else:
+                    r, g, b, a = viz_colors[viz_idx]
                 colors.append([r, g, b, a])
-                if ename == self.current_cell_name and ename:
+                if is_selected:
                     selected_idx = len(centers) - 1
             else:
                 # Editing mode — status-based palette
-                if ename == self.current_cell_name and ename:
+                if is_selected:
                     selected_idx = len(centers) - 1
                     colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
                 elif ename.startswith("Nuc"):
@@ -2857,6 +3123,7 @@ class AceTreeApp:
     def _on_edit(self) -> None:
         """Callback after any edit command — rebuild tree and refresh display."""
         cmd = self.edit_history.last_command
+        self._last_post_commit_refresh_error = None
         self._sync_tracking_provenance(cmd)
         is_structural = cmd is None or cmd.structural
 
@@ -2883,7 +3150,55 @@ class AceTreeApp:
             if self._lineage_list:
                 self._lineage_list.rebuild()
 
-        self.update_display()
+        # Rendering is an observer of the curated data, not part of the edit
+        # transaction. At this point the command, revision, provenance, and
+        # undo entry have already committed. Do not let a napari/layer redraw
+        # failure masquerade as a rejected edit (which can leave a cyan draft
+        # drawn over the newly curated marker).
+        try:
+            self.update_display()
+        except Exception as error:
+            self._report_committed_refresh_failure(cmd, error)
+
+    def _report_committed_refresh_failure(self, command, error: Exception) -> None:
+        """Surface an observer failure without changing committed edit state."""
+
+        self._last_post_commit_refresh_error = error
+        description = command.description if command is not None else "Edit"
+        message = (
+            "The data change is committed and undoable, but the display "
+            "refresh failed. Refresh the view before continuing."
+        )
+        logger.warning(
+            "Post-commit refresh failed after %s",
+            description,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        self._say(message)
+
+    def _run_edit_action(self, action, *args, **kwargs):
+        """Run a GUI edit action without replaying a committed command.
+
+        A PostCommitCallbackError means the data and undo entry already
+        exist. Retrying the action would create duplicate nuclei or links;
+        only rebuild/redraw observers are safe to retry.
+        """
+
+        try:
+            return action(*args, **kwargs)
+        except PostCommitCallbackError as error:
+            command = error.command
+            self._report_committed_refresh_failure(
+                command,
+                error.__cause__ or error,
+            )
+            try:
+                self._on_edit()
+            except Exception as retry_error:
+                self._report_committed_refresh_failure(command, retry_error)
+            # Undo/redo normally return the affected command. Preserve that
+            # contract so the UI reports the operation that already committed.
+            return command
 
     # ── Multi-panel lineage management ──────────────────────────
 
@@ -3194,7 +3509,7 @@ class AceTreeApp:
         deleted_at_time = self.current_time
 
         cmd = RemoveNucleus(time=deleted_at_time, index=index)
-        self.edit_history.do(cmd)
+        self._run_edit_action(self.edit_history.do, cmd)
         _say(f"Removed nucleus at t={deleted_at_time} idx={index}")
 
         # Chain-delete UX: step the view back one timepoint and re-anchor
@@ -3305,11 +3620,11 @@ class AceTreeApp:
 
         @self.viewer.bind_key("Control-z")
         def _undo(viewer):
-            self.edit_history.undo()
+            self._run_edit_action(self.edit_history.undo)
 
         @self.viewer.bind_key("Control-y")
         def _redo(viewer):
-            self.edit_history.redo()
+            self._run_edit_action(self.edit_history.redo)
 
         @self.viewer.bind_key("3")
         def _toggle_3d(viewer):

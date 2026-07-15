@@ -21,6 +21,23 @@ from .commands import EditCommand, NucleiRecord
 logger = logging.getLogger(__name__)
 
 
+class PostCommitCallbackError(RuntimeError):
+    """The edit committed, but the post-commit callback failed.
+
+    This exception deliberately distinguishes an observer/UI refresh failure
+    from a command execution failure.  By the time it is raised, the data and
+    undo/redo stacks already represent the requested operation.
+    """
+
+    def __init__(self, operation: str, command: EditCommand) -> None:
+        self.operation = operation
+        self.command = command
+        super().__init__(
+            f"{operation.capitalize()} committed, but the post-commit "
+            f"callback failed: {command.description}"
+        )
+
+
 @dataclass(frozen=True)
 class _HistoryEntry:
     """A command edge between two unique document states."""
@@ -101,8 +118,7 @@ class EditHistory:
 
         logger.info("Executed: %s", command.description)
         self.last_command = command
-        if self.on_edit:
-            self.on_edit()
+        self._notify_post_commit("do", command)
 
     def undo(self) -> EditCommand | None:
         """Undo the most recent command.
@@ -124,8 +140,7 @@ class EditHistory:
 
         logger.info("Undid: %s", command.description)
         self.last_command = command
-        if self.on_edit:
-            self.on_edit()
+        self._notify_post_commit("undo", command)
         return command
 
     def redo(self) -> EditCommand | None:
@@ -148,8 +163,7 @@ class EditHistory:
 
         logger.info("Redid: %s", command.description)
         self.last_command = command
-        if self.on_edit:
-            self.on_edit()
+        self._notify_post_commit("redo", command)
         return command
 
     @property
@@ -231,3 +245,12 @@ class EditHistory:
     def _sync_modified(self) -> None:
         """Keep the compatibility flag aligned with the current savepoint."""
         self.modified = self._current_state != self._saved_state
+
+    def _notify_post_commit(self, operation: str, command: EditCommand) -> None:
+        """Run ``on_edit`` while preserving the command's committed status."""
+        if not self.on_edit:
+            return
+        try:
+            self.on_edit()
+        except Exception as error:
+            raise PostCommitCallbackError(operation, command) from error

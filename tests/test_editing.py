@@ -29,7 +29,7 @@ from acetree_py.editing.commands import (
     _remove_successor,
     _walk_continuation_chain,
 )
-from acetree_py.editing.history import EditHistory
+from acetree_py.editing.history import EditHistory, PostCommitCallbackError
 from acetree_py.editing.validators import (
     validate_add_nucleus,
     validate_kill_cell,
@@ -1072,6 +1072,84 @@ class TestEditHistory:
 
         history.redo()
         assert callback_count[0] == 3
+
+    def test_do_callback_failure_reports_committed_state(self):
+        record = _simple_record()
+        command = MoveNucleus(time=1, index=1, new_x=10)
+
+        def fail_after_commit():
+            raise ValueError("display refresh failed")
+
+        history = EditHistory(record, on_edit=fail_after_commit)
+        initial_revision = history.revision
+
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.do(command)
+
+        assert caught.value.operation == "do"
+        assert caught.value.command is command
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert "committed" in str(caught.value).lower()
+        assert record[0][0].x == 10
+        assert history.revision != initial_revision
+        assert history.change_counter == 1
+        assert history.can_undo
+        assert not history.can_redo
+        assert history.modified
+        assert history.last_command is command
+
+    def test_undo_callback_failure_reports_committed_state(self):
+        record = _simple_record()
+        command = MoveNucleus(time=1, index=1, new_x=10)
+        history = EditHistory(record)
+        initial_revision = history.revision
+        history.do(command)
+
+        def fail_after_commit():
+            raise ValueError("display refresh failed")
+
+        history.on_edit = fail_after_commit
+
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.undo()
+
+        assert caught.value.operation == "undo"
+        assert caught.value.command is command
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert record[0][0].x == 100
+        assert history.revision == initial_revision
+        assert history.change_counter == 2
+        assert not history.can_undo
+        assert history.can_redo
+        assert not history.modified
+        assert history.last_command is command
+
+    def test_redo_callback_failure_reports_committed_state(self):
+        record = _simple_record()
+        command = MoveNucleus(time=1, index=1, new_x=10)
+        history = EditHistory(record)
+        history.do(command)
+        edited_revision = history.revision
+        history.undo()
+
+        def fail_after_commit():
+            raise ValueError("display refresh failed")
+
+        history.on_edit = fail_after_commit
+
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.redo()
+
+        assert caught.value.operation == "redo"
+        assert caught.value.command is command
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert record[0][0].x == 10
+        assert history.revision == edited_revision
+        assert history.change_counter == 3
+        assert history.can_undo
+        assert not history.can_redo
+        assert history.modified
+        assert history.last_command is command
 
     def test_max_history(self):
         record = _simple_record()

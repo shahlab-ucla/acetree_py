@@ -668,7 +668,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
             return
 
         command = SetBodyAxes(self.app.manager, frame)
-        self.app.edit_history.do(command)
+        self._run_edit_action(self.app.edit_history.do, command)
         self._status_label.setText(
             f"Applied manual body axes from t={reference_time} "
             f"({frame.quality:.0%} geometry quality). "
@@ -810,8 +810,17 @@ class EditPanel(QWidget):  # type: ignore[misc]
 
     # ── Undo/Redo handlers ──────────────────────────────────────
 
+    def _run_edit_action(self, action, *args, **kwargs):
+        """Route history actions through AceTree's post-commit boundary."""
+
+        runner = getattr(self.app, "_run_edit_action", None)
+        if callable(runner):
+            return runner(action, *args, **kwargs)
+        # Lightweight third-party/test apps predating the safety boundary.
+        return action(*args, **kwargs)
+
     def _on_undo(self) -> None:
-        cmd = self.app.edit_history.undo()
+        cmd = self._run_edit_action(self.app.edit_history.undo)
         if cmd:
             self._status_label.setText(f"Undid: {cmd.description}")
         else:
@@ -819,7 +828,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self.refresh()
 
     def _on_redo(self) -> None:
-        cmd = self.app.edit_history.redo()
+        cmd = self._run_edit_action(self.app.edit_history.redo)
         if cmd:
             self._status_label.setText(f"Redid: {cmd.description}")
         else:
@@ -988,7 +997,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
         from ..editing.commands import RemoveNucleus
 
         cmd = RemoveNucleus(time=time, index=index)
-        self.app.edit_history.do(cmd)
+        self._run_edit_action(self.app.edit_history.do, cmd)
         self._status_label.setText(f"Done: {cmd.description}")
         self.refresh()
 
@@ -1017,12 +1026,45 @@ class EditPanel(QWidget):  # type: ignore[misc]
             new_z=new_z,
             new_size=new_size,
         )
-        self.app.edit_history.do(cmd)
 
+        # A Z nudge changes both the nucleus and the slice used to display it.
+        # Establish the final navigation state *before* EditHistory invokes the
+        # post-edit display callback.  Calling set_plane() afterward used to
+        # render once on the old slice and then again on the new slice, which
+        # could leave partially replaced/overlapping centroid markers while
+        # napari was processing the first redraw.
+        old_plane = self.app.current_plane
+        old_tracking = self.app.tracking
+        plane_changed = False
         if dz:
-            new_plane = max(1, round(new_z))
-            if new_plane != self.app.current_plane:
-                self.app.set_plane(new_plane)
+            max_planes = (
+                self.app.image_provider.num_planes
+                if self.app.image_provider is not None
+                else 30
+            )
+            new_plane = max(1, min(round(new_z), max_planes))
+            plane_changed = new_plane != old_plane
+            if plane_changed:
+                self.app.current_plane = new_plane
+                # Match set_plane(): manual Z navigation freezes automatic
+                # slice following without clearing the selected cell.
+                self.app.tracking = False
+
+        change_counter = getattr(self.app.edit_history, "change_counter", None)
+        try:
+            self._run_edit_action(self.app.edit_history.do, cmd)
+        except Exception:
+            # A command-execution failure must not move the viewer.  A changed
+            # counter means the edit did commit and only its post-commit
+            # callback failed, so retain the final plane in that case.
+            committed = (
+                change_counter is not None
+                and self.app.edit_history.change_counter != change_counter
+            )
+            if plane_changed and not committed:
+                self.app.current_plane = old_plane
+                self.app.tracking = old_tracking
+            raise
 
         parts = []
         if dx:
@@ -1087,7 +1129,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
                         time_a=time, index_a=index,
                         time_b=other_t, index_b=other_j,
                     )
-                    self.app.edit_history.do(swap_cmd)
+                    self._run_edit_action(self.app.edit_history.do, swap_cmd)
                     self._status_label.setText(f"Done: {swap_cmd.description}")
                     self.refresh()
                 else:
@@ -1098,7 +1140,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
             return
 
         cmd = RenameCell(time=time, index=index, new_name=new_name)
-        self.app.edit_history.do(cmd)
+        self._run_edit_action(self.app.edit_history.do, cmd)
         self._status_label.setText(f"Done: {cmd.description}")
         self.refresh()
 
@@ -1117,7 +1159,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
         from ..editing.commands import ClearNameOverride
 
         cmd = ClearNameOverride(time=time, index=index)
-        self.app.edit_history.do(cmd)
+        self._run_edit_action(self.app.edit_history.do, cmd)
         self._status_label.setText(f"Done: {cmd.description}")
         self.refresh()
 
@@ -1165,7 +1207,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
                 end_time=values["end_time"],
                 anchor_index=anchor_nuc.index,
             )
-            self.app.edit_history.do(cmd)
+            self._run_edit_action(self.app.edit_history.do, cmd)
             self._status_label.setText(f"Done: {cmd.description}")
             self.refresh()
 
@@ -1243,7 +1285,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
             from ..editing.commands import ResurrectCell
 
             cmd = ResurrectCell(time=time, index=index, identity=identity)
-            self.app.edit_history.do(cmd)
+            self._run_edit_action(self.app.edit_history.do, cmd)
             self._status_label.setText(f"Done: {cmd.description}")
             self.refresh()
 
@@ -1341,7 +1383,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
             cmd = RelinkNucleus(
                 time=late_time, index=late_index, new_predecessor=early_index,
             )
-            self.app.edit_history.do(cmd)
+            self._run_edit_action(self.app.edit_history.do, cmd)
             self._status_label.setText(f"Done: {cmd.description}")
             self.refresh()
         else:
@@ -1379,7 +1421,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
                 end_time=late_time,
                 end_index=late_index,
             )
-            self.app.edit_history.do(cmd)
+            self._run_edit_action(self.app.edit_history.do, cmd)
             self._status_label.setText(f"Done: {cmd.description}")
             self.refresh()
 

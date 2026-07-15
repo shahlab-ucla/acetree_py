@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import logging
 import math
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import numpy as np
 from qtpy.QtCore import QTimer, Qt
 from qtpy.QtGui import QCursor
 from qtpy.QtWidgets import QLabel
+
+from .marker_layers import passed_drag_threshold, pointer_position
 
 if TYPE_CHECKING:
     from ..tracking.api import Calibration, Detection, TrackingResult
@@ -83,7 +86,11 @@ class ViewerIntegration:
         # Hover tooltip for cell info
         self._tooltip: QLabel | None = None
         self._tooltip_timer: QTimer | None = None
+        # A display name can be both mutable and temporarily non-unique while
+        # a lineage is being corrected. Keep it for display compatibility,
+        # but identify the hovered nucleus by its concrete record position.
         self._last_hover_name: str | None = None
+        self._last_hover_anchor: tuple[int, int] | None = None
         self._hover_delay_ms: int = 300  # ms before tooltip appears
 
     def setup_layers(self) -> None:
@@ -106,6 +113,7 @@ class ViewerIntegration:
         )
         # Clear the dummy
         self._shapes_layer.data = []
+        self._make_curated_layer_read_only(self._shapes_layer)
 
         # Connect mouse callback for click-to-select / label toggle
         self._shapes_layer.mouse_drag_callbacks.append(self._on_click)
@@ -193,6 +201,7 @@ class ViewerIntegration:
         """Keep the Nuclei shapes layer as the active layer."""
         viewer = self.app.viewer
         if viewer is not None and self._shapes_layer is not None:
+            self._make_curated_layer_read_only(self._shapes_layer)
             try:
                 viewer.layers.selection.active = self._shapes_layer
             except Exception:
@@ -206,20 +215,22 @@ class ViewerIntegration:
         # Detector rings are Z-slice intersections, so normal plane scrubbing
         # must recompute them through the same refresh path as curated nuclei.
         self._update_detector_preview()
-        overlay = self.app.get_nucleus_overlay_data()
 
         if self._shapes_layer is None:
+            # Preview-only harnesses and partially constructed viewers can
+            # legitimately have no curated layer. Auxiliary layers still need
+            # their ordinary cleanup, but no curated overlay payload is needed.
+            self._update_division_line()
+            self._update_ghost_trail()
             return
+
+        overlay = self.app.get_nucleus_overlay_data()
 
         centers = overlay["centers"]
         radii = overlay["radii"]
         colors = overlay["colors"]
         names = overlay["names"]
         selected_idx = overlay["selected_idx"]
-
-        if len(centers) == 0:
-            self._shapes_layer.data = []
-            return
 
         # Build polygon circle data for napari Shapes layer.
         # Using polygons instead of bounding-box ellipses ensures perfect
@@ -240,10 +251,6 @@ class ViewerIntegration:
             polygons.append(circle)
             edge_colors.append(colors[i])
             face_colors.append([0, 0, 0, 0])  # Transparent fill
-
-        if not polygons:
-            self._shapes_layer.data = []
-            return
 
         # Rebuild selected_idx after skipping tiny circles
         # (selected_idx from overlay refers to the pre-filter list)
@@ -276,34 +283,134 @@ class ViewerIntegration:
                 else:
                     filtered_names.append("")
 
-        try:
-            # Clear and re-add shapes
-            self._shapes_layer.data = []
-            self._shapes_layer.add(
+        if self._shapes_layer is not None:
+            self._replace_curated_shapes(
                 polygons,
-                shape_type="polygon",
-                edge_color=edge_colors,
-                face_color=face_colors,
-                edge_width=edge_widths,
+                edge_colors,
+                face_colors,
+                edge_widths,
+                filtered_names,
             )
 
-            # Add text labels for named nuclei
-            if filtered_names:
-                self._shapes_layer.text = {
-                    "string": filtered_names,
-                    "color": "white",
-                    "size": 8,
-                    "anchor": "upper_left",
-                }
-        except Exception as e:
-            # Shapes layer can be finicky with empty/mismatched data
-            logger.debug("Error updating shapes layer: %s", e)
-
         # ── Feature 3: division line for active cell's daughters ──
+        # These refreshes are deliberately unconditional. Empty frames and
+        # planes with no projected centroid still need to clear stale daughter
+        # lines and trail rings left by the previous view.
         self._update_division_line()
 
         # ── Ghost trail for selected cell ──
         self._update_ghost_trail()
+
+    def _replace_curated_shapes(
+        self,
+        polygons: list[np.ndarray],
+        edge_colors: list,
+        face_colors: list,
+        edge_widths: np.ndarray,
+        filtered_names: list[str],
+    ) -> None:
+        """Replace the 2D centroid layer, rolling back an incomplete add.
+
+        Napari mutates a Shapes layer while ``add`` is in progress. If it
+        rejects a color, width, or text payload after adding some geometry,
+        simply logging the exception leaves a partially redrawn centroid
+        layer. Snapshot the complete presentation state first and restore it
+        directly on any failure so the user sees either the old frame or the
+        complete new frame, never a mixture.
+        """
+
+        layer = self._shapes_layer
+        if layer is None:
+            return
+        previous = self._snapshot_curated_shapes(layer)
+        try:
+            layer.data = []
+            if polygons:
+                layer.add(
+                    polygons,
+                    shape_type="polygon",
+                    edge_color=edge_colors,
+                    face_color=face_colors,
+                    edge_width=edge_widths,
+                )
+            layer.text = {
+                "string": list(filtered_names),
+                "color": "white",
+                "size": 8,
+                "anchor": "upper_left",
+            }
+        except Exception as error:
+            try:
+                self._restore_curated_shapes(layer, previous)
+            except Exception as restore_error:
+                logger.exception(
+                    "Could not restore the prior complete centroid overlay"
+                )
+                raise RuntimeError(
+                    "Centroid overlay redraw and rollback both failed; "
+                    "refresh the view before editing"
+                ) from restore_error
+            else:
+                logger.warning(
+                    "Centroid overlay redraw failed; restored the prior "
+                    "complete marker set: %s",
+                    error,
+                )
+                raise RuntimeError(
+                    "Centroid overlay redraw failed; the previous complete "
+                    "marker set was restored"
+                ) from error
+        finally:
+            # Shapes.add can re-enable native editing even if the layer was
+            # locked before the redraw, so enforce the curation boundary after
+            # both success and rollback.
+            self._make_curated_layer_read_only(layer)
+
+    @staticmethod
+    def _snapshot_curated_shapes(layer) -> dict:
+        """Capture geometry and parallel presentation arrays for rollback."""
+
+        text = getattr(layer, "text", None)
+        if hasattr(text, "dict"):
+            text = text.dict()
+        return {
+            "data": [np.array(shape, copy=True) for shape in layer.data],
+            "shape_type": deepcopy(getattr(layer, "shape_type", [])),
+            "edge_color": deepcopy(getattr(layer, "edge_color", [])),
+            "face_color": deepcopy(getattr(layer, "face_color", [])),
+            "edge_width": deepcopy(getattr(layer, "edge_width", [])),
+            "text": deepcopy(text),
+        }
+
+    @staticmethod
+    def _restore_curated_shapes(layer, snapshot: dict) -> None:
+        """Restore a centroid-layer snapshot without invoking ``add`` again."""
+
+        layer.data = [np.array(shape, copy=True) for shape in snapshot["data"]]
+        if snapshot["data"]:
+            layer.shape_type = deepcopy(snapshot["shape_type"])
+            layer.edge_color = deepcopy(snapshot["edge_color"])
+            layer.face_color = deepcopy(snapshot["face_color"])
+            layer.edge_width = deepcopy(snapshot["edge_width"])
+        if snapshot["text"] is not None:
+            layer.text = deepcopy(snapshot["text"])
+
+    @staticmethod
+    def _make_curated_layer_read_only(layer) -> None:
+        """Prevent napari-native edits while retaining AceTree click hooks."""
+
+        try:
+            layer.editable = False
+        except Exception:
+            pass
+        try:
+            layer.selected_data = set()
+        except Exception:
+            pass
+        try:
+            layer.mode = "pan_zoom"
+        except Exception:
+            pass
 
     def show_tracking_preview(
         self,
@@ -1236,7 +1343,12 @@ class ViewerIntegration:
         if not cell_name:
             return
 
-        cell = self.app.manager.get_cell(cell_name)
+        selection_resolver = getattr(self.app, "get_selected_cell", None)
+        cell = (
+            selection_resolver()
+            if callable(selection_resolver)
+            else self.app.manager.get_cell(cell_name)
+        )
         if cell is None:
             return
 
@@ -1292,7 +1404,12 @@ class ViewerIntegration:
         if not cell_name:
             return
 
-        cell = self.app.manager.get_cell(cell_name)
+        selection_resolver = getattr(self.app, "get_selected_cell", None)
+        cell = (
+            selection_resolver()
+            if callable(selection_resolver)
+            else self.app.manager.get_cell(cell_name)
+        )
         if cell is None:
             return
 
@@ -1387,10 +1504,9 @@ class ViewerIntegration:
         Left-click:  Toggle the clicked cell's label on/off.
         Right-click: Select the clicked cell and make it active (also shows label).
 
-        This is a generator callback (yields once) so that napari properly
-        finalises the drag/pan cycle after the click is handled.  Without
-        the yield, napari can get stuck in pan mode after actions like
-        relink confirmation that open modal dialogs.
+        The action is queued only after napari delivers mouse release and
+        closes this drag generator. Redrawing the active layer before release
+        can strand napari's generator and is one source of partial markers.
         """
         if event.type != "mouse_press":
             return
@@ -1401,59 +1517,184 @@ class ViewerIntegration:
             return
 
         # napari coords are (row, col) = (y, x)
-        y, x = coords[-2], coords[-1]
-
-        # Check for relink pick mode first (consumes any click).
-        # Defer the callback via QTimer so the yield happens first —
-        # the callback opens a modal dialog which would block napari's
-        # drag cycle finalisation and leave the canvas stuck in pan mode.
-        if self.app._relink_pick_mode:
-            nuc = self.app.manager.find_closest_nucleus(
-                x, y, float(self.app.current_plane), self.app.current_time,
-                require_hit=True, image_plane=self.app.current_plane,
-            )
-            if nuc is not None and self.app._relink_pick_callback is not None:
-                cb = self.app._relink_pick_callback
-                t = self.app.current_time
-                self.app.exit_relink_pick_mode()
-                QTimer.singleShot(0, lambda: cb(t, nuc))
-            yield  # release drag cycle
-            return
-
+        y, x = float(coords[-2]), float(coords[-1])
         button = event.button  # 1 = left, 2 = right
+        time = self.app.current_time
+        plane = self.app.current_plane
+        history = getattr(self.app, "edit_history", None)
+        change_counter = getattr(history, "change_counter", None)
+        selection_anchor = getattr(self.app, "selection_anchor", None)
+        current_name = getattr(self.app, "current_cell_name", "")
+        relink_callback = getattr(self.app, "_relink_pick_callback", None)
+        placement_context = (
+            getattr(self.app, "_placement_parent_name", None),
+            getattr(self.app, "_placement_parent_anchor", None),
+            getattr(self.app, "_placement_default_size", None),
+        )
+        mode_context = (
+            self.app._relink_pick_mode,
+            self.app._add_mode,
+            self.app._placement_mode,
+        )
 
-        # Check for add mode (consumes left-click)
-        if self.app._add_mode and button == 1:
-            self.app._handle_add_click(x, y)
-            yield
-            return
-
-        # Check for placement mode (consumes right-click)
-        if self.app._placement_mode and button == 2:
-            self.app._handle_placement_click(x, y)
-            yield
-            return
-
-        if button == 2:
-            # Right-click: select cell and show its label
-            self.app.select_cell_at_position(x, y)
-            if self.app.current_cell_name:
-                self._shown_labels.add(self.app.current_cell_name)
+        if self.app._relink_pick_mode:
+            intent = "relink"
+        elif self.app._add_mode and button == 1:
+            intent = "add"
+        elif self.app._placement_mode and button == 2:
+            intent = "track"
+        elif button == 2:
+            intent = "select"
         else:
-            # Left-click: toggle label for nearest cell without selecting
+            intent = "label"
+
+        target_anchor = None
+        if intent in {"relink", "select", "label"}:
             nuc = self.app.manager.find_closest_nucleus(
-                x, y, float(self.app.current_plane), self.app.current_time,
-                require_hit=True, image_plane=self.app.current_plane,
+                x,
+                y,
+                float(plane),
+                time,
+                require_hit=True,
+                image_plane=plane,
             )
             if nuc is not None:
-                name = nuc.effective_name or f"Nuc{nuc.index}"
-                if name in self._shown_labels:
-                    self._shown_labels.discard(name)
-                else:
-                    self._shown_labels.add(name)
-                self.update_overlays()
+                target_anchor = (time, nuc.index)
 
-        yield  # release drag cycle
+        press_pointer = pointer_position(event)
+        dragged = False
+        yield
+        while event.type == "mouse_move":
+            dragged = dragged or passed_drag_threshold(event, press_pointer)
+            yield
+        dragged = dragged or passed_drag_threshold(event, press_pointer)
+        if dragged:
+            return
+
+        QTimer.singleShot(
+            0,
+            lambda: self._apply_deferred_click(
+                layer=layer,
+                intent=intent,
+                x=x,
+                y=y,
+                time=time,
+                plane=plane,
+                change_counter=change_counter,
+                target_anchor=target_anchor,
+                selection_anchor=selection_anchor,
+                current_name=current_name,
+                relink_callback=relink_callback,
+                placement_context=placement_context,
+                mode_context=mode_context,
+            ),
+        )
+
+    def _apply_deferred_click(
+        self,
+        *,
+        layer,
+        intent: str,
+        x: float,
+        y: float,
+        time: int,
+        plane: int,
+        change_counter: int | None,
+        target_anchor: tuple[int, int] | None,
+        selection_anchor: tuple[int, int] | None,
+        current_name: str,
+        relink_callback,
+        placement_context: tuple,
+        mode_context: tuple[bool, bool, bool],
+    ) -> None:
+        """Run one click intent only if its press context is still current."""
+
+        app = self.app
+        history = getattr(app, "edit_history", None)
+        if (
+            self._shapes_layer is not layer
+            or app.current_time != time
+            or app.current_plane != plane
+            or getattr(history, "change_counter", None) != change_counter
+        ):
+            return
+
+        if intent == "relink":
+            if (
+                not app._relink_pick_mode
+                or app._relink_pick_callback is not relink_callback
+                or relink_callback is None
+                or target_anchor is None
+            ):
+                return
+            nuc = app._nucleus_at_anchor(target_anchor)
+            if nuc is None or not nuc.is_alive:
+                return
+            app.exit_relink_pick_mode()
+            runner = getattr(app, "_run_edit_action", None)
+            if callable(runner):
+                runner(relink_callback, time, nuc)
+            else:
+                relink_callback(time, nuc)
+            return
+
+        if intent == "add":
+            if (
+                not app._add_mode
+                or app.selection_anchor != selection_anchor
+                or app.current_cell_name != current_name
+            ):
+                return
+            app._handle_add_click(x, y)
+            return
+
+        if intent == "track":
+            current_context = (
+                app._placement_parent_name,
+                app._placement_parent_anchor,
+                app._placement_default_size,
+            )
+            if (
+                not app._placement_mode
+                or current_context != placement_context
+                or app.selection_anchor != selection_anchor
+            ):
+                return
+            app._handle_placement_click(x, y)
+            return
+
+        # Preserve the mode active at press (selection in Add and label
+        # toggling in Track are useful), but cancel if the workflow changed
+        # before the deferred action ran.
+        current_modes = (
+            app._relink_pick_mode,
+            app._add_mode,
+            app._placement_mode,
+        )
+        if current_modes != mode_context:
+            return
+
+        if intent == "select":
+            if target_anchor is None:
+                app.deselect_cell()
+                return
+            nuc = app._nucleus_at_anchor(target_anchor)
+            if nuc is None or not nuc.is_alive:
+                return
+            app._set_selection_from_nucleus(time, nuc)
+            app.update_display()
+            return
+
+        if intent == "label" and target_anchor is not None:
+            nuc = app._nucleus_at_anchor(target_anchor)
+            if nuc is None or not nuc.is_alive:
+                return
+            name = nuc.effective_name or f"Nuc{nuc.index}"
+            if name in self._shown_labels:
+                self._shown_labels.discard(name)
+            else:
+                self._shown_labels.add(name)
+            self.update_overlays()
 
     # ── Hover tooltip ─────────────────────────────────────────────
 
@@ -1508,9 +1749,12 @@ class ViewerIntegration:
             return
 
         name = nuc.effective_name or f"Nuc{nuc.index}"
+        anchor = (self.app.current_time, nuc.index)
 
-        # Same cell — tooltip already showing or timer already running
-        if name == self._last_hover_name and self._tooltip is not None and (
+        # Same physical nucleus -- tooltip already showing or timer running.
+        # Names cannot distinguish disconnected cells with duplicate forced
+        # names during manual lineage correction.
+        if anchor == self._last_hover_anchor and self._tooltip is not None and (
             self._tooltip.isVisible() or self._tooltip_timer.isActive()
         ):
             # Update position to follow cursor
@@ -1520,6 +1764,7 @@ class ViewerIntegration:
 
         # New cell — restart the delay timer
         self._last_hover_name = name
+        self._last_hover_anchor = anchor
         if self._tooltip_timer is not None:
             self._tooltip_timer.start(self._hover_delay_ms)
 
@@ -1530,7 +1775,10 @@ class ViewerIntegration:
 
         # Use app's existing cell info method if hovering over selected cell,
         # otherwise build a quick summary for the hovered cell
-        text = self._get_hover_info(self._last_hover_name)
+        text = self._get_hover_info(
+            self._last_hover_name,
+            hover_anchor=self._last_hover_anchor,
+        )
         if not text:
             self._hide_tooltip()
             return
@@ -1551,18 +1799,67 @@ class ViewerIntegration:
     def _hide_tooltip(self) -> None:
         """Hide the tooltip and cancel any pending timer."""
         self._last_hover_name = None
+        self._last_hover_anchor = None
         if self._tooltip_timer is not None:
             self._tooltip_timer.stop()
         if self._tooltip is not None:
             self._tooltip.hide()
 
-    def _get_hover_info(self, cell_name: str) -> str:
+    def _get_hover_info(
+        self,
+        cell_name: str,
+        *,
+        hover_anchor: tuple[int, int] | None = None,
+    ) -> str:
         """Build concise cell info text for hover tooltip.
 
         If the hovered cell is the currently selected cell, delegates to
         ``app.get_cell_info_text()`` for the full info. Otherwise builds
-        a shorter summary.
+        a shorter summary. ``cell_name`` remains supported for legacy callers;
+        the GUI supplies ``hover_anchor`` so duplicate names resolve to the
+        nucleus actually under the pointer.
         """
+        if hover_anchor is not None:
+            time, _ = hover_anchor
+            nucleus_resolver = getattr(self.app, "_nucleus_at_anchor", None)
+            nuc = (
+                nucleus_resolver(hover_anchor)
+                if callable(nucleus_resolver)
+                else None
+            )
+            if nuc is None or not getattr(nuc, "is_alive", True):
+                return ""
+
+            # The selection can be anchored at another time on the same
+            # lineage, so resolve it at the hovered time before comparing.
+            selected_resolver = getattr(self.app, "get_selected_nucleus", None)
+            selected = selected_resolver(time) if callable(selected_resolver) else None
+            if selected is not None and selected[0] is nuc:
+                return self.app.get_cell_info_text()
+            if (
+                selected is None
+                and getattr(self.app, "selection_anchor", None) == hover_anchor
+            ):
+                return self.app.get_cell_info_text()
+
+            cell_resolver = getattr(self.app, "_cell_for_nucleus", None)
+            cell = cell_resolver(time, nuc) if callable(cell_resolver) else None
+            if cell is None:
+                return cell_name
+
+            display_name = cell.name or cell_name
+            lines = [
+                display_name,
+                f"Position: ({nuc.x}, {nuc.y}, {nuc.z:.1f})",
+                f"Size: {nuc.size}",
+                f"Lifetime: t={cell.start_time} - {cell.end_time}",
+                f"Fate: {cell.end_fate.name}",
+            ]
+            if cell.children:
+                child_names = ", ".join(c.name for c in cell.children)
+                lines.append(f"Children: {child_names}")
+            return "\n".join(lines)
+
         # Full info for selected cell
         if cell_name == self.app.current_cell_name:
             return self.app.get_cell_info_text()

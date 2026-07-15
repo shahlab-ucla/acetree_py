@@ -19,6 +19,14 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from .marker_layers import (
+    configure_curated_points_layer,
+    passed_drag_threshold,
+    point_anchor,
+    pointer_position,
+    replace_points_layer,
+)
+
 if TYPE_CHECKING:
     from ..tracking.api import Calibration
     from .app import AceTreeApp
@@ -27,7 +35,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 try:
-    from qtpy.QtCore import Qt
+    from qtpy.QtCore import QTimer, Qt
     from qtpy.QtWidgets import (
         QCheckBox,
         QComboBox,
@@ -51,6 +59,17 @@ except ImportError:
 _CHANNEL_COLORMAPS = ["green", "magenta", "cyan", "yellow", "red", "blue"]
 
 
+def _document_change_counter(app) -> int | None:
+    """Return the monotonic edit token when the host app exposes one."""
+
+    history = getattr(app, "edit_history", None)
+    value = getattr(history, "change_counter", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class Viewer3DWindow(QWidget):  # type: ignore[misc]
     """A detached 3D viewer window synced to the main AceTree app.
 
@@ -72,6 +91,7 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
         self._points_layer = None
         self._trail_points_layer = None
         self._last_time: int = -1
+        self._last_change_counter: int | None = _document_change_counter(app)
         self._local_time: int = app.current_time
         self._shown_labels: set[str] = set()
         self._labels_visible: bool = True
@@ -473,10 +493,13 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
             return
 
         cur_time = self.view_time
-        if cur_time == self._last_time and not force:
+        change_counter = _document_change_counter(self.app)
+        if (
+            cur_time == self._last_time
+            and change_counter == getattr(self, "_last_change_counter", None)
+            and not force
+        ):
             return
-        self._last_time = cur_time
-
         # Update time controls
         self._time_spin.blockSignals(True)
         self._time_slider.blockSignals(True)
@@ -492,6 +515,12 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
         if callable(detector_updater):
             detector_updater()
 
+        # Cache only a fully rendered refresh. If any stack, marker, or
+        # preview update fails, leave the old tokens intact so the same frame
+        # is retried instead of being mistaken for successfully current.
+        self._last_time = cur_time
+        self._last_change_counter = change_counter
+
     def _update_points(self, timepoint: int | None = None) -> None:
         """Create/update 3D Points layer with visualization-mode colors."""
         if self._viewer is None:
@@ -501,6 +530,18 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
 
         nuclei = self.app.manager.alive_nuclei_at(timepoint)
         z_scale = self.app.manager.z_pix_res
+        selection_resolver = getattr(self.app, "get_selected_nucleus", None)
+        resolved_selection = (
+            selection_resolver(timepoint)
+            if callable(selection_resolver)
+            else None
+        )
+        selected_nucleus = (
+            resolved_selection[0]
+            if resolved_selection is not None
+            and resolved_selection[1] == timepoint
+            else None
+        )
 
         coords = []
         sizes = []
@@ -518,13 +559,42 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
                 nuclei,
                 self.app.manager,
                 timepoint,
-                selected_name=self.app.current_cell_name,
+                selected_name="",
             )
         ]
+        selected_color = list(
+            getattr(
+                self.app.color_engine,
+                "selected_color",
+                (1.0, 1.0, 1.0, 1.0),
+            )
+        )
+        for i, nuc in enumerate(nuclei):
+            if nuc is selected_nucleus:
+                colors[i] = selected_color
 
         if not coords:
             if self._points_layer is not None:
-                self._points_layer.data = np.empty((0, 3))
+                try:
+                    completed = replace_points_layer(
+                        self._points_layer,
+                        data=np.empty((0, 3)),
+                        size=np.empty(0),
+                        face_color=np.empty((0, 4)),
+                        features={
+                            "name": [],
+                            "full_name": [],
+                            "acetree_time": [],
+                            "acetree_index": [],
+                        },
+                    )
+                    if not completed:
+                        raise RuntimeError(
+                            "Centroid marker redraw failed; the previous "
+                            "complete marker set was restored"
+                        )
+                finally:
+                    self._make_curated_points_read_only(self._points_layer)
             self._update_trail(timepoint)
             return
 
@@ -539,9 +609,18 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
                 display_names.append(name)
             else:
                 display_names.append("")
+        point_features = {
+            "name": display_names,
+            "full_name": names_list,
+            "acetree_time": [timepoint] * len(nuclei),
+            "acetree_index": [nuc.index for nuc in nuclei],
+        }
 
         if self._points_layer is None:
-            self._points_layer = self._viewer.add_points(
+            # Create a single layer, then enforce read-only behavior. A broad
+            # TypeError retry could otherwise duplicate a partially created
+            # layer when the error was unrelated to ``editable`` support.
+            layer = self._viewer.add_points(
                 coords_arr,
                 size=sizes_arr,
                 face_color=colors_arr,
@@ -549,28 +628,56 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
                 name="Nuclei 3D",
                 scale=(z_scale, 1.0, 1.0),
                 opacity=0.8,
+                features=point_features,
             )
-            self._points_layer.features = {
-                "name": display_names,
-                "full_name": names_list,
-            }
-            self._points_layer.text = {
-                "string": "{name}",
-                "color": "white",
-                "size": 10,
-            }
-            # Click callback for label toggling
-            self._points_layer.mouse_drag_callbacks.append(self._on_click)
+            self._points_layer = layer
+            configure_curated_points_layer(
+                layer,
+                callback=self._on_click,
+                lock=self._make_curated_points_read_only,
+            )
         else:
-            self._points_layer.data = coords_arr
-            self._points_layer.size = sizes_arr
-            self._points_layer.face_color = colors_arr
-            self._points_layer.features = {
-                "name": display_names,
-                "full_name": names_list,
-            }
+            configure_curated_points_layer(
+                self._points_layer,
+                callback=self._on_click,
+                lock=self._make_curated_points_read_only,
+            )
+            try:
+                completed = replace_points_layer(
+                    self._points_layer,
+                    data=coords_arr,
+                    size=sizes_arr,
+                    face_color=colors_arr,
+                    features=point_features,
+                )
+                if not completed:
+                    raise RuntimeError(
+                        "Centroid marker redraw failed; the previous "
+                        "complete marker set was restored"
+                    )
+            finally:
+                self._make_curated_points_read_only(self._points_layer)
+
+        self._make_curated_points_read_only(self._points_layer)
 
         self._update_trail(timepoint)
+
+    @staticmethod
+    def _make_curated_points_read_only(layer) -> None:
+        """Lock curated points while retaining the label-click callback."""
+
+        try:
+            layer.editable = False
+        except Exception:
+            pass
+        try:
+            layer.selected_data = set()
+        except Exception:
+            pass
+        try:
+            layer.mode = "pan_zoom"
+        except Exception:
+            pass
 
     def _stack_z_from_plane(self, plane: float) -> float:
         """Translate an absolute AceTree plane to this stack's local Z index."""
@@ -584,29 +691,69 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
 
     def _on_click(self, layer, event):
         """Handle click on 3D Points — left-click toggles cell label."""
-        if event.button != 1:  # left click only
-            yield
+        if event.type != "mouse_press":
             return
 
-        # Find clicked point index
+        button = event.button
         idx = layer.get_value(event.position, world=True)
-        if idx is None:
+        anchor = None
+        if idx is not None and isinstance(idx, (int, np.integer)):
+            anchor = point_anchor(layer, int(idx))
+            if anchor is None:
+                timepoint = self.view_time
+                nuclei = self.app.manager.alive_nuclei_at(timepoint)
+                if 0 <= idx < len(nuclei):
+                    anchor = (timepoint, nuclei[int(idx)].index)
+
+        timepoint = self.view_time
+        change_counter = _document_change_counter(self.app)
+        press_pointer = pointer_position(event)
+        dragged = False
+        yield
+        while event.type == "mouse_move":
+            dragged = dragged or passed_drag_threshold(event, press_pointer)
             yield
+        dragged = dragged or passed_drag_threshold(event, press_pointer)
+        if dragged or button != 1 or anchor is None:
             return
 
-        features = layer.features
-        if "full_name" not in features or idx >= len(features["full_name"]):
-            yield
-            return
+        QTimer.singleShot(
+            0,
+            lambda: self._apply_deferred_label_click(
+                layer=layer,
+                anchor=anchor,
+                timepoint=timepoint,
+                change_counter=change_counter,
+            ),
+        )
 
-        name = features["full_name"][idx]
+    def _apply_deferred_label_click(
+        self,
+        *,
+        layer,
+        anchor: tuple[int, int],
+        timepoint: int,
+        change_counter: int | None,
+    ) -> None:
+        """Toggle one stable label after the 3D camera drag has ended."""
+
+        if (
+            self._points_layer is not layer
+            or self.view_time != timepoint
+            or anchor[0] != timepoint
+            or _document_change_counter(self.app) != change_counter
+        ):
+            return
+        resolver = getattr(self.app, "_nucleus_at_anchor", None)
+        nuc = resolver(anchor) if callable(resolver) else None
+        if nuc is None or not nuc.is_alive:
+            return
+        name = nuc.effective_name or f"Nuc{nuc.index}"
         if name in self._shown_labels:
             self._shown_labels.discard(name)
         else:
             self._shown_labels.add(name)
-
         self._update_label_display()
-        yield
 
     def _update_trail(self, timepoint: int | None = None) -> None:
         """Update 3D ghost trail for the selected cell."""
@@ -624,7 +771,12 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
                 self._trail_points_layer.data = np.empty((0, 3))
             return
 
-        cell = self.app.manager.get_cell(cell_name)
+        selection_resolver = getattr(self.app, "get_selected_cell", None)
+        cell = (
+            selection_resolver()
+            if callable(selection_resolver)
+            else self.app.manager.get_cell(cell_name)
+        )
         if cell is None:
             if self._trail_points_layer is not None:
                 self._trail_points_layer.data = np.empty((0, 3))
