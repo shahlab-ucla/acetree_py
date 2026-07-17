@@ -35,7 +35,7 @@ class PreviewLink:
 
     source_id: str
     target_id: str
-    kind: str  # ``link`` or ``gap``
+    kind: str  # ``link``, ``gap``, or ``split``
     cost: float
 
 
@@ -60,6 +60,7 @@ class ExpandedTrackingPreview:
     candidates: tuple[PreviewSpot, ...] = ()
     outcome_code: str | None = None
     search_region: PreviewSearchRegion | None = None
+    split_event_count: int = 0
 
     @property
     def by_id(self) -> dict[str, PreviewSpot]:
@@ -82,6 +83,11 @@ class ExpandedTrackingPreview:
     def candidate_count(self) -> int:
         """Number of explanatory observations that will not be committed."""
         return len(self.candidates)
+
+    @property
+    def split_count(self) -> int:
+        """Number of proposed division events represented by split links."""
+        return self.split_event_count
 
 
 def expand_tracking_preview(result: TrackingResult) -> ExpandedTrackingPreview:
@@ -182,7 +188,7 @@ def expand_tracking_preview(result: TrackingResult) -> ExpandedTrackingPreview:
             PreviewLink(
                 source_id=previous_id,
                 target_id=target.detection_id,
-                kind="gap" if edge.kind == "gap" else "link",
+                kind=edge.kind,
                 cost=edge.cost,
             )
         )
@@ -202,6 +208,9 @@ def expand_tracking_preview(result: TrackingResult) -> ExpandedTrackingPreview:
         candidates=tuple(candidates),
         outcome_code=None if outcome is None else outcome.code,
         search_region=search_region,
+        split_event_count=len(
+            {edge.source_id for edge in result.edges if edge.kind == "split"}
+        ),
     )
 
 

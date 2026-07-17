@@ -58,12 +58,14 @@ class TrackingWorkerRelay(QObject):
         progress_callback,
         success_callback,
         failure_callback,
+        finished_callback=None,
     ) -> None:
         super().__init__()
         self._run_id = int(run_id)
         self._progress_callback = progress_callback
         self._success_callback = success_callback
         self._failure_callback = failure_callback
+        self._finished_callback = finished_callback
 
     @Slot(int, int, str)
     def progress(self, done: int, total: int, message: str) -> None:
@@ -76,3 +78,10 @@ class TrackingWorkerRelay(QObject):
     @Slot(object)
     def failed(self, error: object) -> None:
         self._failure_callback(error, self._run_id)
+
+    @Slot()
+    def finished(self) -> None:
+        """Release the active-job guard after plugin code has really returned."""
+
+        if self._finished_callback is not None:
+            self._finished_callback()

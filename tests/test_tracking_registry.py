@@ -23,14 +23,37 @@ def test_builtin_registry_has_stable_ids_and_factories():
     assert [item.plugin_id for item in registry.detector_descriptors()] == [
         "acetree.dog3d",
         "acetree.log3d",
+        "acetree.starrynite_detector",
     ]
     assert [item.plugin_id for item in registry.tracker_descriptors()] == [
-        "acetree.simple_lap"
+        "acetree.simple_lap",
+        "acetree.starrynite_division",
+        "acetree.starrynite_legacy_exact",
     ]
     assert callable(registry.create_detector("acetree.log3d").detect)
     assert callable(registry.create_tracker("acetree.simple_lap").track)
     assert registry.default_settings("acetree.dog3d")["RADIUS"] == 4.0
     assert registry.default_settings("acetree.simple_lap")["MAX_FRAME_GAP"] == 2
+    assert (
+        registry.default_settings("acetree.starrynite_division")[
+            "ALLOW_TRACK_SPLITTING"
+        ]
+        is True
+    )
+    exact = registry.get_descriptor("acetree.starrynite_legacy_exact")
+    assert {
+        "global_only",
+        "whole_movie_preflight",
+        "whole_movie_refinement",
+        "legacy_exact_refinement",
+    } <= set(exact.capabilities)
+    assert (
+        registry.default_settings(exact.plugin_id)["STARRYNITE_COMPATIBILITY_MODE"]
+        == "legacy_exact_refinement"
+    )
+    exact_tracker = registry.create_tracker(exact.plugin_id)
+    assert callable(exact_tracker.preflight_movie)
+    assert callable(exact_tracker.refine_movie)
 
 
 def test_descriptor_enforces_id_kind_and_api_major():
@@ -50,6 +73,26 @@ def test_registry_rejects_duplicates_and_invalid_component():
         registry.register_detector(descriptor, lambda: object())
     with pytest.raises(TypeError, match="detect"):
         registry.create_detector("example.detector")
+
+
+def test_registry_rejects_tracker_missing_advertised_preflight_hook():
+    class Tracker:
+        def track(self, *_args):
+            return ()
+
+    registry = TrackingRegistry()
+    registry.register_tracker(
+        ComponentDescriptor(
+            "example.preflight",
+            "tracker",
+            "Incomplete preflight tracker",
+            capabilities=("whole_movie_preflight",),
+        ),
+        Tracker,
+    )
+
+    with pytest.raises(TypeError, match="does not expose preflight_movie"):
+        registry.create_tracker("example.preflight")
 
 
 def test_entry_point_discovery_isolated_and_validated(monkeypatch):

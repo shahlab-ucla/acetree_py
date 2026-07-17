@@ -296,6 +296,9 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             self._refresh_tracking_validation
         )
         self._tracking_tracker_combo.currentIndexChanged.connect(
+            self._tracking_tracker_changed
+        )
+        self._tracking_division_check.toggled.connect(
             self._refresh_tracking_validation
         )
 
@@ -319,6 +322,69 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         )
         self._refresh_tracking_validation()
 
+    def _tracking_tracker_changed(self, *_args) -> None:
+        self._sync_tracking_division_capability(use_default=True)
+        self._refresh_tracking_validation()
+
+    def _sync_tracking_division_capability(
+        self,
+        *,
+        use_default: bool = True,
+    ) -> None:
+        """Match the division choice to the selected tracker's contract."""
+
+        from ..tracking.registry import get_default_registry
+
+        tracker_id = self._tracking_tracker_combo.currentData()
+        capable = False
+        default = False
+        display_name = self._tracking_tracker_combo.currentText() or "Selected tracker"
+        if tracker_id is not None:
+            try:
+                registry = get_default_registry()
+                descriptor = registry.get_descriptor(str(tracker_id))
+                schema = descriptor.settings_schema
+                capabilities = {
+                    str(capability).strip().lower()
+                    for capability in descriptor.capabilities
+                }
+                capable = (
+                    "splitting" in capabilities
+                    and "ALLOW_TRACK_SPLITTING" in schema
+                )
+                default = bool(
+                    registry.default_settings(str(tracker_id)).get(
+                        "ALLOW_TRACK_SPLITTING",
+                        False,
+                    )
+                )
+            except (KeyError, ValueError):
+                capable = False
+
+        self._tracking_division_check.setEnabled(capable)
+        if not capable:
+            self._tracking_division_check.setChecked(False)
+        elif use_default:
+            self._tracking_division_check.setChecked(default)
+        self._tracking_division_check.setToolTip(
+            "Include proposed two-daughter branches in the uncommitted draft. "
+            "Every division must still be reviewed before acceptance."
+            if capable
+            else "The selected tracker does not support two-daughter divisions."
+        )
+        if capable:
+            self._tracking_capability_label.setText(
+                f"{display_name} can propose two-daughter divisions. Keep the "
+                "division option on to include them in the uncommitted review draft; "
+                "turn it off for continuation-only tracking. Merges are never enabled."
+            )
+        else:
+            self._tracking_capability_label.setText(
+                f"{display_name} links continuations and short gaps but does not "
+                "propose divisions or merges. Choose a division-aware tracker to "
+                "include reviewed two-daughter branches in the draft."
+            )
+
     def _tracking_validation_error(self) -> str:
         layout_error = self._image_layout_validation_error()
         if layout_error:
@@ -329,6 +395,11 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             return "No compatible detector is installed; choose Manual annotation."
         if self._tracking_tracker_combo.count() == 0:
             return "No compatible tracker is installed; choose Manual annotation."
+        if (
+            self._tracking_division_check.isChecked()
+            and not self._tracking_division_check.isEnabled()
+        ):
+            return "The selected tracker cannot propose divisions; turn divisions off."
 
         available = self._available_tracking_channels()
         channel = self._tracking_channel_spin.value()
@@ -507,6 +578,8 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
         self._tracking_tracker_combo = QComboBox()
         for descriptor in registry.tracker_descriptors():
+            if "global_only" in descriptor.capabilities:
+                continue
             self._tracking_tracker_combo.addItem(
                 descriptor.display_name,
                 descriptor.plugin_id,
@@ -555,19 +628,31 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         )
         settings.addRow("Missing frames allowed:", self._tracking_gap_spin)
 
+        self._tracking_division_check = QCheckBox(
+            "Propose two-daughter divisions for review"
+        )
+        self._tracking_division_check.setChecked(False)
+        self._tracking_division_check.setAccessibleName(
+            "Propose divisions in the initial tracking draft"
+        )
+        settings.addRow("Division handling:", self._tracking_division_check)
+
         self._tracking_settings_group.setEnabled(False)
         self._radio_tracking_auto.toggled.connect(
             self._tracking_settings_group.setEnabled
         )
         layout.addWidget(self._tracking_settings_group)
 
-        limitation = QLabel(
-            "Built-in prototype limitation: Simple LAP links continuations and short gaps, "
-            "but does not infer cell divisions or merges. Divisions remain a manual "
-            "curation step until the lineage-aware tracker is available."
+        self._tracking_capability_label = QLabel(
+            "Simple LAP links continuations and short gaps, but it does not propose "
+            "divisions or merges. Choose a division-aware tracker to include reviewed "
+            "two-daughter branches in the draft."
         )
-        limitation.setWordWrap(True)
-        layout.addWidget(limitation)
+        self._tracking_capability_label.setWordWrap(True)
+        self._tracking_capability_label.setAccessibleName(
+            "Selected tracker capabilities"
+        )
+        layout.addWidget(self._tracking_capability_label)
 
         self._tracking_validation_label = QLabel()
         self._tracking_validation_label.setWordWrap(True)
@@ -578,6 +663,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._tracking_validation_label.hide()
         layout.addWidget(self._tracking_validation_label)
         layout.addStretch()
+        self._sync_tracking_division_capability()
         return page
 
     def _build_page5_output(self) -> QWidget:
@@ -738,7 +824,9 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             f"{self._tracking_detector_combo.currentText()} + "
             f"{self._tracking_tracker_combo.currentText()} draft "
             f"(radius={self._tracking_radius_spin.value():g} µm, "
-            f"max displacement={self._tracking_link_distance_spin.value():g} µm)"
+            f"max displacement={self._tracking_link_distance_spin.value():g} µm, "
+            "divisions="
+            f"{'on' if self._tracking_division_check.isChecked() else 'off'})"
         )
 
     # ── Results ───────────────────────────────────────────────────
@@ -853,7 +941,6 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             "TARGET_CHANNEL": self._tracking_channel_spin.value(),
             "RADIUS": self._tracking_radius_spin.value(),
             "THRESHOLD": self._tracking_threshold_spin.value(),
-            "DO_SUBPIXEL_LOCALIZATION": True,
             "DO_MEDIAN_FILTERING": False,
         }
         tracker_common = {
@@ -861,7 +948,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             "ALLOW_GAP_CLOSING": gap_frames > 0,
             "GAP_CLOSING_MAX_DISTANCE": max_distance,
             "MAX_FRAME_GAP": gap_frames + 1 if gap_frames > 0 else 1,
-            "ALLOW_TRACK_SPLITTING": False,
+            "ALLOW_TRACK_SPLITTING": self._tracking_division_check.isChecked(),
             "ALLOW_TRACK_MERGING": False,
         }
         detector_schema = registry.get_descriptor(detector_id).settings_schema

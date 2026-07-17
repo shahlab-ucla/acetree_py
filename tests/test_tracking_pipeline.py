@@ -14,8 +14,11 @@ from acetree_py.tracking.api import (
     Calibration,
     ComponentSpec,
     Detection,
+    TrackEdge,
+    TrackerGraphResult,
     TrackingRequest,
     TrackingScope,
+    WholeMoviePreflightContext,
 )
 from acetree_py.tracking.pipeline import TrackingCancelled, TrackingPipeline
 from acetree_py.tracking.registry import build_default_registry
@@ -151,6 +154,217 @@ def test_global_pipeline_detects_and_links_moving_blob():
     assert result.existing_anchors == {}
     assert result.provenance["detector"]["plugin_id"] == "acetree.dog3d"
     assert result.outcome is None
+
+
+def test_global_pipeline_accepts_optional_classifier_graph_refinement(monkeypatch):
+    first = _review_candidate("first", frame=1, x_um=10.0)
+    artifact = _review_candidate("artifact", frame=1, x_um=20.0)
+    second = _review_candidate("second", frame=2, x_um=11.0)
+    pipeline = _pipeline()
+    detector = _FrameDetector({1: (first, artifact), 2: (second,)})
+
+    class Refiner:
+        def refine_graph(self, detections, settings):
+            assert {item.detection_id for item in detections} == {
+                "first",
+                "artifact",
+                "second",
+            }
+            return TrackerGraphResult(
+                detections=(first, second),
+                edges=(TrackEdge("first", "second", 0.25),),
+                rejected_detection_ids=("artifact",),
+                warnings=("classifier rejected one transient branch",),
+                provenance={"classifier_schema": "synthetic/v1"},
+            )
+
+    monkeypatch.setattr(pipeline.registry, "create_detector", lambda _plugin: detector)
+    monkeypatch.setattr(pipeline.registry, "create_tracker", lambda _plugin: Refiner())
+    result = pipeline.run(
+        NumpyProvider(np.zeros((2, 7, 25, 25), dtype=np.float32)),
+        Calibration(1.0, 1.0),
+        _request(TrackingScope("global", 1, 2)),
+    )
+
+    assert [item.detection_id for item in result.detections] == ["first", "second"]
+    assert [(item.source_id, item.target_id) for item in result.edges] == [
+        ("first", "second")
+    ]
+    assert result.warnings == ("classifier rejected one transient branch",)
+    assert result.provenance["graph_refinement"] == {
+        "rejected_detection_count": 1,
+        "classifier_schema": "synthetic/v1",
+    }
+
+
+def test_global_pipeline_supplies_scope_and_calibration_to_movie_refiner(monkeypatch):
+    first = _review_candidate("first", frame=1, x_um=10.0)
+    second = _review_candidate("second", frame=2, x_um=11.0)
+    pipeline = _pipeline()
+    detector = _FrameDetector({1: (first,), 2: (second,)})
+    calls = []
+
+    class MovieRefiner:
+        def refine_movie(
+            self,
+            detections,
+            settings,
+            *,
+            detector_spec,
+            calibration,
+            start_frame,
+            end_frame,
+            cancelled,
+            progress,
+        ):
+            calls.append(
+                (
+                    tuple(item.detection_id for item in detections),
+                    dict(settings),
+                    detector_spec,
+                    calibration,
+                    start_frame,
+                    end_frame,
+                    cancelled,
+                    progress,
+                )
+            )
+            return TrackerGraphResult(
+                detections=tuple(detections),
+                edges=(TrackEdge("first", "second", 0.5),),
+                provenance={"boundary": "whole_movie"},
+            )
+
+        def track(self, *_args):
+            pytest.fail("movie refinement fell back to edge-only tracking")
+
+    monkeypatch.setattr(pipeline.registry, "create_detector", lambda _plugin: detector)
+    monkeypatch.setattr(
+        pipeline.registry,
+        "create_tracker",
+        lambda _plugin: MovieRefiner(),
+    )
+    calibration = Calibration(0.25, 1.0)
+    request = _request(TrackingScope("global", 1, 2))
+    result = pipeline.run(
+        NumpyProvider(np.zeros((2, 7, 25, 25), dtype=np.float32)),
+        calibration,
+        request,
+    )
+
+    assert calls == [
+        (
+            ("first", "second"),
+            dict(request.tracker.settings),
+            request.detector,
+            calibration,
+            1,
+            2,
+            None,
+            None,
+        )
+    ]
+    assert result.provenance["graph_refinement"]["boundary"] == "whole_movie"
+
+
+def test_global_pipeline_runs_optional_preflight_before_first_detection(monkeypatch):
+    pipeline = _pipeline()
+    events = []
+    request = _request(TrackingScope("global", 1, 2))
+    calibration = Calibration(0.25, 1.0)
+
+    class RecordingDetector:
+        def detect(self, _stack, frame, _calibration, _settings):
+            events.append(("detect", frame))
+            return ()
+
+    class PreflightTracker:
+        def preflight_movie(self, settings, *, context):
+            assert isinstance(context, WholeMoviePreflightContext)
+            assert context.detector_spec is request.detector
+            assert context.calibration is calibration
+            assert context.scope is request.scope
+            assert context.source_num_timepoints == 2
+            assert context.source_num_channels == 1
+            assert context.target_channel == 0
+            assert dict(settings) == dict(request.tracker.settings)
+            events.append(("preflight", context.covers_complete_global_movie))
+
+        def track(self, _detections, _settings):
+            events.append(("track", None))
+            return ()
+
+    monkeypatch.setattr(
+        pipeline.registry, "create_detector", lambda _plugin: RecordingDetector()
+    )
+    monkeypatch.setattr(
+        pipeline.registry, "create_tracker", lambda _plugin: PreflightTracker()
+    )
+    pipeline.run(
+        NumpyProvider(np.zeros((2, 7, 25, 25), dtype=np.float32)),
+        calibration,
+        request,
+    )
+
+    assert events == [
+        ("preflight", True),
+        ("detect", 1),
+        ("detect", 2),
+        ("track", None),
+    ]
+
+
+def test_global_pipeline_preflight_failure_reads_no_image_stack(monkeypatch):
+    pipeline = _pipeline()
+    detector_calls = []
+
+    class Detector:
+        def detect(self, *_args):
+            detector_calls.append(True)
+            return ()
+
+    class RejectingTracker:
+        def preflight_movie(self, _settings, *, context):
+            assert context.covers_complete_global_movie
+            raise ValueError("source binding is invalid")
+
+        def track(self, *_args):
+            pytest.fail("tracking continued after a rejected preflight")
+
+    monkeypatch.setattr(pipeline.registry, "create_detector", lambda _plugin: Detector())
+    monkeypatch.setattr(
+        pipeline.registry, "create_tracker", lambda _plugin: RejectingTracker()
+    )
+    with pytest.raises(ValueError, match="source binding"):
+        pipeline.run(
+            NumpyProvider(np.zeros((2, 7, 25, 25), dtype=np.float32)),
+            Calibration(1.0, 1.0),
+            _request(TrackingScope("global", 1, 2)),
+        )
+
+    assert detector_calls == []
+
+
+def test_global_pipeline_rejects_incomplete_graph_refinement_accounting(monkeypatch):
+    first = _review_candidate("first", frame=1, x_um=10.0)
+    second = _review_candidate("second", frame=2, x_um=11.0)
+    pipeline = _pipeline()
+    detector = _FrameDetector({1: (first,), 2: (second,)})
+
+    class BrokenRefiner:
+        def refine_graph(self, detections, settings):
+            return TrackerGraphResult(detections=(first,), edges=())
+
+    monkeypatch.setattr(pipeline.registry, "create_detector", lambda _plugin: detector)
+    monkeypatch.setattr(
+        pipeline.registry, "create_tracker", lambda _plugin: BrokenRefiner()
+    )
+    with pytest.raises(ValueError, match="identify every omitted"):
+        pipeline.run(
+            NumpyProvider(np.zeros((2, 7, 25, 25), dtype=np.float32)),
+            Calibration(1.0, 1.0),
+            _request(TrackingScope("global", 1, 2)),
+        )
 
 
 def test_current_frame_detector_preview_reads_one_frame_and_never_builds_tracker(
@@ -338,6 +552,50 @@ def test_probable_division_takes_priority_over_generic_ambiguity(monkeypatch):
     assert not any("similar assignment costs" in warning for warning in result.warnings)
 
 
+def test_stop_policy_never_accepts_half_of_tracker_reported_split(monkeypatch):
+    candidates = (
+        _review_candidate("daughter-a", x_um=8.0, radius_um=1.0),
+        _review_candidate("daughter-b", x_um=14.0, radius_um=1.0),
+    )
+    pipeline = _pipeline()
+    monkeypatch.setattr(
+        pipeline.registry,
+        "create_detector",
+        lambda _plugin_id: _FrameDetector({2: candidates}),
+    )
+    tracker_id = "acetree.starrynite_division"
+    tracker_settings = pipeline.registry.default_settings(tracker_id)
+    request = TrackingRequest(
+        detector=ComponentSpec(
+            "acetree.starrynite_detector",
+            pipeline.registry.default_settings("acetree.starrynite_detector"),
+        ),
+        tracker=ComponentSpec(tracker_id, tracker_settings),
+        scope=TrackingScope(
+            "selected_forward",
+            1,
+            2,
+            seed_anchors=((1, 1),),
+            roi_radius_um=8.0,
+            ambiguity_ratio=1.2,
+            branch_policy="stop",
+        ),
+    )
+    record = [[Nucleus(index=1, x=10, y=10, z=4.0, size=4, status=1)], []]
+
+    result = pipeline.run(
+        NumpyProvider(np.zeros((2, 7, 25, 25), dtype=np.float32)),
+        Calibration(1.0, 1.0),
+        request,
+        nuclei_record=record,
+    )
+
+    assert result.new_detections == ()
+    assert result.edges == ()
+    assert result.outcome is not None and result.outcome.code == "division"
+    assert result.outcome.review_candidates == candidates
+
+
 def test_selected_forward_reports_curated_overlap_as_conflict(monkeypatch):
     seed = Nucleus(index=1, x=10, y=10, z=4.0, size=4, status=1)
     curated = Nucleus(index=1, x=11, y=10, z=4.0, size=4, status=1)
@@ -371,6 +629,201 @@ def test_selected_forward_reports_lost_at_unclosed_end_gap(monkeypatch):
     assert any("distance gate" in warning for warning in result.warnings)
 
 
+def test_follow_both_keeps_split_atomic_and_does_not_hide_a_lost_branch(monkeypatch):
+    daughters = (
+        _review_candidate("daughter-a", x_um=8.0, radius_um=1.0),
+        _review_candidate("daughter-b", x_um=12.0, radius_um=1.0),
+    )
+    continuation = _review_candidate(
+        "granddaughter-a",
+        frame=3,
+        x_um=7.0,
+        radius_um=1.0,
+    )
+    pipeline = _pipeline()
+    monkeypatch.setattr(
+        pipeline.registry,
+        "create_detector",
+        lambda _plugin_id: _FrameDetector({2: daughters, 3: (continuation,)}),
+    )
+    tracker_id = "acetree.starrynite_division"
+    tracker_settings = pipeline.registry.default_settings(tracker_id)
+    tracker_settings.update(
+        {
+            "ALLOW_GAP_CLOSING": False,
+            "MAX_FRAME_GAP": 1,
+            "ALLOW_TRACK_SPLITTING": True,
+        }
+    )
+    request = TrackingRequest(
+        detector=ComponentSpec(
+            "acetree.starrynite_detector",
+            pipeline.registry.default_settings("acetree.starrynite_detector"),
+        ),
+        tracker=ComponentSpec(tracker_id, tracker_settings),
+        scope=TrackingScope(
+            "selected_forward",
+            1,
+            3,
+            seed_anchors=((1, 1),),
+            roi_radius_um=8.0,
+            ambiguity_ratio=1.2,
+            branch_policy="follow_both",
+        ),
+    )
+    record = [
+        [Nucleus(index=1, x=10, y=10, z=4.0, size=4, status=1)],
+        [],
+        [],
+    ]
+
+    result = pipeline.run(
+        NumpyProvider(np.zeros((3, 7, 25, 25), dtype=np.float32)),
+        Calibration(1.0, 1.0),
+        request,
+        nuclei_record=record,
+    )
+
+    split_edges = tuple(edge for edge in result.edges if edge.kind == "split")
+    assert len(split_edges) == 2
+    assert {edge.target_id for edge in split_edges} == {"daughter-a", "daughter-b"}
+    assert any("Stopped branch" in warning for warning in result.warnings)
+    assert result.outcome is None
+
+
+def test_follow_both_solves_sister_continuations_as_one_frontier(monkeypatch):
+    daughters = (
+        _review_candidate("daughter-a", x_um=9.0, radius_um=1.6),
+        _review_candidate("daughter-b", x_um=11.0, radius_um=1.6),
+    )
+    continuations = (
+        _review_candidate("continuation-a", frame=3, x_um=8.0, radius_um=1.6),
+        _review_candidate("continuation-b", frame=3, x_um=12.0, radius_um=1.6),
+    )
+    pipeline = _pipeline()
+    monkeypatch.setattr(
+        pipeline.registry,
+        "create_detector",
+        lambda _plugin_id: _FrameDetector({2: daughters, 3: continuations}),
+    )
+    tracker_id = "acetree.starrynite_division"
+    tracker_settings = pipeline.registry.default_settings(tracker_id)
+    tracker_settings.update(
+        {
+            "ALLOW_GAP_CLOSING": False,
+            "MAX_FRAME_GAP": 1,
+            "ALLOW_TRACK_SPLITTING": True,
+        }
+    )
+    request = TrackingRequest(
+        detector=ComponentSpec(
+            "acetree.starrynite_detector",
+            pipeline.registry.default_settings("acetree.starrynite_detector"),
+        ),
+        tracker=ComponentSpec(tracker_id, tracker_settings),
+        scope=TrackingScope(
+            "selected_forward",
+            1,
+            3,
+            seed_anchors=((1, 1),),
+            roi_radius_um=8.0,
+            ambiguity_ratio=1.2,
+            branch_policy="follow_both",
+        ),
+    )
+    record = [
+        [Nucleus(index=1, x=10, y=10, z=4.0, size=4, status=1)],
+        [],
+        [],
+    ]
+
+    result = pipeline.run(
+        NumpyProvider(np.zeros((3, 7, 25, 25), dtype=np.float32)),
+        Calibration(1.0, 1.0),
+        request,
+        nuclei_record=record,
+    )
+
+    assert [(edge.source_id, edge.target_id, edge.kind) for edge in result.edges] == [
+        ("existing:1:1", "daughter-a", "split"),
+        ("existing:1:1", "daughter-b", "split"),
+        ("daughter-a", "continuation-a", "link"),
+        ("daughter-b", "continuation-b", "link"),
+    ]
+    assert result.warnings == ()
+    assert result.outcome is not None and result.outcome.code == "completed"
+
+
+def test_follow_both_frontier_closes_one_daughter_gap_without_false_split(monkeypatch):
+    daughters = (
+        _review_candidate("daughter-a", x_um=9.0, radius_um=1.6),
+        _review_candidate("daughter-b", x_um=11.0, radius_um=1.6),
+    )
+    frame_three = (
+        _review_candidate("continuation-a2", frame=3, x_um=8.0, radius_um=1.6),
+    )
+    frame_four = (
+        _review_candidate("continuation-a3", frame=4, x_um=7.0, radius_um=1.6),
+        _review_candidate("continuation-b4", frame=4, x_um=12.0, radius_um=1.6),
+    )
+    pipeline = _pipeline()
+    monkeypatch.setattr(
+        pipeline.registry,
+        "create_detector",
+        lambda _plugin_id: _FrameDetector(
+            {2: daughters, 3: frame_three, 4: frame_four}
+        ),
+    )
+    tracker_id = "acetree.starrynite_division"
+    tracker_settings = pipeline.registry.default_settings(tracker_id)
+    tracker_settings.update(
+        {
+            "ALLOW_GAP_CLOSING": True,
+            "MAX_FRAME_GAP": 2,
+            "ALLOW_TRACK_SPLITTING": True,
+        }
+    )
+    request = TrackingRequest(
+        detector=ComponentSpec(
+            "acetree.starrynite_detector",
+            pipeline.registry.default_settings("acetree.starrynite_detector"),
+        ),
+        tracker=ComponentSpec(tracker_id, tracker_settings),
+        scope=TrackingScope(
+            "selected_forward",
+            1,
+            4,
+            seed_anchors=((1, 1),),
+            roi_radius_um=8.0,
+            ambiguity_ratio=1.2,
+            branch_policy="follow_both",
+        ),
+    )
+    record = [
+        [Nucleus(index=1, x=10, y=10, z=4.0, size=4, status=1)],
+        [],
+        [],
+        [],
+    ]
+
+    result = pipeline.run(
+        NumpyProvider(np.zeros((4, 7, 25, 25), dtype=np.float32)),
+        Calibration(1.0, 1.0),
+        request,
+        nuclei_record=record,
+    )
+
+    assert ("daughter-a", "continuation-a2", "link") in {
+        (edge.source_id, edge.target_id, edge.kind) for edge in result.edges
+    }
+    assert ("daughter-b", "continuation-b4", "gap") in {
+        (edge.source_id, edge.target_id, edge.kind) for edge in result.edges
+    }
+    assert len([edge for edge in result.edges if edge.kind == "split"]) == 2
+    assert result.warnings == ()
+    assert result.outcome is not None and result.outcome.code == "completed"
+
+
 def test_cancelled_global_run_returns_no_partial_result_or_edit():
     movie = _blob_movie([[(3, 10, 10)], [(3, 10, 11)]])
     calls = 0
@@ -390,7 +843,16 @@ def test_cancelled_global_run_returns_no_partial_result_or_edit():
 
 
 def test_pipeline_preflights_frame_and_channel_bounds():
-    provider = NumpyProvider(_blob_movie([[(3, 10, 10)]]))
+    class RecordingProvider(NumpyProvider):
+        def __init__(self, data):
+            super().__init__(data)
+            self.calls = []
+
+        def get_stack(self, time, channel=0):
+            self.calls.append((time, channel))
+            return super().get_stack(time, channel)
+
+    provider = RecordingProvider(_blob_movie([[(3, 10, 10)]]))
     with pytest.raises(ValueError, match="has 1 timepoint"):
         _pipeline().run(
             provider,
@@ -409,6 +871,7 @@ def test_pipeline_preflights_frame_and_channel_bounds():
     )
     with pytest.raises(ValueError, match="has 1 channel"):
         _pipeline().run(provider, Calibration(1.0, 1.0), request)
+    assert provider.calls == []
 
 
 def test_app_accepts_run_as_one_undo_step_and_tracks_provenance(tmp_path):

@@ -227,6 +227,23 @@ def test_gap_edge_is_materialized_with_interpolated_adjacent_nuclei():
             (TrackEdge("start", "end", 1.0),),
             "must be marked as a gap",
         ),
+        (
+            (_detection("parent", 1, 0.0), _detection("child", 2, 1.0)),
+            (TrackEdge("parent", "child", 1.0, kind="split"),),
+            "exactly two split edges",
+        ),
+        (
+            (
+                _detection("parent", 1, 0.0),
+                _detection("a", 2, 1.0),
+                _detection("b", 2, 2.0),
+            ),
+            (
+                TrackEdge("parent", "a", 1.0),
+                TrackEdge("parent", "b", 1.0),
+            ),
+            "without an explicit split event",
+        ),
     ],
 )
 def test_invalid_graphs_are_rejected_without_mutation(detections, edges, message):

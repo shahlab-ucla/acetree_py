@@ -34,6 +34,15 @@ class _PlannedNode:
     y: int
     z: float
     size: int
+    weight: int = 0
+    rweight: int = 0
+    rsum: int = 0
+    rcount: int = 0
+    rwraw: int = 0
+    rwcorr1: int = 0
+    rwcorr2: int = 0
+    rwcorr3: int = 0
+    rwcorr4: int = 0
     existing: bool = False
     detection_id: str | None = None
 
@@ -216,6 +225,15 @@ def _build_application_plan(
             y=nucleus.y,
             z=nucleus.z,
             size=nucleus.size,
+            weight=nucleus.weight,
+            rweight=nucleus.rweight,
+            rsum=nucleus.rsum,
+            rcount=nucleus.rcount,
+            rwraw=nucleus.rwraw,
+            rwcorr1=nucleus.rwcorr1,
+            rwcorr2=nucleus.rwcorr2,
+            rwcorr3=nucleus.rwcorr3,
+            rwcorr4=nucleus.rwcorr4,
             existing=True,
             detection_id=detection_id,
         )
@@ -238,6 +256,7 @@ def _build_application_plan(
             continue
         key = ("detection", detection.detection_id)
         x, y, z, size = _detection_geometry(detection, calibration)
+        measurements = _detection_measurements(detection)
         node = _PlannedNode(
             key=key,
             frame=detection.frame,
@@ -246,6 +265,7 @@ def _build_application_plan(
             y=y,
             z=z,
             size=size,
+            **measurements,
             detection_id=detection.detection_id,
         )
         nodes[key] = node
@@ -255,6 +275,7 @@ def _build_application_plan(
 
     incoming: dict[str, str] = {}
     outgoing: dict[str, set[str]] = {}
+    outgoing_kinds: dict[str, list[str]] = {}
     edge_pairs: set[tuple[str, str]] = set()
     for edge in result.edges:
         source = by_id.get(edge.source_id)
@@ -280,6 +301,7 @@ def _build_application_plan(
         incoming[edge.target_id] = edge.source_id
         children = outgoing.setdefault(edge.source_id, set())
         children.add(edge.target_id)
+        outgoing_kinds.setdefault(edge.source_id, []).append(edge.kind)
         if len(children) > 2:
             raise TrackingProposalConflict(
                 f"Detection {edge.source_id!r} has more than two children"
@@ -288,6 +310,18 @@ def _build_application_plan(
             raise TrackingProposalConflict(
                 f"Non-adjacent link {edge.source_id!r} -> {edge.target_id!r} "
                 "must be marked as a gap"
+            )
+
+    for source_id, children in outgoing.items():
+        kinds = outgoing_kinds[source_id]
+        has_split = "split" in kinds
+        if has_split and (len(children) != 2 or any(kind != "split" for kind in kinds)):
+            raise TrackingProposalConflict(
+                f"Division source {source_id!r} must have exactly two split edges"
+            )
+        if len(children) == 2 and not has_split:
+            raise TrackingProposalConflict(
+                f"Source {source_id!r} has two children without an explicit split event"
             )
 
     arcs: list[tuple[_NodeKey, _NodeKey]] = []
@@ -318,9 +352,12 @@ def _build_application_plan(
                     target_detection.quality,
                     fraction,
                 ),
-                features={},
+                # Legacy StarryNite export carries the parent's measurement
+                # values through an interpolated false-negative point.
+                features=dict(source_detection.features),
             )
             x, y, z, size = _detection_geometry(gap_detection, calibration)
+            measurements = _detection_measurements(gap_detection)
             gap_node = _PlannedNode(
                 key=gap_key,
                 frame=frame,
@@ -329,6 +366,7 @@ def _build_application_plan(
                 y=y,
                 z=z,
                 size=size,
+                **measurements,
             )
             nodes[gap_key] = gap_node
             append_order.append(gap_key)
@@ -421,6 +459,15 @@ def _apply_plan(plan: _ApplicationPlan, nuclei_record: NucleiRecord) -> None:
                 predecessor=NILLI,
                 successor1=NILLI,
                 successor2=NILLI,
+                weight=node.weight,
+                rweight=node.rweight,
+                rsum=node.rsum,
+                rcount=node.rcount,
+                rwraw=node.rwraw,
+                rwcorr1=node.rwcorr1,
+                rwcorr2=node.rwcorr2,
+                rwcorr3=node.rwcorr3,
+                rwcorr4=node.rwcorr4,
             )
         )
 
@@ -483,8 +530,62 @@ def _detection_geometry(
             f"Detection {detection.detection_id!r} has a non-positive radius"
         )
     x_px, y_px, z_plane = detection.to_pixel(calibration)
-    size = max(1, round(2.0 * detection.radius_um / calibration.xy_um))
-    return round(x_px), round(y_px), float(z_plane), size
+    size = max(
+        1,
+        _round_half_away_from_zero(2.0 * detection.radius_um / calibration.xy_um),
+    )
+    return (
+        _round_half_away_from_zero(x_px),
+        _round_half_away_from_zero(y_px),
+        float(z_plane),
+        size,
+    )
+
+
+_MEASUREMENT_FEATURES = {
+    "weight": "ACETREE_WEIGHT",
+    "rweight": "ACETREE_RWEIGHT",
+    "rsum": "ACETREE_RSUM",
+    "rcount": "ACETREE_RCOUNT",
+    "rwraw": "ACETREE_RWRAW",
+    "rwcorr1": "ACETREE_RWCORR1",
+    "rwcorr2": "ACETREE_RWCORR2",
+    "rwcorr3": "ACETREE_RWCORR3",
+    "rwcorr4": "ACETREE_RWCORR4",
+}
+
+
+def _detection_measurements(detection: Detection) -> dict[str, int]:
+    """Map explicit interchange features into the fixed legacy nuclei columns."""
+
+    measurements: dict[str, int] = {}
+    for field_name, feature_name in _MEASUREMENT_FEATURES.items():
+        value = detection.features.get(feature_name, 0)
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise TrackingProposalConflict(
+                f"Detection {detection.detection_id!r} has non-numeric "
+                f"{feature_name}"
+            ) from exc
+        if not math.isfinite(number):
+            raise TrackingProposalConflict(
+                f"Detection {detection.detection_id!r} has non-finite "
+                f"{feature_name}"
+            )
+        measurements[field_name] = _round_half_away_from_zero(number)
+    return measurements
+
+
+def _round_half_away_from_zero(value: float) -> int:
+    """Match MATLAB/AceTree midpoint rounding instead of Python bankers' rounding."""
+
+    value = float(value)
+    if not math.isfinite(value):
+        raise TrackingProposalConflict("Cannot round a non-finite legacy value")
+    if value >= 0:
+        return int(math.floor(value + 0.5))
+    return int(math.ceil(value - 0.5))
 
 
 def _lerp(start: float, end: float, fraction: float) -> float:

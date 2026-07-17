@@ -155,6 +155,14 @@ class TrackingRegistry:
         component = contribution.factory()
         if not callable(getattr(component, "track", None)):
             raise TypeError(f"Tracker plugin {plugin_id!r} does not expose track()")
+        if (
+            "whole_movie_preflight" in contribution.descriptor.capabilities
+            and not callable(getattr(component, "preflight_movie", None))
+        ):
+            raise TypeError(
+                f"Tracker plugin {plugin_id!r} advertises whole_movie_preflight "
+                "but does not expose preflight_movie()"
+            )
         return component
 
     def discover_entry_points(self) -> None:
@@ -235,9 +243,276 @@ def _tracker_schema() -> dict[str, Any]:
     }
 
 
+def _starrynite_detector_schema() -> dict[str, Any]:
+    schema = _detector_schema()
+    schema["DO_SUBPIXEL_LOCALIZATION"] = {
+        "type": "boolean",
+        "default": False,
+    }
+    schema.update(
+        {
+            "SIGMA": {"type": "number", "exclusiveMinimum": 0, "default": 1.0},
+            "INTENSITY_THRESHOLD": {
+                "type": "number",
+                "minimum": 0,
+                "default": 4.0,
+            },
+            "MIN_LOCAL_CONTRAST": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.0,
+            },
+            "BOUNDARY_PERCENT": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1,
+                "default": 0.5,
+            },
+            "LARGE_RAY_THRESHOLD": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "default": 1.5,
+            },
+            "SMALL_RAY_THRESHOLD": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "default": 1.0 / 3.0,
+            },
+            "NNDIST_MERGE": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.8,
+            },
+            "AR_MERGE": {
+                "type": "number",
+                "minimum": 0,
+                "default": 1.6,
+            },
+            "RANGE_THRESHOLD": {
+                "type": "number",
+                "minimum": 0,
+                "default": 1.0,
+            },
+            "SPLIT_THRESHOLD": {
+                "type": "number",
+                "minimum": 0,
+                "default": 100.0,
+            },
+            "MERGE_LOWER": {
+                "type": "number",
+                "default": -300.0,
+            },
+            "MERGE_SPLIT": {
+                "type": "number",
+                "minimum": 0,
+                "default": 1.0,
+            },
+            "MIN_SEPARATION": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.0,
+            },
+            "DARK_NUCLEI": {"type": "boolean", "default": False},
+            "ROI_POINTS_XY": {
+                "type": "array",
+                "default": [],
+                "minItems": 3,
+                "items": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {"type": "number"},
+                },
+            },
+            "ROI_CROPPED": {"type": "boolean", "default": False},
+            "ROI_X_OFFSET": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.0,
+            },
+            "ROI_Y_OFFSET": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.0,
+            },
+            "ROI_X_MAX": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.0,
+            },
+            "ROI_Y_MAX": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.0,
+            },
+            "STARRYNITE_CELL_COUNT": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+            },
+            "STARRYNITE_STAGE_INDEX": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+            },
+            "STARRYNITE_PARAMETER_FILE": {"type": "string", "default": ""},
+            "STARRYNITE_PARAMETER_SHA256": {"type": "string", "default": ""},
+            "STARRYNITE_DISTRIBUTION_FILE": {"type": "string", "default": ""},
+            "STARRYNITE_DISTRIBUTION_SOURCE_SHA256": {
+                "type": "string",
+                "default": "",
+            },
+            "STARRYNITE_USE_STATIC_DIAMETER": {
+                "type": "boolean",
+                "default": False,
+            },
+        }
+    )
+    return schema
+
+
+def _starrynite_tracker_schema() -> dict[str, Any]:
+    schema = _tracker_schema()
+    schema.update(
+        {
+            "ALLOW_TRACK_SPLITTING": {"type": "boolean", "default": True},
+            "CANDIDATE_CUTOFF": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "default": 1.2,
+            },
+            "NN_NUMBER": {"type": "integer", "minimum": 1, "default": 2},
+            "FORWARD_NN_NUMBER": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 4,
+            },
+            "SAFE_FACTOR": {
+                "type": "number",
+                "minimum": 0,
+                "default": 2.0,
+            },
+            "DIVISION_COST_THRESHOLD": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.85,
+            },
+            "DIVISION_MAX_DAUGHTER_DISTANCE": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "default": 15.0,
+            },
+            "DIVISION_MAX_DAUGHTER_SEPARATION": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "default": 12.0,
+            },
+            "DIVISION_MAX_MIDPOINT_ERROR": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "default": 6.0,
+            },
+            "DIVISION_MIN_QUALITY_RATIO": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.25,
+            },
+            "DIVISION_MIN_VOLUME_RATIO": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.15,
+            },
+            "DIVISION_MAX_VOLUME_RATIO": {
+                "type": "number",
+                "minimum": 0,
+                "default": 2.5,
+            },
+            "DIVISION_REQUIRE_EXCESS_TARGET": {
+                "type": "boolean",
+                "default": True,
+            },
+            "MAX_ACTIVE_BRANCHES": {
+                "type": "integer",
+                "minimum": 2,
+                "default": 8,
+            },
+            "RADIUS_PENALTY_WEIGHT": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.25,
+            },
+            "QUALITY_PENALTY_WEIGHT": {
+                "type": "number",
+                "minimum": 0,
+                "default": 0.0,
+            },
+            "STARRYNITE_PARAMETER_FILE": {"type": "string", "default": ""},
+            "STARRYNITE_PARAMETER_SHA256": {"type": "string", "default": ""},
+            "STARRYNITE_MODEL_FILE": {"type": "string", "default": ""},
+            "STARRYNITE_MODEL_SHA256": {"type": "string", "default": ""},
+            "STARRYNITE_COMPATIBILITY_MODE": {
+                "type": "string",
+                "enum": ["native_fast"],
+                "default": "native_fast",
+            },
+        }
+    )
+    return schema
+
+
+def _starrynite_legacy_exact_tracker_schema() -> dict[str, Any]:
+    return {
+        "STARRYNITE_COMPATIBILITY_MODE": {
+            "type": "string",
+            "const": "legacy_exact_refinement",
+            "default": "legacy_exact_refinement",
+        },
+        "STARRYNITE_PARAMETER_FILE": {"type": "string", "default": ""},
+        "STARRYNITE_PARAMETER_SHA256": {"type": "string", "default": ""},
+        "STARRYNITE_MODEL_FILE": {"type": "string", "default": ""},
+        "STARRYNITE_MODEL_SHA256": {"type": "string", "default": ""},
+        "STARRYNITE_NEUTRAL_CLASSIFIER_FILE": {
+            "type": "string",
+            "default": "",
+        },
+        "STARRYNITE_NEUTRAL_CLASSIFIER_SHA256": {
+            "type": "string",
+            "default": "",
+        },
+        "STARRYNITE_FORCE_MODE": {"type": "boolean", "default": False},
+        "STARRYNITE_FORCE_END_FRAME": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+        },
+        "STARRYNITE_RECORD_ANSWERS": {
+            "type": "boolean",
+            "default": False,
+        },
+        "STARRYNITE_REQUIRE_EXACT_DETECTOR_TAIL": {
+            "type": "boolean",
+            "const": True,
+            "default": True,
+        },
+        "STARRYNITE_USE_STATIC_DIAMETER": {
+            "type": "boolean",
+            "default": False,
+        },
+        "ALLOW_TRACK_SPLITTING": {
+            "type": "boolean",
+            "const": True,
+            "default": True,
+        },
+    }
+
+
 def build_default_registry(*, discover_plugins: bool = True) -> TrackingRegistry:
     from .detectors import DoGDetector, LoGDetector
     from .lap import SimpleLAPTracker
+    from .starrynite.detector import StarryNiteDetector
+    from .starrynite.legacy_exact_tracker import StarryNiteLegacyExactTracker
+    from .starrynite.tracker import StarryNiteDivisionTracker
 
     registry = TrackingRegistry()
     for detector_type in (LoGDetector, DoGDetector):
@@ -252,6 +527,26 @@ def build_default_registry(*, discover_plugins: bool = True) -> TrackingRegistry
             ),
             detector_type,
         )
+    registry.register_detector(
+        ComponentDescriptor(
+            plugin_id=StarryNiteDetector.plugin_id,
+            kind="detector",
+            display_name=StarryNiteDetector.display_name,
+            description=(
+                "Stage-aware anisotropic detection with safe legacy StarryNite "
+                "parameter adapters."
+            ),
+            settings_schema=_starrynite_detector_schema(),
+            capabilities=(
+                "3d",
+                "anisotropic",
+                "subpixel",
+                "legacy_parameter_presets",
+                "native_starrynite",
+            ),
+        ),
+        StarryNiteDetector,
+    )
     registry.register_tracker(
         ComponentDescriptor(
             plugin_id=SimpleLAPTracker.plugin_id,
@@ -262,6 +557,48 @@ def build_default_registry(*, discover_plugins: bool = True) -> TrackingRegistry
             capabilities=("gap_closing",),
         ),
         SimpleLAPTracker,
+    )
+    registry.register_tracker(
+        ComponentDescriptor(
+            plugin_id=StarryNiteDivisionTracker.plugin_id,
+            kind="tracker",
+            display_name=StarryNiteDivisionTracker.display_name,
+            description=(
+                "Candidate-limited LAP linking with deterministic two-daughter "
+                "division hypotheses and gap closure."
+            ),
+            settings_schema=_starrynite_tracker_schema(),
+            capabilities=(
+                "gap_closing",
+                "splitting",
+                "frontier_tracking",
+                "selected_forward",
+                "legacy_parameter_presets",
+                "native_starrynite",
+            ),
+        ),
+        StarryNiteDivisionTracker,
+    )
+    registry.register_tracker(
+        ComponentDescriptor(
+            plugin_id=StarryNiteLegacyExactTracker.plugin_id,
+            kind="tracker",
+            display_name=StarryNiteLegacyExactTracker.display_name,
+            description=(
+                "Source-bound whole-movie replay of StarryNite's staged geometry "
+                "and legacy classifier/repair decisions."
+            ),
+            settings_schema=_starrynite_legacy_exact_tracker_schema(),
+            capabilities=(
+                "splitting",
+                "global_only",
+                "whole_movie_preflight",
+                "whole_movie_refinement",
+                "legacy_parameter_presets",
+                "legacy_exact_refinement",
+            ),
+        ),
+        StarryNiteLegacyExactTracker,
     )
     if discover_plugins:
         registry.discover_entry_points()

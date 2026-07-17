@@ -7,12 +7,14 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from acetree_py.tracking.api import (
+    Calibration,
     ComponentSpec,
     Detection,
     TrackingOutcome,
     TrackingRequest,
     TrackingResult,
     TrackingScope,
+    WholeMoviePreflightContext,
 )
 
 
@@ -27,6 +29,76 @@ def _candidate(frame: int = 4) -> Detection:
         quality=8.0,
         features={"reason": "review-only"},
     )
+
+
+def test_tracking_scope_branch_policy_defaults_and_round_trips() -> None:
+    legacy_payload = {
+        "kind": "selected_forward",
+        "start_frame": 2,
+        "end_frame": 5,
+        "seed_anchors": [[2, 1]],
+        "roi_radius_um": 8.0,
+        "ambiguity_ratio": 1.2,
+    }
+
+    legacy_scope = TrackingScope.from_dict(legacy_payload)
+    assert legacy_scope.branch_policy == "stop"
+
+    follow_both = TrackingScope(
+        "selected_forward",
+        2,
+        5,
+        seed_anchors=((2, 1),),
+        roi_radius_um=8.0,
+        branch_policy="follow_both",
+    )
+    assert follow_both.to_dict()["branch_policy"] == "follow_both"
+    assert TrackingScope.from_dict(follow_both.to_dict()) == follow_both
+
+
+@pytest.mark.parametrize("branch_policy", ["stop", "follow_best", "follow_both"])
+def test_tracking_scope_accepts_supported_branch_policies(branch_policy: str) -> None:
+    scope = TrackingScope("global", 1, 2, branch_policy=branch_policy)
+    assert scope.branch_policy == branch_policy
+
+
+def test_tracking_scope_rejects_unknown_branch_policy() -> None:
+    with pytest.raises(ValueError, match="branch policy"):
+        TrackingScope("global", 1, 2, branch_policy="guess")
+
+
+def test_whole_movie_preflight_context_is_immutable_and_identifies_full_scope() -> None:
+    detector = ComponentSpec("example.detector", {"TARGET_CHANNEL": 1})
+    context = WholeMoviePreflightContext(
+        detector_spec=detector,
+        calibration=Calibration(0.25, 1.0),
+        scope=TrackingScope("global", 1, 4),
+        source_num_timepoints=4,
+        source_num_channels=2,
+        target_channel=0,
+    )
+
+    assert context.covers_complete_global_movie
+    with pytest.raises(FrozenInstanceError):
+        context.source_num_timepoints = 3  # type: ignore[misc]
+    partial = WholeMoviePreflightContext(
+        detector_spec=detector,
+        calibration=context.calibration,
+        scope=TrackingScope("global", 1, 3),
+        source_num_timepoints=4,
+        source_num_channels=2,
+        target_channel=0,
+    )
+    assert not partial.covers_complete_global_movie
+    with pytest.raises(ValueError, match="Target channel"):
+        WholeMoviePreflightContext(
+            detector_spec=detector,
+            calibration=context.calibration,
+            scope=context.scope,
+            source_num_timepoints=4,
+            source_num_channels=2,
+            target_channel=2,
+        )
 
 
 def test_tracking_outcome_is_immutable_and_round_trips() -> None:

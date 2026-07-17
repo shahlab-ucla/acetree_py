@@ -7,13 +7,23 @@ from .api import (
     ComponentSpec,
     Detection,
     TrackEdge,
+    TrackerGraphResult,
     TrackingOutcome,
     TrackingRequest,
     TrackingResult,
     TrackingScope,
+    WholeMoviePreflightContext,
 )
 from .detectors import DoGDetector, DogDetector, LoGDetector, LogDetector
 from .lap import LAPTracker, SimpleLAPTracker
+from .starrynite import (
+    StarryNiteDetector,
+    StarryNiteDivisionTracker,
+    StarryNiteLegacyExactTracker,
+    StarryNiteTracker,
+    StarryNiteTuningProfile,
+    load_tuning_profile,
+)
 from .integration import ApplyTrackingProposal, TrackingProposalConflict
 from .persistence import (
     TrackingProposalFormatError,
@@ -45,7 +55,13 @@ __all__ = [
     "LogDetector",
     "PluginContribution",
     "SimpleLAPTracker",
+    "StarryNiteDetector",
+    "StarryNiteDivisionTracker",
+    "StarryNiteLegacyExactTracker",
+    "StarryNiteTracker",
+    "StarryNiteTuningProfile",
     "TrackEdge",
+    "TrackerGraphResult",
     "TrackingOutcome",
     "TrackingRegistry",
     "TrackingCancelled",
@@ -55,8 +71,10 @@ __all__ = [
     "TrackingRequest",
     "TrackingResult",
     "TrackingScope",
+    "WholeMoviePreflightContext",
     "build_default_registry",
     "get_default_registry",
+    "load_tuning_profile",
     "read_tracking_proposal",
     "tracking_sidecar_path",
     "write_tracking_proposal",

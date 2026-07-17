@@ -24,22 +24,25 @@ from __future__ import annotations
 import html
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
+from pathlib import Path
 from statistics import fmean
 from typing import TYPE_CHECKING, Any
 
-from qtpy.QtCore import Qt, Signal, Slot
+from qtpy.QtCore import QSettings, Qt, Signal, Slot
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -76,6 +79,14 @@ FrameNavigator = Callable[[int], None]
 CurrentFrameGetter = Callable[[], int]
 DatasetEmptyGetter = Callable[[], bool]
 
+_STARRYNITE_DETECTOR_ID = "acetree.starrynite_detector"
+_STARRYNITE_NATIVE_TRACKER_ID = "acetree.starrynite_division"
+_STARRYNITE_EXACT_TRACKER_ID = "acetree.starrynite_legacy_exact"
+_STARRYNITE_EXACT_BACKEND = "legacy_exact_refinement"
+_STARRYNITE_TRACKER_IDS = frozenset(
+    {_STARRYNITE_NATIVE_TRACKER_ID, _STARRYNITE_EXACT_TRACKER_ID}
+)
+
 
 class GlobalTrackingDialog(QDialog):
     """Configure, inspect, and explicitly accept one global tracking proposal."""
@@ -97,6 +108,10 @@ class GlobalTrackingDialog(QDialog):
     FAILED = "failed"
     ACCEPTING = "accepting"
     DETECTOR_READY = "detector_ready"
+    _RECENT_PARAMETERS_KEY = "tracking/starrynite/recent_parameter_file"
+    _NEUTRAL_CLASSIFIER_KEY_PREFIX = (
+        "tracking/starrynite/neutral_classifier_by_model"
+    )
 
     def __init__(
         self,
@@ -116,6 +131,7 @@ class GlobalTrackingDialog(QDialog):
         navigate_to_frame: FrameNavigator | None = None,
         current_frame_getter: CurrentFrameGetter | None = None,
         dataset_empty_getter: DatasetEmptyGetter | None = None,
+        exact_scope_error: str | None = None,
     ) -> None:
         super().__init__(parent)
         if start_time < 1 or end_time < start_time:
@@ -136,6 +152,9 @@ class GlobalTrackingDialog(QDialog):
         self._navigate_callback = navigate_to_frame
         self._current_frame_getter = current_frame_getter
         self._dataset_empty_getter = dataset_empty_getter
+        self._exact_scope_error = (
+            "" if exact_scope_error is None else str(exact_scope_error).strip()
+        )
 
         self._proposal: TrackingResult | None = None
         self._expanded_preview: ExpandedTrackingPreview | None = None
@@ -158,6 +177,14 @@ class GlobalTrackingDialog(QDialog):
         self._discard_emitted = False
         self._cleaned_up = False
         self._navigating_review = False
+        self._starrynite_detector_settings: dict[str, Any] = {}
+        self._starrynite_tracker_settings: dict[str, Any] = {}
+        self._starrynite_parameter_path: Path | None = None
+        self._starrynite_profile = None
+        self._starrynite_neutral_classifier_path: Path | None = None
+        self._starrynite_compatibility_report = None
+        self._starrynite_session_note_html = ""
+        self._starrynite_classifier_note_html = ""
         self._solo_channel_visibility: list[tuple[object, bool]] | None = None
         self._original_view = self._capture_view_state()
 
@@ -172,6 +199,9 @@ class GlobalTrackingDialog(QDialog):
 
         self._build_ui()
         self._apply_initial_request(initial_request)
+        self._refresh_recent_parameter_button()
+        self._sync_division_capability(use_default=initial_request is None)
+        self._update_starrynite_behavior_visibility()
         self._connect_parameter_signals()
         self._apply_accessibility_descriptions()
         self._update_detector_button_text()
@@ -301,7 +331,98 @@ class GlobalTrackingDialog(QDialog):
         self._gap_spin.setToolTip("How many missing frames may be bridged by interpolation")
         self._gap_spin.setAccessibleName("Missing frames allowed")
         form.addRow("Missing frames:", self._gap_spin)
+
+        self._division_check = QCheckBox("Propose two-daughter divisions")
+        self._division_check.setChecked(False)
+        self._division_check.setToolTip(
+            "Available for division-aware trackers. Every proposed split remains "
+            "uncommitted until the full draft is accepted."
+        )
+        form.addRow("Division proposals:", self._division_check)
         configure_layout.addWidget(self._settings_widget)
+
+        self._starrynite_file_button = QPushButton(
+            "Start from StarryNite parameters…"
+        )
+        self._starrynite_file_button.setToolTip(
+            "Load a legacy StarryNite parameter file as editable whole-movie "
+            "tracking defaults"
+        )
+        self._starrynite_file_button.clicked.connect(
+            self._choose_starrynite_parameter_file
+        )
+        configure_layout.addWidget(self._starrynite_file_button)
+
+        self._starrynite_recent_button = QPushButton()
+        self._starrynite_recent_button.setToolTip(
+            "Reload the most recently used StarryNite parameter file"
+        )
+        self._starrynite_recent_button.clicked.connect(
+            self._load_recent_starrynite_parameter_file
+        )
+        self._starrynite_recent_button.hide()
+        configure_layout.addWidget(self._starrynite_recent_button)
+
+        self._starrynite_save_button = QPushButton("Save tuned parameter copy…")
+        self._starrynite_save_button.setToolTip(
+            "Save compatible radius, intensity-threshold, and missing-frame edits "
+            "without rewriting the legacy source"
+        )
+        self._starrynite_save_button.clicked.connect(
+            self._choose_starrynite_parameter_destination
+        )
+        self._starrynite_save_button.setEnabled(False)
+        configure_layout.addWidget(self._starrynite_save_button)
+
+        self._starrynite_file_label = QLabel()
+        self._starrynite_file_label.setWordWrap(True)
+        self._starrynite_file_label.setAccessibleName(
+            "Loaded StarryNite parameter file"
+        )
+        self._starrynite_file_label.hide()
+        configure_layout.addWidget(self._starrynite_file_label)
+
+        starrynite_compatibility_actions = QHBoxLayout()
+        self._starrynite_neutral_button = QPushButton(
+            "Attach classifier export..."
+        )
+        self._starrynite_neutral_button.setToolTip(
+            "Attach a numeric JSON classifier export to the loaded MAT model. "
+            "Exact whole-movie tracking requires and executes it; the native "
+            "tracker remains unchanged."
+        )
+        self._starrynite_neutral_button.clicked.connect(
+            self._choose_starrynite_neutral_classifier
+        )
+        self._starrynite_neutral_button.setEnabled(False)
+        starrynite_compatibility_actions.addWidget(self._starrynite_neutral_button)
+        self._starrynite_report_button = QPushButton("Compatibility details…")
+        self._starrynite_report_button.setToolTip(
+            "Show which StarryNite behavior is runnable and why"
+        )
+        self._starrynite_report_button.clicked.connect(
+            self._show_starrynite_compatibility_report
+        )
+        self._starrynite_report_button.setEnabled(False)
+        starrynite_compatibility_actions.addWidget(self._starrynite_report_button)
+        configure_layout.addLayout(starrynite_compatibility_actions)
+
+        self._starrynite_behavior_label = QLabel(
+            "Compatibility note: legacy parameter values configure the native "
+            "StarryNite detector and tracker. Referenced MATLAB classifier models "
+            "are retained and hashed for provenance only; this whole-movie "
+            "workbench currently uses the native geometry scorer. Saving writes "
+            "only radius, intensity threshold, and missing frames to a copy."
+        )
+        self._starrynite_behavior_label.setWordWrap(True)
+        self._starrynite_behavior_label.setAccessibleName(
+            "StarryNite legacy model behavior"
+        )
+        self._starrynite_behavior_label.setStyleSheet(
+            "QLabel { color: #d9a441; }"
+        )
+        self._starrynite_behavior_label.hide()
+        configure_layout.addWidget(self._starrynite_behavior_label)
 
         self._advanced_toggle = QCheckBox("Show advanced detection options")
         self._advanced_toggle.toggled.connect(self._set_advanced_visible)
@@ -312,6 +433,10 @@ class GlobalTrackingDialog(QDialog):
         advanced_layout.setContentsMargins(18, 0, 0, 0)
         self._subpixel_check = QCheckBox("Refine positions below one pixel")
         self._subpixel_check.setChecked(True)
+        self._subpixel_check.setToolTip(
+            "Optional native refinement. Leave off to preserve legacy StarryNite "
+            "ray-recentered positions."
+        )
         self._median_check = QCheckBox("Apply a 3×3×3 median filter")
         self._median_check.setChecked(False)
         advanced_layout.addWidget(self._subpixel_check)
@@ -386,9 +511,10 @@ class GlobalTrackingDialog(QDialog):
 
         self._legend_label = QLabel(
             "Legend: ○ proposed detection; ◇ interpolated gap; □/× diagnostic "
-            "candidate; ━ movement path; ⊕ predicted search region. White marks "
-            "the table selection; purple rings are a detector-only current-frame "
-            "test; amber throughout means the draft must be rebuilt."
+            "candidate; ━ movement path; a forked path marks a proposed "
+            "two-daughter division; ⊕ predicted search region. White marks the "
+            "table selection; purple rings are a detector-only current-frame test; "
+            "amber throughout means the draft must be rebuilt."
         )
         self._legend_label.setWordWrap(True)
         self._legend_label.setAccessibleName("Tracking preview legend")
@@ -486,14 +612,11 @@ class GlobalTrackingDialog(QDialog):
             self._gap_spin,
         ):
             widget.valueChanged.connect(self._tracking_parameters_changed)
-        self._detector_combo.currentIndexChanged.connect(
-            self._detector_parameters_changed
-        )
-        self._tracker_combo.currentIndexChanged.connect(
-            self._tracking_parameters_changed
-        )
+        self._detector_combo.currentIndexChanged.connect(self._detector_changed)
+        self._tracker_combo.currentIndexChanged.connect(self._tracker_changed)
         self._subpixel_check.toggled.connect(self._detector_parameters_changed)
         self._median_check.toggled.connect(self._detector_parameters_changed)
+        self._division_check.toggled.connect(self._tracking_parameters_changed)
         self._channel_spin.valueChanged.connect(self._refresh_solo_detection_channel)
 
     def _apply_accessibility_descriptions(self) -> None:
@@ -509,6 +632,11 @@ class GlobalTrackingDialog(QDialog):
             self._threshold_spin,
             self._distance_spin,
             self._gap_spin,
+            self._starrynite_file_button,
+            self._starrynite_recent_button,
+            self._starrynite_save_button,
+            self._starrynite_neutral_button,
+            self._starrynite_report_button,
             self._detector_preview_button,
             self._preview_button,
             self._overlay_check,
@@ -530,11 +658,151 @@ class GlobalTrackingDialog(QDialog):
         self._end_spin.setValue(request.scope.end_frame)
         detector = request.detector.settings
         tracker = request.tracker.settings
+        requested_mode = tracker.get("STARRYNITE_COMPATIBILITY_MODE")
+        if (
+            request.tracker.plugin_id == _STARRYNITE_NATIVE_TRACKER_ID
+            and requested_mode not in (None, "", "native_fast")
+        ):
+            raise ValueError(
+                "Global tracking cannot restore StarryNite compatibility backend "
+                f"{requested_mode!r}; this workbench supports only the explicit "
+                "native_fast backend"
+            )
+        if (
+            request.tracker.plugin_id == _STARRYNITE_EXACT_TRACKER_ID
+            and requested_mode != _STARRYNITE_EXACT_BACKEND
+        ):
+            raise ValueError(
+                "The exact StarryNite tracker request must explicitly select "
+                f"{_STARRYNITE_EXACT_BACKEND!r}; no compatibility fallback is used"
+            )
+        parameter_path = detector.get("STARRYNITE_PARAMETER_FILE") or tracker.get(
+            "STARRYNITE_PARAMETER_FILE"
+        )
+        uses_starrynite = (
+            request.detector.plugin_id == _STARRYNITE_DETECTOR_ID
+            or request.tracker.plugin_id in _STARRYNITE_TRACKER_IDS
+        )
+        loaded_fresh_profile = False
+        if parameter_path and uses_starrynite:
+            try:
+                self.load_starrynite_parameter_file(
+                    str(parameter_path),
+                    neutral_classifier_path=(
+                        tracker.get("STARRYNITE_NEUTRAL_CLASSIFIER_FILE") or None
+                    ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not restore the StarryNite parameter source from the "
+                    "initial request",
+                    exc_info=True,
+                )
+                self._starrynite_file_label.setText(
+                    "The previous StarryNite parameter source is unavailable or "
+                    f"unreadable: {html.escape(str(parameter_path))}. The embedded "
+                    "request values remain available, but save-copy is disabled."
+                )
+                self._starrynite_file_label.setToolTip(str(exc))
+                self._starrynite_file_label.show()
+            else:
+                loaded_fresh_profile = True
+                identity_keys = (
+                    (
+                        detector,
+                        self._starrynite_detector_settings,
+                        "STARRYNITE_PARAMETER_SHA256",
+                    ),
+                    (
+                        detector,
+                        self._starrynite_detector_settings,
+                        "STARRYNITE_STAGE_INDEX",
+                    ),
+                    (
+                        detector,
+                        self._starrynite_detector_settings,
+                        "STARRYNITE_CELL_COUNT",
+                    ),
+                    (
+                        tracker,
+                        self._starrynite_tracker_settings,
+                        "STARRYNITE_MODEL_SHA256",
+                    ),
+                    (
+                        tracker,
+                        self._starrynite_tracker_settings,
+                        "STARRYNITE_MODEL_FILE",
+                    ),
+                )
+                if any(
+                    old.get(key) not in (None, "")
+                    and old.get(key) != fresh.get(key)
+                    for old, fresh, key in identity_keys
+                ):
+                    self._starrynite_session_note_html = (
+                        "<b>Source/model changed:</b> staged preset metadata was "
+                        "refreshed; visible tuning edits were kept."
+                    )
+        if request.detector.plugin_id == _STARRYNITE_DETECTOR_ID:
+            if loaded_fresh_profile:
+                profile_controlled = {
+                    "SIGMA",
+                    "INTENSITY_THRESHOLD",
+                    "BOUNDARY_PERCENT",
+                    "LARGE_RAY_THRESHOLD",
+                    "SMALL_RAY_THRESHOLD",
+                    "NNDIST_MERGE",
+                    "AR_MERGE",
+                    "RADIUS",
+                }
+                for key, value in detector.items():
+                    if key.startswith("STARRYNITE_") or key in profile_controlled:
+                        continue
+                    self._starrynite_detector_settings.setdefault(key, value)
+            else:
+                self._starrynite_detector_settings.update(detector)
+        if request.tracker.plugin_id in _STARRYNITE_TRACKER_IDS:
+            if loaded_fresh_profile:
+                profile_controlled = {
+                    "CANDIDATE_CUTOFF",
+                    "SAFE_FACTOR",
+                    "NN_NUMBER",
+                    "FORWARD_NN_NUMBER",
+                    "MAX_FRAME_GAP",
+                    "ALLOW_GAP_CLOSING",
+                }
+                for key, value in tracker.items():
+                    if key.startswith("STARRYNITE_") or key in profile_controlled:
+                        continue
+                    self._starrynite_tracker_settings.setdefault(key, value)
+            else:
+                self._starrynite_tracker_settings.update(tracker)
+            if request.tracker.plugin_id == _STARRYNITE_EXACT_TRACKER_ID:
+                for key in (
+                    "STARRYNITE_FORCE_MODE",
+                    "STARRYNITE_FORCE_END_FRAME",
+                    "STARRYNITE_RECORD_ANSWERS",
+                    "STARRYNITE_USE_STATIC_DIAMETER",
+                ):
+                    if key in tracker:
+                        self._starrynite_tracker_settings[key] = tracker[key]
+        # Loading a source intentionally selects the paired StarryNite
+        # components for an interactive user.  An immutable initial request,
+        # however, may deliberately combine a StarryNite detector with another
+        # tracker, so restore its exact component choices after reading source
+        # metadata.
+        self._select_combo_value(self._detector_combo, request.detector.plugin_id)
+        self._select_combo_value(self._tracker_combo, request.tracker.plugin_id)
         if "TARGET_CHANNEL" in detector:
             self._channel_spin.setValue(int(detector["TARGET_CHANNEL"]))
         if "RADIUS" in detector:
             self._radius_spin.setValue(float(detector["RADIUS"]))
-        if "THRESHOLD" in detector:
+        if (
+            request.detector.plugin_id == _STARRYNITE_DETECTOR_ID
+            and "INTENSITY_THRESHOLD" in detector
+        ):
+            self._threshold_spin.setValue(float(detector["INTENSITY_THRESHOLD"]))
+        elif "THRESHOLD" in detector:
             self._threshold_spin.setValue(float(detector["THRESHOLD"]))
         if "DO_SUBPIXEL_LOCALIZATION" in detector:
             self._subpixel_check.setChecked(bool(detector["DO_SUBPIXEL_LOCALIZATION"]))
@@ -544,6 +812,9 @@ class GlobalTrackingDialog(QDialog):
             self._distance_spin.setValue(float(tracker["LINKING_MAX_DISTANCE"]))
         if "MAX_FRAME_GAP" in tracker:
             self._gap_spin.setValue(max(0, int(tracker["MAX_FRAME_GAP"]) - 1))
+        if "ALLOW_TRACK_SPLITTING" in tracker:
+            self._division_check.setChecked(bool(tracker["ALLOW_TRACK_SPLITTING"]))
+        self._render_starrynite_file_summary()
 
     @staticmethod
     def _select_combo_value(combo: QComboBox, value: Any) -> None:
@@ -551,9 +822,745 @@ class GlobalTrackingDialog(QDialog):
         if index >= 0:
             combo.setCurrentIndex(index)
 
+    @staticmethod
+    def _settings_store() -> QSettings:
+        return QSettings("AceTree", "AceTreePy")
+
+    def _starrynite_components_active(self) -> bool:
+        return (
+            self._detector_combo.currentData() == _STARRYNITE_DETECTOR_ID
+            or self._tracker_combo.currentData() in _STARRYNITE_TRACKER_IDS
+        )
+
+    def _exact_starrynite_selected(self) -> bool:
+        return self._tracker_combo.currentData() == _STARRYNITE_EXACT_TRACKER_ID
+
+    def _starrynite_runtime_capabilities(self) -> tuple[str, ...]:
+        try:
+            descriptor = self._registry.get_descriptor(_STARRYNITE_EXACT_TRACKER_ID)
+        except KeyError:
+            return ()
+        return (
+            (_STARRYNITE_EXACT_BACKEND,)
+            if _STARRYNITE_EXACT_BACKEND in descriptor.capabilities
+            else ()
+        )
+
+    def _build_starrynite_report(self, profile, neutral_classifier_path=None):
+        from ..tracking.starrynite import build_compatibility_report
+
+        return build_compatibility_report(
+            profile,
+            neutral_classifier_path=neutral_classifier_path,
+            runtime_capabilities=self._starrynite_runtime_capabilities(),
+        )
+
+    def _render_starrynite_file_summary(self) -> None:
+        profile = self._starrynite_profile
+        if profile is None:
+            return
+        source = profile.parameters.source_path or self._starrynite_parameter_path
+        source_name = "in-memory parameters" if source is None else source.name
+        tracker_id = self._tracker_combo.currentData()
+        tracker_is_native = tracker_id == _STARRYNITE_NATIVE_TRACKER_ID
+        tracker_is_exact = tracker_id == _STARRYNITE_EXACT_TRACKER_ID
+        detector_is_starrynite = (
+            self._detector_combo.currentData() == _STARRYNITE_DETECTOR_ID
+        )
+        if tracker_is_exact:
+            workflow = (
+                "Tune basic values only through a saved parameter copy, then build "
+                "the full draft. A current-frame exact detector test is valid only "
+                "at t=1 because later frames depend on earlier detector state."
+            )
+        else:
+            workflow = (
+                "Tune the basic values, test a frame, then build the full draft."
+            )
+        parts = [
+            f"Loaded {html.escape(source_name)} (stage {profile.stage_index + 1}, "
+            f"{profile.cell_count} starting cells). {workflow}"
+        ]
+        if profile.model_path is not None:
+            if tracker_is_exact:
+                parts.append(
+                    f"Model {html.escape(profile.model_path.name)} supplies the "
+                    "numeric legacy geometry state and is used by this exact draft."
+                )
+            elif tracker_is_native:
+                parts.append(
+                    f"Model {html.escape(profile.model_path.name)} is provenance-only; "
+                    "native geometry scoring remains active."
+                )
+            elif detector_is_starrynite:
+                parts.append(
+                    f"Model {html.escape(profile.model_path.name)} is reporting-only; "
+                    "the selected non-StarryNite tracker does not consume it."
+                )
+            else:
+                parts.append(
+                    "<b>Inactive preset:</b> The selected detector and tracker are not "
+                    "StarryNite, so this loaded model and its parameter overrides are "
+                    "not used by the draft."
+                )
+        report = self._starrynite_compatibility_report
+        neutral_path = self._starrynite_neutral_classifier_path
+        if (
+            neutral_path is not None
+            and report is not None
+            and report.neutral_classifier_source_bound
+        ):
+            if tracker_is_exact:
+                parts.append(
+                    f"Classifier export {html.escape(neutral_path.name)} is "
+                    "source-bound and will classify tentative divisions in this "
+                    "exact whole-movie draft."
+                )
+            elif tracker_is_native:
+                parts.append(
+                    f"Classifier export {html.escape(neutral_path.name)} was validated "
+                    "as source-bound for reporting only; native geometry scoring "
+                    "remains active."
+                )
+            else:
+                parts.append(
+                    f"Classifier export {html.escape(neutral_path.name)} is "
+                    "source-bound to the loaded preset for reporting only; the "
+                    "selected tracker does not use it."
+                )
+        if tracker_is_exact and report is not None:
+            readiness = report.backend(_STARRYNITE_EXACT_BACKEND)
+            if not readiness.runnable:
+                blocker_codes = {issue.code for issue in readiness.blockers}
+                if "neutral_classifier_not_selected" in blocker_codes:
+                    next_step = (
+                        "Attach the classifier export generated from the loaded "
+                        "MAT model."
+                    )
+                elif blocker_codes & {
+                    "parameter_source_changed",
+                    "tracking_model_changed",
+                    "neutral_classifier_unbound",
+                }:
+                    next_step = (
+                        "Reload the parameter file, then attach a freshly "
+                        "source-bound classifier export."
+                    )
+                elif blocker_codes & {
+                    "legacy_exact_detector_parameter_missing",
+                    "legacy_exact_parameter_missing",
+                    "legacy_downsampling_missing",
+                }:
+                    next_step = (
+                        "Add the required value to a parameter-file copy and reload "
+                        "that copy."
+                    )
+                else:
+                    next_step = (
+                        "Open Compatibility details, resolve the first blocker, "
+                        "then reload the source."
+                    )
+                first_blocker = html.escape(readiness.blockers[0].message)
+                parts.append(
+                    f"<b>Exact mode is blocked.</b> Next step: {next_step} "
+                    f"First blocker: {first_blocker}"
+                )
+        if self._starrynite_classifier_note_html:
+            parts.append(self._starrynite_classifier_note_html)
+        if self._starrynite_session_note_html:
+            parts.append(self._starrynite_session_note_html)
+        if not self._starrynite_components_active() and profile.model_path is None:
+            parts.append(
+                "<b>Inactive preset:</b> The selected detector and tracker are not "
+                "StarryNite, so the loaded parameter overrides are not used by this "
+                "draft."
+            )
+        presentation_warnings = [
+            *profile.warnings,
+            *self._starrynite_calibration_warnings(profile),
+        ]
+        if presentation_warnings:
+            parts.append(
+                f"{len(presentation_warnings)} parameter/calibration note(s); hover "
+                "for details."
+            )
+        details = [
+            *(
+                ()
+                if self._starrynite_compatibility_report is None
+                else (self._starrynite_compatibility_report.format_text(),)
+            ),
+            *presentation_warnings,
+        ]
+        self._starrynite_file_label.setText(" ".join(parts))
+        self._starrynite_file_label.setToolTip("\n".join(details))
+        self._starrynite_file_label.setAccessibleDescription("\n".join(details))
+        self._starrynite_file_label.show()
+
+    def _refresh_starrynite_compatibility(self) -> None:
+        profile = self._starrynite_profile
+        if profile is None:
+            return
+        neutral_path = self._starrynite_neutral_classifier_path
+        report = self._build_starrynite_report(
+            profile,
+            neutral_path,
+        )
+        if neutral_path is not None and not report.neutral_classifier_source_bound:
+            self._forget_neutral_classifier(profile)
+            self._starrynite_neutral_classifier_path = None
+            self._starrynite_classifier_note_html = (
+                "<b>Classifier binding changed:</b> "
+                f"{html.escape(neutral_path.name)} is no longer attached. Reload the "
+                "parameter file and validate a fresh export."
+            )
+            report = self._build_starrynite_report(profile)
+        elif neutral_path is not None:
+            self._starrynite_classifier_note_html = ""
+        self._starrynite_compatibility_report = report
+        self._render_starrynite_file_summary()
+
+    def recent_starrynite_parameter_file(self) -> Path | None:
+        """Return the shared most-recent usable StarryNite parameter file."""
+
+        try:
+            value = self._settings_store().value(self._RECENT_PARAMETERS_KEY, "")
+        except (OSError, RuntimeError):
+            return None
+        if value is None or not str(value).strip():
+            return None
+        candidate = Path(str(value)).expanduser()
+        return candidate.resolve(strict=False) if candidate.is_file() else None
+
+    def _remember_starrynite_parameter_file(self, path: Path) -> None:
+        try:
+            settings = self._settings_store()
+            settings.setValue(
+                self._RECENT_PARAMETERS_KEY,
+                str(path.resolve(strict=False)),
+            )
+            settings.sync()
+        except (OSError, RuntimeError):
+            logger.debug("Could not persist recent StarryNite parameters", exc_info=True)
+
+    def _neutral_classifier_settings_key(self, profile=None) -> str | None:
+        active_profile = self._starrynite_profile if profile is None else profile
+        parameters = getattr(active_profile, "parameters", None)
+        references = tuple(getattr(parameters, "model_references", ()))
+        load_references = tuple(
+            reference
+            for reference in references
+            if getattr(reference, "source_kind", None) == "load"
+        )
+        active_references = load_references or references
+        if len(active_references) != 1:
+            return None
+        model_hash = getattr(active_profile, "model_sha256", None)
+        model_path = getattr(active_profile, "model_path", None)
+        if not model_hash or model_path is None or not Path(model_path).is_file():
+            return None
+        return f"{self._NEUTRAL_CLASSIFIER_KEY_PREFIX}/{model_hash}"
+
+    def _remembered_neutral_classifier(self, profile) -> Path | None:
+        key = self._neutral_classifier_settings_key(profile)
+        if key is None:
+            return None
+        try:
+            settings = self._settings_store()
+            value = settings.value(key, "")
+            if value is None or not str(value).strip():
+                return None
+            candidate = Path(str(value)).expanduser().resolve(strict=False)
+            return candidate
+        except (OSError, RuntimeError):
+            logger.debug("Could not restore classifier association", exc_info=True)
+        return None
+
+    def _remember_neutral_classifier(self, profile, path: Path) -> None:
+        key = self._neutral_classifier_settings_key(profile)
+        if key is None:
+            return
+        try:
+            settings = self._settings_store()
+            settings.setValue(key, str(path.resolve(strict=False)))
+            settings.sync()
+        except (OSError, RuntimeError):
+            logger.debug("Could not persist classifier association", exc_info=True)
+
+    def _forget_neutral_classifier(self, profile) -> None:
+        key = self._neutral_classifier_settings_key(profile)
+        if key is None:
+            return
+        try:
+            settings = self._settings_store()
+            settings.remove(key)
+            settings.sync()
+        except (OSError, RuntimeError):
+            logger.debug("Could not clear classifier association", exc_info=True)
+
+    def _refresh_recent_parameter_button(self) -> None:
+        recent = self.recent_starrynite_parameter_file()
+        current = (
+            None
+            if self._starrynite_parameter_path is None
+            else self._starrynite_parameter_path.resolve(strict=False)
+        )
+        visible = recent is not None and recent != current
+        if recent is not None:
+            self._starrynite_recent_button.setText(f"Use recent: {recent.name}")
+            self._starrynite_recent_button.setToolTip(
+                f"Reload the most recently used parameter file:\n{recent}"
+            )
+        self._starrynite_recent_button.setVisible(visible)
+
+    def _load_recent_starrynite_parameter_file(self) -> None:
+        recent = self.recent_starrynite_parameter_file()
+        if recent is None:
+            self._refresh_recent_parameter_button()
+            return
+        try:
+            self.load_starrynite_parameter_file(str(recent))
+        except Exception as exc:
+            logger.exception("Could not reload recent StarryNite parameters")
+            QMessageBox.warning(
+                self,
+                "Could Not Read Parameters",
+                f"The recent StarryNite parameter file could not be read.\n\n{exc}",
+            )
+
+    def _choose_starrynite_parameter_file(self) -> None:
+        initial = self._starrynite_parameter_path or (
+            self.recent_starrynite_parameter_file()
+        )
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose a StarryNite parameter file",
+            "" if initial is None else str(initial),
+            "StarryNite parameters (*.txt *.m);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.load_starrynite_parameter_file(path)
+        except Exception as exc:
+            logger.exception("Could not load StarryNite parameter preset")
+            QMessageBox.warning(
+                self,
+                "Could Not Read Parameters",
+                f"That StarryNite parameter file could not be read.\n\n{exc}",
+            )
+
+    def load_starrynite_parameter_file(
+        self,
+        path: str,
+        *,
+        neutral_classifier_path: str | Path | None = None,
+    ) -> None:
+        """Apply a legacy parameter file as editable whole-movie defaults."""
+
+        from ..tracking.starrynite import load_tuning_profile
+
+        profile = load_tuning_profile(
+            path,
+            fallback_radius_um=self._radius_spin.value(),
+        )
+        self._starrynite_session_note_html = ""
+        self._starrynite_classifier_note_html = ""
+        self._starrynite_detector_settings = dict(profile.detector_settings)
+        self._starrynite_tracker_settings = dict(profile.tracker_settings)
+        source = profile.parameters.source_path or Path(path)
+        self._starrynite_parameter_path = source.resolve(strict=False)
+        self._starrynite_profile = profile
+        restored_from_settings = neutral_classifier_path is None
+        requested_neutral = (
+            self._remembered_neutral_classifier(profile)
+            if restored_from_settings
+            else Path(neutral_classifier_path).expanduser().resolve(strict=False)
+        )
+        self._starrynite_compatibility_report = self._build_starrynite_report(
+            profile,
+            requested_neutral,
+        )
+        if (
+            requested_neutral is not None
+            and self._starrynite_compatibility_report.neutral_classifier_source_bound
+        ):
+            self._starrynite_neutral_classifier_path = requested_neutral
+            self._remember_neutral_classifier(profile, requested_neutral)
+        else:
+            self._starrynite_neutral_classifier_path = None
+            if requested_neutral is not None:
+                if restored_from_settings:
+                    self._forget_neutral_classifier(profile)
+                self._starrynite_classifier_note_html = (
+                    f"<b>Classifier not restored:</b> "
+                    f"{html.escape(requested_neutral.name)} could not be proven "
+                    "source-bound. See Compatibility details."
+                )
+        self._starrynite_save_button.setEnabled(True)
+        self._starrynite_neutral_button.setEnabled(True)
+        self._starrynite_report_button.setEnabled(True)
+        self._remember_starrynite_parameter_file(self._starrynite_parameter_path)
+        self._refresh_recent_parameter_button()
+
+        self._select_combo_value(
+            self._detector_combo,
+            "acetree.starrynite_detector",
+        )
+        self._select_combo_value(
+            self._tracker_combo,
+            "acetree.starrynite_division",
+        )
+        self._sync_division_capability(use_default=True)
+        self._subpixel_check.setChecked(
+            bool(profile.detector_settings.get("DO_SUBPIXEL_LOCALIZATION", False))
+        )
+        self._radius_spin.setValue(
+            float(profile.detector_settings.get("RADIUS", self._radius_spin.value()))
+        )
+        self._threshold_spin.setValue(
+            float(
+                profile.detector_settings.get(
+                    "INTENSITY_THRESHOLD",
+                    self._threshold_spin.value(),
+                )
+            )
+        )
+        max_frame_gap = int(profile.tracker_settings.get("MAX_FRAME_GAP", 2))
+        self._gap_spin.setValue(max(0, max_frame_gap - 1))
+        self._render_starrynite_file_summary()
+        self._update_starrynite_behavior_visibility()
+        self._parameters_changed(detector_changed=True)
+
+    def _starrynite_calibration_warnings(self, profile) -> tuple[str, ...]:
+        calibration = self._calibration
+        if calibration is None:
+            return ()
+        warnings: list[str] = []
+        pairs = (
+            ("xyres", profile.xy_um, calibration.xy_um, "pixel"),
+            ("zres", profile.z_um, calibration.z_um, "plane"),
+        )
+        for name, parameter_value, dataset_value, unit in pairs:
+            if parameter_value is None:
+                continue
+            parameter_number = float(parameter_value)
+            dataset_number = float(dataset_value)
+            tolerance = max(
+                1e-9,
+                1e-6 * max(abs(parameter_number), abs(dataset_number)),
+            )
+            if abs(parameter_number - dataset_number) <= tolerance:
+                continue
+            warnings.append(
+                f"Parameter {name} is {parameter_number:g} µm/{unit}, but this "
+                f"dataset uses {dataset_number:g}; physical sizes come from the "
+                "parameter file while image sampling follows the dataset calibration."
+            )
+        return tuple(warnings)
+
+    def _choose_starrynite_neutral_classifier(self) -> None:
+        profile = self._starrynite_profile
+        if profile is None:
+            return
+        initial = self._starrynite_neutral_classifier_path
+        if initial is None:
+            initial = profile.model_path or self._starrynite_parameter_path
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose a StarryNite classifier export",
+            "" if initial is None else str(initial),
+            "Classifier export JSON (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.attach_starrynite_neutral_classifier(path)
+        except Exception as exc:
+            logger.exception("Could not validate neutral StarryNite classifier")
+            QMessageBox.warning(
+                self,
+                "Classifier Export Not Usable",
+                f"That classifier export could not be used.\n\n{exc}",
+            )
+
+    def attach_starrynite_neutral_classifier(self, path: str | Path) -> None:
+        """Validate and remember a source-bound neutral classifier export."""
+
+        profile = self._starrynite_profile
+        if profile is None:
+            raise ValueError("Load a StarryNite parameter file first")
+        candidate = Path(path).expanduser().resolve(strict=False)
+        report = self._build_starrynite_report(
+            profile,
+            candidate,
+        )
+        if not report.neutral_classifier_source_bound:
+            relevant_codes = {
+                "neutral_classifier_invalid",
+                "neutral_classifier_unbound",
+                "tracking_model_ambiguous",
+                "tracking_model_changed",
+                "tracking_model_identity_unavailable",
+                "tracking_model_missing",
+                "tracking_model_not_referenced",
+            }
+            issue = next(
+                (
+                    blocker
+                    for backend in report.backends.values()
+                    for blocker in backend.blockers
+                    if blocker.code in relevant_codes
+                ),
+                None,
+            )
+            error_message = (
+                issue.message
+                if issue is not None
+                else "The classifier export could not be proven source-bound."
+            )
+            previous_path = self._starrynite_neutral_classifier_path
+            if previous_path is not None:
+                previous_report = self._build_starrynite_report(
+                    profile,
+                    previous_path,
+                )
+                if previous_report.neutral_classifier_source_bound:
+                    self._starrynite_compatibility_report = previous_report
+                    self._starrynite_classifier_note_html = ""
+                    self._render_starrynite_file_summary()
+                    raise ValueError(error_message)
+                self._forget_neutral_classifier(profile)
+            self._starrynite_neutral_classifier_path = None
+            self._starrynite_compatibility_report = self._build_starrynite_report(
+                profile
+            )
+            if previous_path is None:
+                self._starrynite_classifier_note_html = (
+                    "<b>Classifier not attached:</b> "
+                    f"{html.escape(candidate.name)} was not usable. See Compatibility "
+                    "details."
+                )
+            else:
+                self._starrynite_classifier_note_html = (
+                    "<b>Classifier binding changed:</b> the previous export is no "
+                    "longer attached, and the selected replacement was not usable. "
+                    "Reload the parameter file and validate a fresh export."
+                )
+            self._starrynite_report_button.setEnabled(True)
+            self._render_starrynite_file_summary()
+            raise ValueError(error_message)
+        self._starrynite_neutral_classifier_path = candidate
+        self._starrynite_compatibility_report = report
+        self._starrynite_classifier_note_html = ""
+        self._remember_neutral_classifier(profile, candidate)
+        self._starrynite_report_button.setEnabled(True)
+        self._render_starrynite_file_summary()
+        self._validate_settings()
+
+    def _show_starrynite_compatibility_report(self) -> None:
+        self._refresh_starrynite_compatibility()
+        report = self._starrynite_compatibility_report
+        if report is None:
+            return
+        message = QMessageBox(self)
+        message.setWindowTitle("StarryNite Compatibility")
+        message.setIcon(QMessageBox.Information)
+        if self._tracker_combo.currentData() == _STARRYNITE_EXACT_TRACKER_ID:
+            summary = (
+                "The selected tracker executes the source-bound legacy geometry, "
+                "classifier, repair, and deletion stages. Any listed blocker "
+                "prevents the draft; no native fallback is used."
+            )
+        elif self._tracker_combo.currentData() == _STARRYNITE_NATIVE_TRACKER_ID:
+            summary = (
+                "The selected StarryNite tracker runs native geometry tracking. "
+                "Details also report whether the inputs are valid for a separate "
+                "exact-refinement runtime; validating an export does not change this "
+                "draft."
+            )
+        elif self._detector_combo.currentData() == _STARRYNITE_DETECTOR_ID:
+            summary = (
+                "The selected StarryNite detector is paired with a different tracker. "
+                "Classifier compatibility is reporting-only and does not change this "
+                "draft."
+            )
+        else:
+            summary = (
+                "The loaded StarryNite preset is inactive because the selected "
+                "detector and tracker are not StarryNite. These details describe the "
+                "loaded preset only."
+            )
+        message.setText(summary)
+        message.setDetailedText(report.format_text())
+        message.exec()
+
+    def _choose_starrynite_parameter_destination(self) -> None:
+        source = self._starrynite_parameter_path
+        if source is None:
+            return
+        suffix = source.suffix if source.suffix else ".txt"
+        default = source.with_name(f"{source.stem}-tuned{suffix}")
+        destination, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save tuned StarryNite parameters",
+            str(default),
+            "StarryNite parameters (*.txt *.m);;All files (*)",
+        )
+        if not destination:
+            return
+        try:
+            warnings = self.save_starrynite_parameter_file(destination)
+        except Exception as exc:
+            logger.exception("Could not save tuned StarryNite parameters")
+            QMessageBox.warning(
+                self,
+                "Could Not Save Parameters",
+                f"The tuned parameter copy could not be saved.\n\n{exc}",
+            )
+            return
+        message = "The tuned copy was saved and is now the active parameter file."
+        if warnings:
+            message += "\n\n" + "\n".join(warnings)
+        QMessageBox.information(self, "Parameter Copy Saved", message)
+
+    def save_starrynite_parameter_file(self, path: str) -> tuple[str, ...]:
+        """Save compatible edits and make the new copy the active source."""
+
+        from ..tracking.starrynite import (
+            build_tuning_save_plan,
+            load_tuning_profile,
+            write_parameter_file,
+        )
+
+        source = self._starrynite_parameter_path
+        if source is None:
+            raise ValueError("Load a StarryNite parameter file before saving a copy")
+        profile = self._starrynite_profile
+        if profile is None:
+            profile = load_tuning_profile(
+                source,
+                fallback_radius_um=self._radius_spin.value(),
+            )
+        plan = build_tuning_save_plan(
+            profile,
+            radius_um=self._radius_spin.value(),
+            intensity_threshold=self._threshold_spin.value(),
+            max_frame_gap=(
+                self._gap_spin.value() + 1
+                if self._gap_spin.value() > 0
+                else 1
+            ),
+        )
+        destination = Path(path).expanduser()
+        write_parameter_file(
+            profile.parameters,
+            destination,
+            overrides=plan.overrides,
+        )
+        warnings = list(plan.warnings)
+        if source.parent.resolve(strict=False) != destination.parent.resolve(
+            strict=False
+        ):
+            warnings.append(
+                "This copy is in a different folder. Check any relative model paths "
+                "before using it in MATLAB."
+            )
+        # Reloading the saved copy refreshes all source-controlled hashes and
+        # staged values.  Preserve the rest of the user's workbench choices;
+        # saving a parameter copy must not silently switch components or
+        # re-enable native-only refinements.
+        session_choices = {
+            "detector": self._detector_combo.currentData(),
+            "tracker": self._tracker_combo.currentData(),
+            "start": self._start_spin.value(),
+            "end": self._end_spin.value(),
+            "channel": self._channel_spin.value(),
+            "distance": self._distance_spin.value(),
+            "divisions": self._division_check.isChecked(),
+            "subpixel": self._subpixel_check.isChecked(),
+            "median": self._median_check.isChecked(),
+        }
+        self.load_starrynite_parameter_file(
+            str(destination),
+            neutral_classifier_path=self._starrynite_neutral_classifier_path,
+        )
+        self._select_combo_value(self._detector_combo, session_choices["detector"])
+        self._select_combo_value(self._tracker_combo, session_choices["tracker"])
+        self._start_spin.setValue(int(session_choices["start"]))
+        self._end_spin.setValue(int(session_choices["end"]))
+        self._channel_spin.setValue(int(session_choices["channel"]))
+        self._distance_spin.setValue(float(session_choices["distance"]))
+        if self._tracker_combo.currentData() != _STARRYNITE_EXACT_TRACKER_ID:
+            self._division_check.setChecked(bool(session_choices["divisions"]))
+        self._subpixel_check.setChecked(bool(session_choices["subpixel"]))
+        self._median_check.setChecked(bool(session_choices["median"]))
+        self._starrynite_session_note_html = (
+            "Compatible edits were saved to this copy."
+        )
+        self._render_starrynite_file_summary()
+        return tuple(warnings)
+
+    def _update_starrynite_behavior_visibility(self) -> None:
+        detector_is_starrynite = (
+            self._detector_combo.currentData() == _STARRYNITE_DETECTOR_ID
+        )
+        tracker_id = self._tracker_combo.currentData()
+        tracker_is_native = tracker_id == _STARRYNITE_NATIVE_TRACKER_ID
+        tracker_is_exact = tracker_id == _STARRYNITE_EXACT_TRACKER_ID
+        using_starrynite = detector_is_starrynite or tracker_id in _STARRYNITE_TRACKER_IDS
+        if detector_is_starrynite and tracker_is_exact:
+            text = (
+                "Exact mode uses the source-bound detector distribution, staged "
+                "legacy geometry, and attached classifier export. Save any tuning "
+                "edits to a parameter copy before building; unsupported options "
+                "stop with an actionable compatibility message."
+            )
+        elif detector_is_starrynite and tracker_is_native:
+            text = (
+                "Compatibility note: legacy parameter values configure the native "
+                "StarryNite detector and tracker. Referenced MATLAB classifier models "
+                "are retained and hashed for provenance only; this whole-movie "
+                "workbench currently uses the native geometry scorer. Saving writes "
+                "only radius, intensity threshold, and missing frames to a copy."
+            )
+        elif tracker_is_exact:
+            text = (
+                "Exact StarryNite tracking requires the StarryNite detector. Select "
+                "it and load a source-bound parameter file before building."
+            )
+        elif tracker_is_native:
+            text = (
+                "Compatibility note: the selected StarryNite tracker uses native "
+                "geometry scoring with the separately selected detector. Referenced "
+                "MATLAB classifier models remain provenance-only."
+            )
+        else:
+            text = (
+                "Compatibility note: the selected StarryNite detector uses compatible "
+                "parameter values, while the separately selected tracker does not use "
+                "the referenced MATLAB classifier model."
+            )
+        self._starrynite_behavior_label.setText(text)
+        self._starrynite_behavior_label.setVisible(using_starrynite)
+        if tracker_is_exact:
+            self._starrynite_neutral_button.setText("Attach classifier export...")
+            self._starrynite_neutral_button.setToolTip(
+                "Attach the source-bound numeric classifier required and executed "
+                "by exact whole-movie tracking"
+            )
+        else:
+            self._starrynite_neutral_button.setText("Attach classifier export...")
+            self._starrynite_neutral_button.setToolTip(
+                "Attach and validate a numeric classifier export against the MAT "
+                "model. The native tracker remains unchanged; select exact "
+                "whole-movie tracking to execute the classifier."
+            )
+
     def export_settings(self) -> dict[str, Any]:
         """Return the current common settings for reopening or rerunning."""
 
+        self._refresh_starrynite_compatibility()
         return {
             "start_time": self._start_spin.value(),
             "end_time": self._end_spin.value(),
@@ -564,14 +1571,36 @@ class GlobalTrackingDialog(QDialog):
             "threshold": self._threshold_spin.value(),
             "max_distance_um": self._distance_spin.value(),
             "missing_frames": self._gap_spin.value(),
+            "allow_divisions": self._division_check.isChecked(),
             "subpixel": self._subpixel_check.isChecked(),
             "median_filter": self._median_check.isChecked(),
             "show_overlay": self._overlay_check.isChecked(),
+            "starrynite_parameter_file": (
+                ""
+                if self._starrynite_parameter_path is None
+                else str(self._starrynite_parameter_path)
+            ),
+            "starrynite_neutral_classifier_file": (
+                ""
+                if self._starrynite_neutral_classifier_path is None
+                else str(self._starrynite_neutral_classifier_path)
+            ),
+            "starrynite_compatibility_backend": (
+                _STARRYNITE_EXACT_BACKEND
+                if self._tracker_combo.currentData() == _STARRYNITE_EXACT_TRACKER_ID
+                else (
+                    "native_fast"
+                    if self._tracker_combo.currentData()
+                    == _STARRYNITE_NATIVE_TRACKER_ID
+                    else None
+                )
+            ),
         }
 
     def get_detector_spec(self) -> ComponentSpec:
         """Build detector settings without requiring any tracker configuration."""
 
+        self._refresh_starrynite_compatibility()
         error = self._detector_validation_error()
         if error:
             raise ValueError(error)
@@ -580,6 +1609,8 @@ class GlobalTrackingDialog(QDialog):
 
         detector_id = str(self._detector_combo.currentData())
         detector_settings = self._registry.default_settings(detector_id)
+        if detector_id == _STARRYNITE_DETECTOR_ID:
+            detector_settings.update(self._starrynite_detector_settings)
         detector_common = {
             "TARGET_CHANNEL": self._channel_spin.value(),
             "RADIUS": self._radius_spin.value(),
@@ -587,6 +1618,9 @@ class GlobalTrackingDialog(QDialog):
             "DO_SUBPIXEL_LOCALIZATION": self._subpixel_check.isChecked(),
             "DO_MEDIAN_FILTERING": self._median_check.isChecked(),
         }
+        if detector_id == _STARRYNITE_DETECTOR_ID:
+            detector_common["THRESHOLD"] = 0.0
+            detector_common["INTENSITY_THRESHOLD"] = self._threshold_spin.value()
         detector_schema = self._registry.get_descriptor(detector_id).settings_schema
         detector_settings.update(
             (key, value)
@@ -598,6 +1632,7 @@ class GlobalTrackingDialog(QDialog):
     def get_request(self) -> TrackingRequest:
         """Build the immutable global request represented by the form."""
 
+        self._refresh_starrynite_compatibility()
         error = self._settings_validation_error()
         if error:
             raise ValueError(error)
@@ -607,6 +1642,39 @@ class GlobalTrackingDialog(QDialog):
         detector_spec = self.get_detector_spec()
         tracker_id = str(self._tracker_combo.currentData())
         tracker_settings = self._registry.default_settings(tracker_id)
+        if tracker_id == _STARRYNITE_NATIVE_TRACKER_ID:
+            tracker_settings.update(self._starrynite_tracker_settings)
+        elif tracker_id == _STARRYNITE_EXACT_TRACKER_ID:
+            from ..tracking.starrynite import sha256_file
+
+            profile = self._starrynite_profile
+            parameter_path = self._starrynite_parameter_path
+            classifier_path = self._starrynite_neutral_classifier_path
+            assert profile is not None
+            assert parameter_path is not None
+            assert profile.model_path is not None
+            assert classifier_path is not None
+            tracker_settings.update(
+                {
+                    "STARRYNITE_COMPATIBILITY_MODE": _STARRYNITE_EXACT_BACKEND,
+                    "STARRYNITE_PARAMETER_FILE": str(parameter_path),
+                    "STARRYNITE_PARAMETER_SHA256": profile.parameter_sha256,
+                    "STARRYNITE_MODEL_FILE": str(profile.model_path),
+                    "STARRYNITE_MODEL_SHA256": profile.model_sha256,
+                    "STARRYNITE_NEUTRAL_CLASSIFIER_FILE": str(classifier_path),
+                    "STARRYNITE_NEUTRAL_CLASSIFIER_SHA256": sha256_file(
+                        classifier_path
+                    ),
+                }
+            )
+            for key in (
+                "STARRYNITE_FORCE_MODE",
+                "STARRYNITE_FORCE_END_FRAME",
+                "STARRYNITE_RECORD_ANSWERS",
+                "STARRYNITE_USE_STATIC_DIAMETER",
+            ):
+                if key in self._starrynite_tracker_settings:
+                    tracker_settings[key] = self._starrynite_tracker_settings[key]
         gap_frames = self._gap_spin.value()
         max_distance = self._distance_spin.value()
         tracker_common = {
@@ -614,7 +1682,7 @@ class GlobalTrackingDialog(QDialog):
             "ALLOW_GAP_CLOSING": gap_frames > 0,
             "GAP_CLOSING_MAX_DISTANCE": max_distance,
             "MAX_FRAME_GAP": gap_frames + 1 if gap_frames > 0 else 1,
-            "ALLOW_TRACK_SPLITTING": False,
+            "ALLOW_TRACK_SPLITTING": self._division_check.isChecked(),
             "ALLOW_TRACK_MERGING": False,
         }
         tracker_schema = self._registry.get_descriptor(tracker_id).settings_schema
@@ -647,6 +1715,10 @@ class GlobalTrackingDialog(QDialog):
                 "Check the detector settings and current frame, then try again.",
                 exc,
             )
+            return None
+        preview_error = self._detector_preview_validation_error(frame)
+        if preview_error:
+            self._set_detector_status(preview_error, color="#e06c75")
             return None
 
         self._clear_detector_preview()
@@ -1239,11 +2311,16 @@ class GlobalTrackingDialog(QDialog):
         target_ids = {edge.target_id for edge in proposal.edges}
         roots = [detection for detection in detections if detection.detection_id not in target_ids]
         original_gaps = sum(edge.kind == "gap" for edge in proposal.edges)
+        division_source_ids = {
+            edge.source_id for edge in proposal.edges if edge.kind == "split"
+        }
         self._summary_label.setText(
             f"<b>{len(detections)} detected spots</b> · "
             f"{preview.proposed_count} positions to add after interpolation · "
             f"{len(roots)} tracks · {len(preview.links)} adjacent link segments · "
-            f"{original_gaps} bridged gaps ({preview.interpolated_count} interpolated positions)"
+            f"{original_gaps} bridged gaps ({preview.interpolated_count} interpolated positions) · "
+            f"{len(division_source_ids)} proposed division"
+            f"{'s' if len(division_source_ids) != 1 else ''}"
         )
 
         detections_by_frame: dict[int, list[Any]] = defaultdict(list)
@@ -1260,6 +2337,14 @@ class GlobalTrackingDialog(QDialog):
         roots_by_frame: dict[int, int] = defaultdict(int)
         for root in roots:
             roots_by_frame[root.frame] += 1
+        detections_by_id = {
+            detection.detection_id: detection for detection in proposal.detections
+        }
+        divisions_by_frame: dict[int, int] = defaultdict(int)
+        for source_id in division_source_ids:
+            source = detections_by_id.get(source_id)
+            if source is not None:
+                divisions_by_frame[source.frame] += 1
 
         start = proposal.request.scope.start_frame
         end = proposal.request.scope.end_frame
@@ -1279,6 +2364,11 @@ class GlobalTrackingDialog(QDialog):
                 notes.append(f"{interpolated} interpolated gap")
             if roots_by_frame.get(frame, 0) and frame > start:
                 notes.append(f"{roots_by_frame[frame]} new track start")
+            if divisions_by_frame.get(frame, 0):
+                count = divisions_by_frame[frame]
+                notes.append(
+                    f"{count} proposed division{'s' if count != 1 else ''}"
+                )
             if frame in warning_frames:
                 notes.append("Analysis warning")
             review = "; ".join(notes) if notes else "Inspect"
@@ -1321,8 +2411,75 @@ class GlobalTrackingDialog(QDialog):
     def _detector_parameters_changed(self, *_args) -> None:
         self._parameters_changed(detector_changed=True)
 
+    def _detector_changed(self, *_args) -> None:
+        self._update_starrynite_behavior_visibility()
+        detector_id = self._detector_combo.currentData()
+        if detector_id is not None:
+            try:
+                default = self._registry.default_settings(str(detector_id)).get(
+                    "DO_SUBPIXEL_LOCALIZATION",
+                    True,
+                )
+                self._subpixel_check.setChecked(bool(default))
+            except (KeyError, ValueError):
+                pass
+        self._render_starrynite_file_summary()
+        self._detector_parameters_changed()
+
     def _tracking_parameters_changed(self, *_args) -> None:
         self._parameters_changed(detector_changed=False)
+
+    def _tracker_changed(self, *_args) -> None:
+        if self._exact_starrynite_selected():
+            # The exact runtime consumes detector history and geometry state
+            # from the complete source movie.  Selecting it interactively
+            # should therefore select its required detector and a runnable
+            # scope immediately instead of leaving native-tracker choices in
+            # place.
+            self._select_combo_value(
+                self._detector_combo,
+                _STARRYNITE_DETECTOR_ID,
+            )
+            self._start_spin.setValue(self._range_start)
+            self._end_spin.setValue(self._range_end)
+        self._update_starrynite_behavior_visibility()
+        self._sync_division_capability(use_default=True)
+        self._render_starrynite_file_summary()
+        self._tracking_parameters_changed()
+
+    def _sync_division_capability(self, *, use_default: bool) -> None:
+        tracker_id = self._tracker_combo.currentData()
+        if tracker_id == _STARRYNITE_EXACT_TRACKER_ID:
+            self._division_check.setChecked(True)
+            self._division_check.setEnabled(False)
+            self._division_check.setToolTip(
+                "Exact StarryNite replay intrinsically evaluates two-daughter "
+                "division hypotheses."
+            )
+            return
+        capable = False
+        default = False
+        if tracker_id is not None:
+            try:
+                descriptor = self._registry.get_descriptor(str(tracker_id))
+                capable = "splitting" in descriptor.capabilities
+                default = bool(
+                    self._registry.default_settings(str(tracker_id)).get(
+                        "ALLOW_TRACK_SPLITTING", False
+                    )
+                )
+            except (KeyError, ValueError):
+                capable = False
+        self._division_check.setEnabled(capable)
+        if not capable:
+            self._division_check.setChecked(False)
+        elif use_default:
+            self._division_check.setChecked(default)
+        self._division_check.setToolTip(
+            "Propose two-daughter lineage branches for review."
+            if capable
+            else "The selected tracker does not support divisions."
+        )
 
     def _parameters_changed(self, *, detector_changed: bool) -> None:
         self._validate_settings()
@@ -1360,6 +2517,91 @@ class GlobalTrackingDialog(QDialog):
             return f"Choose an image channel between 1 and {self._num_channels}."
         return ""
 
+    def _detector_preview_validation_error(self, frame: int | None = None) -> str:
+        detector_error = self._detector_validation_error()
+        if detector_error:
+            return detector_error
+        if not self._exact_starrynite_selected():
+            return ""
+        if self._detector_combo.currentData() != _STARRYNITE_DETECTOR_ID:
+            return (
+                "Exact current-frame testing requires the StarryNite detector. "
+                "Select it before testing the source-bound detector."
+            )
+        profile = self._starrynite_profile
+        if profile is None or self._starrynite_parameter_path is None:
+            return (
+                "Load a StarryNite parameter file before testing the exact "
+                "detector."
+            )
+        distribution = profile.detector_settings.get(
+            "STARRYNITE_DISTRIBUTION_FILE"
+        )
+        if not distribution or not Path(str(distribution)).is_file():
+            return (
+                "The loaded parameter file must select an existing detector "
+                "distribution MAT file before exact detector testing."
+            )
+        calibration_warnings = self._starrynite_calibration_warnings(profile)
+        if calibration_warnings:
+            return (
+                "Exact detector testing requires matching calibration. "
+                + calibration_warnings[0]
+            )
+        expected_radius = profile.detector_settings.get("RADIUS")
+        if expected_radius is not None and abs(
+            self._radius_spin.value() - float(expected_radius)
+        ) > 1e-9:
+            return (
+                "Save the changed nucleus radius to a parameter copy and reload "
+                "it before exact detector testing."
+            )
+        expected_threshold = profile.detector_settings.get("INTENSITY_THRESHOLD")
+        if expected_threshold is not None and abs(
+            self._threshold_spin.value() - float(expected_threshold)
+        ) > 1e-9:
+            return (
+                "Save the changed detection threshold to a parameter copy and "
+                "reload it before exact detector testing."
+            )
+        if self._subpixel_check.isChecked() or self._median_check.isChecked():
+            return (
+                "Turn off native subpixel localization and median filtering "
+                "before exact detector testing."
+            )
+        if frame is None:
+            try:
+                frame = self._read_current_frame()
+            except (TypeError, ValueError):
+                return (
+                    "Exact current-frame testing requires the viewer at t=1. "
+                    "Build the full draft to warm the sequential detector across "
+                    "all requested frames."
+                )
+        if int(frame) != 1:
+            return (
+                "Exact current-frame testing is available only at t=1. Later "
+                "frames depend on diameter and cell-count state from prior frames; "
+                "build the full draft to warm that sequential state."
+            )
+        return ""
+
+    def _set_detector_preview_tooltip(self, error: str) -> None:
+        if error:
+            tooltip = error
+        elif self._exact_starrynite_selected():
+            tooltip = (
+                "Run the source-bound detector on t=1. For any later frame, build "
+                "the full draft so all prior sequential detector state is warmed."
+            )
+        else:
+            tooltip = (
+                "Run only the detector on the current full 3D stack. No links or "
+                "accept-capable draft are created."
+            )
+        self._detector_preview_button.setToolTip(tooltip)
+        self._detector_preview_button.setAccessibleDescription(tooltip)
+
     def _settings_validation_error(self) -> str:
         detector_error = self._detector_validation_error()
         if detector_error:
@@ -1368,10 +2610,78 @@ class GlobalTrackingDialog(QDialog):
             return "No compatible tracker is installed."
         if self._start_spin.value() > self._end_spin.value():
             return "The start time must not be later than the end time."
+        exact_error = self._exact_settings_validation_error()
+        if exact_error:
+            return exact_error
         if not self._dataset_is_empty():
             return (
                 "Whole-dataset tracking requires an empty nuclei record. Undo "
                 "curation edits or use Auto Forward for a selected cell."
+            )
+        return ""
+
+    def _exact_settings_validation_error(self) -> str:
+        if not self._exact_starrynite_selected():
+            return ""
+        if self._detector_combo.currentData() != _STARRYNITE_DETECTOR_ID:
+            return "Exact StarryNite tracking requires the StarryNite detector."
+        if (
+            self._start_spin.value() != self._range_start
+            or self._end_spin.value() != self._range_end
+        ):
+            return (
+                "Exact StarryNite tracking must cover the complete movie "
+                f"(t={self._range_start}–{self._range_end}) to preserve sequential "
+                "detector state, initialization, and MATLAB event order."
+            )
+        if self._exact_scope_error:
+            return self._exact_scope_error
+        profile = self._starrynite_profile
+        if profile is None or self._starrynite_parameter_path is None:
+            return "Load a StarryNite parameter file before selecting exact tracking."
+        if self._starrynite_neutral_classifier_path is None:
+            return "Select a source-bound classifier export for exact tracking."
+        distribution = profile.detector_settings.get(
+            "STARRYNITE_DISTRIBUTION_FILE"
+        )
+        if not distribution or not Path(str(distribution)).is_file():
+            return (
+                "The parameter file must select an existing detector distribution "
+                "MAT file for exact tracking."
+            )
+        report = self._starrynite_compatibility_report
+        if report is None:
+            return "Compatibility has not been validated for this parameter file."
+        try:
+            readiness = report.backend(_STARRYNITE_EXACT_BACKEND)
+        except KeyError:
+            return "The installed registry does not expose the exact runtime."
+        if not readiness.runnable:
+            blocker = readiness.blockers[0]
+            return f"Exact StarryNite tracking is blocked: {blocker.message}"
+        calibration_warnings = self._starrynite_calibration_warnings(profile)
+        if calibration_warnings:
+            return "Exact tracking requires matching calibration. " + calibration_warnings[0]
+        expected_radius = profile.detector_settings.get("RADIUS")
+        if expected_radius is not None and abs(
+            self._radius_spin.value() - float(expected_radius)
+        ) > 1e-9:
+            return (
+                "The nucleus radius differs from the loaded parameter source. Save "
+                "the tuned parameter copy and reload it before exact tracking."
+            )
+        expected_threshold = profile.detector_settings.get("INTENSITY_THRESHOLD")
+        if expected_threshold is not None and abs(
+            self._threshold_spin.value() - float(expected_threshold)
+        ) > 1e-9:
+            return (
+                "The detection threshold differs from the loaded parameter source. "
+                "Save the tuned parameter copy and reload it before exact tracking."
+            )
+        if self._subpixel_check.isChecked() or self._median_check.isChecked():
+            return (
+                "Subpixel localization and median filtering are native-only "
+                "overrides; turn both off for exact tracking."
             )
         return ""
 
@@ -1385,28 +2695,43 @@ class GlobalTrackingDialog(QDialog):
             self.ACCEPTING,
         }
         self._preview_button.setEnabled(bool(can_build))
-        detector_error = self._detector_validation_error()
-        can_test = not detector_error and self._state not in {
+        detector_preview_error = self._detector_preview_validation_error()
+        can_test = not detector_preview_error and self._state not in {
             self.RUNNING,
             self.CANCELING,
             self.ACCEPTING,
             self.READY,
         }
         self._detector_preview_button.setEnabled(bool(can_test))
+        self._set_detector_preview_tooltip(detector_preview_error)
         return not bool(error)
 
     def _set_running(self, running: bool) -> None:
         self._settings_widget.setEnabled(not running)
         self._advanced_toggle.setEnabled(not running)
         self._advanced_widget.setEnabled(not running)
+        self._starrynite_file_button.setEnabled(not running)
+        self._starrynite_recent_button.setEnabled(not running)
+        self._starrynite_save_button.setEnabled(
+            not running and self._starrynite_profile is not None
+        )
+        self._starrynite_neutral_button.setEnabled(
+            not running and self._starrynite_profile is not None
+        )
+        self._starrynite_report_button.setEnabled(
+            not running and self._starrynite_compatibility_report is not None
+        )
         self._reset_button.setEnabled(not running)
         self._preview_button.setEnabled(
             not running and not self._settings_validation_error()
         )
         self._detector_preview_button.setEnabled(
             not running
-            and not self._detector_validation_error()
+            and not self._detector_preview_validation_error()
             and self._state != self.READY
+        )
+        self._set_detector_preview_tooltip(
+            self._detector_preview_validation_error() if not running else ""
         )
         self._accept_button.setEnabled(False if running else self._accept_button.isEnabled())
         self._cancel_run_button.setVisible(running)
@@ -1504,6 +2829,22 @@ class GlobalTrackingDialog(QDialog):
         self._banner.setToolTip(message)
 
     def _restore_defaults(self) -> None:
+        self._starrynite_detector_settings = {}
+        self._starrynite_tracker_settings = {}
+        self._starrynite_parameter_path = None
+        self._starrynite_profile = None
+        self._starrynite_neutral_classifier_path = None
+        self._starrynite_compatibility_report = None
+        self._starrynite_session_note_html = ""
+        self._starrynite_classifier_note_html = ""
+        self._starrynite_save_button.setEnabled(False)
+        self._starrynite_neutral_button.setEnabled(False)
+        self._starrynite_report_button.setEnabled(False)
+        self._starrynite_file_label.clear()
+        self._starrynite_file_label.setToolTip("")
+        self._starrynite_file_label.setAccessibleDescription("")
+        self._starrynite_file_label.hide()
+        self._refresh_recent_parameter_button()
         self._start_spin.setValue(self._range_start)
         self._end_spin.setValue(self._range_end)
         self._channel_spin.setValue(1)
@@ -1511,8 +2852,22 @@ class GlobalTrackingDialog(QDialog):
         self._threshold_spin.setValue(5.0)
         self._distance_spin.setValue(8.0)
         self._gap_spin.setValue(1)
-        self._subpixel_check.setChecked(True)
+        detector_id = self._detector_combo.currentData()
+        default_subpixel = True
+        if detector_id is not None:
+            try:
+                default_subpixel = bool(
+                    self._registry.default_settings(str(detector_id)).get(
+                        "DO_SUBPIXEL_LOCALIZATION",
+                        True,
+                    )
+                )
+            except (KeyError, ValueError):
+                pass
+        self._subpixel_check.setChecked(default_subpixel)
         self._median_check.setChecked(False)
+        self._sync_division_capability(use_default=True)
+        self._update_starrynite_behavior_visibility()
 
     def _set_advanced_visible(self, visible: bool) -> None:
         self._advanced_widget.setVisible(visible)
@@ -1576,6 +2931,7 @@ class GlobalTrackingDialog(QDialog):
             return
         frame = int(frame)
         self._update_detector_button_text(frame)
+        self._validate_settings()
         if (
             self._active_run_kind == "detector"
             and self._active_detector_frame is not None

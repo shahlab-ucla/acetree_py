@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import hashlib
 
 import pytest
 
@@ -10,13 +10,18 @@ pytest.importorskip("qtpy")
 
 from acetree_py.gui.dataset_dialog import DatasetCreationDialog
 from acetree_py.gui.global_tracking_dialog import GlobalTrackingDialog
+from acetree_py.gui.tracking_preview import expand_tracking_preview
 from acetree_py.tracking.api import (
     Calibration,
+    ComponentSpec,
     Detection,
     TrackEdge,
+    TrackingRequest,
     TrackingResult,
+    TrackingScope,
 )
 from acetree_py.tracking.registry import TrackingRegistry, build_default_registry
+from acetree_py.tracking.starrynite import read_parameter_file
 
 
 class _ViewerApp:
@@ -84,6 +89,252 @@ def _detector_hits(frame: int = 2) -> tuple[Detection, ...]:
         Detection("preview-a", frame, 3.0, 4.0, 1.0, 2.0, 9.0),
         Detection("preview-b", frame, 10.0, 12.0, 1.0, 2.0, 6.0),
     )
+
+
+def test_global_starrynite_threshold_control_maps_to_absolute_legacy_threshold(qtbot):
+    registry = build_default_registry(discover_plugins=False)
+    dialog = GlobalTrackingDialog(1, 3, registry=registry)
+    qtbot.addWidget(dialog)
+    detector_index = dialog._detector_combo.findData("acetree.starrynite_detector")
+    dialog._detector_combo.setCurrentIndex(detector_index)
+    dialog._threshold_spin.setValue(18.0)
+
+    detector = dialog.get_detector_spec()
+
+    assert detector.settings["THRESHOLD"] == 0.0
+    assert detector.settings["INTENSITY_THRESHOLD"] == pytest.approx(18.0)
+    assert detector.settings["DO_SUBPIXEL_LOCALIZATION"] is False
+
+    dialog._subpixel_check.setChecked(True)
+    assert dialog.get_detector_spec().settings["DO_SUBPIXEL_LOCALIZATION"] is True
+
+
+def test_global_starrynite_parameter_load_save_restore_and_recent(
+    qtbot,
+    tmp_path,
+):
+    model_path = tmp_path / "legacy-model.mat"
+    model_path.write_bytes(b"legacy classifier provenance")
+    parameter_path = tmp_path / "standard-parameters.txt"
+    parameter_path.write_text(
+        "% preserve this legacy comment\n"
+        "firsttimestepnumcells=81;\n"
+        "xyres=.25;\n"
+        "firsttimestepdiam=40;\n"
+        "parameters.staging=[25,80];\n"
+        "parameters.intensitythreshold=[10,20,30];\n"
+        "trackingparameters.temporalcutoff=[2,3,4];\n"
+        "trackingparameters.candidateCutoff=1.4;\n"
+        "load 'legacy-model.mat';\n",
+        encoding="utf-8",
+    )
+    registry = build_default_registry(discover_plugins=False)
+    dialog = GlobalTrackingDialog(1, 5, registry=registry)
+    qtbot.addWidget(dialog)
+
+    dialog.load_starrynite_parameter_file(str(parameter_path))
+    request = dialog.get_request()
+
+    assert dialog._detector_combo.currentData() == "acetree.starrynite_detector"
+    assert dialog._tracker_combo.currentData() == "acetree.starrynite_division"
+    assert dialog._radius_spin.value() == pytest.approx(5.0)
+    assert dialog._threshold_spin.value() == pytest.approx(30.0)
+    assert dialog._gap_spin.value() == 3
+    assert not dialog._subpixel_check.isChecked()
+    assert dialog._division_check.isChecked()
+    assert dialog._starrynite_save_button.isEnabled()
+    assert not dialog._starrynite_behavior_label.isHidden()
+    assert "provenance only" in dialog._starrynite_behavior_label.text()
+    assert "native geometry scorer" in dialog._starrynite_behavior_label.text()
+    assert "provenance-only" in dialog._starrynite_file_label.text()
+    assert request.detector.settings["STARRYNITE_STAGE_INDEX"] == 2
+    assert request.detector.settings["STARRYNITE_CELL_COUNT"] == 81
+    assert request.detector.settings["INTENSITY_THRESHOLD"] == pytest.approx(30.0)
+    assert request.tracker.settings["CANDIDATE_CUTOFF"] == pytest.approx(1.4)
+    assert request.tracker.settings["STARRYNITE_MODEL_FILE"] == str(
+        model_path.resolve()
+    )
+    assert len(request.tracker.settings["STARRYNITE_MODEL_SHA256"]) == 64
+
+    dialog._radius_spin.setValue(6.0)
+    dialog._threshold_spin.setValue(33.0)
+    dialog._gap_spin.setValue(2)
+    dialog._distance_spin.setValue(13.5)
+    dialog._division_check.setChecked(False)
+    dialog._subpixel_check.setChecked(True)
+    dialog._median_check.setChecked(True)
+    saved_path = tmp_path / "standard-parameters-tuned.txt"
+    assert dialog.save_starrynite_parameter_file(str(saved_path)) == ()
+    saved = read_parameter_file(saved_path)
+
+    assert saved.source.startswith(read_parameter_file(parameter_path).source)
+    assert saved.normalized_settings["firsttimestepdiam"] == pytest.approx(48.0)
+    assert saved.normalized_settings["parameters.intensitythreshold"] == (
+        10,
+        20,
+        33.0,
+    )
+    assert saved.normalized_settings["trackingparameters.temporalcutoff"] == (
+        2,
+        3,
+        3,
+    )
+    assert dialog.recent_starrynite_parameter_file() == saved_path.resolve()
+    assert dialog._distance_spin.value() == pytest.approx(13.5)
+    assert not dialog._division_check.isChecked()
+    assert dialog._subpixel_check.isChecked()
+    assert dialog._median_check.isChecked()
+    saved_request = dialog.get_request()
+    assert saved_request.detector.settings["STARRYNITE_PARAMETER_FILE"] == str(
+        saved_path.resolve()
+    )
+
+    restored = GlobalTrackingDialog(
+        1,
+        5,
+        registry=registry,
+        initial_request=saved_request,
+    )
+    qtbot.addWidget(restored)
+    assert restored._starrynite_parameter_path == saved_path.resolve()
+    assert restored._threshold_spin.value() == pytest.approx(33.0)
+    assert restored.get_request().tracker.settings["CANDIDATE_CUTOFF"] == (
+        pytest.approx(1.4)
+    )
+
+    recent = GlobalTrackingDialog(1, 5, registry=registry)
+    qtbot.addWidget(recent)
+    assert recent.recent_starrynite_parameter_file() == saved_path.resolve()
+    assert not recent._starrynite_recent_button.isHidden()
+    recent._starrynite_recent_button.click()
+    assert recent._starrynite_parameter_path == saved_path.resolve()
+    assert recent._starrynite_recent_button.isHidden()
+
+
+def test_exact_tracker_interactive_selection_uses_full_movie_and_restore_fails_closed(
+    qtbot,
+) -> None:
+    registry = build_default_registry(discover_plugins=False)
+    dialog = GlobalTrackingDialog(1, 5, registry=registry)
+    qtbot.addWidget(dialog)
+    dialog._start_spin.setValue(2)
+    dialog._end_spin.setValue(4)
+
+    dialog._tracker_combo.setCurrentIndex(
+        dialog._tracker_combo.findData("acetree.starrynite_legacy_exact")
+    )
+
+    assert dialog._detector_combo.currentData() == "acetree.starrynite_detector"
+    assert dialog._start_spin.value() == 1
+    assert dialog._end_spin.value() == 5
+
+    partial_request = TrackingRequest(
+        detector=ComponentSpec("acetree.starrynite_detector", {}),
+        tracker=ComponentSpec(
+            "acetree.starrynite_legacy_exact",
+            {"STARRYNITE_COMPATIBILITY_MODE": "legacy_exact_refinement"},
+        ),
+        scope=TrackingScope("global", 1, 4),
+    )
+    restored = GlobalTrackingDialog(
+        1,
+        5,
+        registry=registry,
+        initial_request=partial_request,
+    )
+    qtbot.addWidget(restored)
+
+    error = restored._settings_validation_error()
+    assert "complete movie" in error
+    assert "t=1–5" in error
+    assert not restored._preview_button.isEnabled()
+
+
+def test_global_initial_request_rebases_profile_metadata_and_warns_on_calibration(
+    qtbot,
+    tmp_path,
+) -> None:
+    model_path = tmp_path / "legacy-model.mat"
+    model_path.write_bytes(b"initial model")
+    parameter_path = tmp_path / "rebase-parameters.m"
+    parameter_path.write_text(
+        "firsttimestepnumcells=30;\n"
+        "xyres=.25;\n"
+        "zres=1;\n"
+        "parameters.staging=[25,80];\n"
+        "parameters.intensitythreshold=[5,8,12];\n"
+        "trackingparameters.candidateCutoff=1.4;\n"
+        "load 'legacy-model.mat';\n",
+        encoding="utf-8",
+    )
+    registry = build_default_registry(discover_plugins=False)
+    original = GlobalTrackingDialog(1, 3, registry=registry)
+    qtbot.addWidget(original)
+    original.load_starrynite_parameter_file(str(parameter_path))
+    original_request = original.get_request()
+
+    parameter_path.write_text(
+        "firsttimestepnumcells=90;\n"
+        "xyres=.25;\n"
+        "zres=1;\n"
+        "parameters.staging=[25,80];\n"
+        "parameters.intensitythreshold=[15,22,33];\n"
+        "trackingparameters.candidateCutoff=2.2;\n"
+        "load 'legacy-model.mat';\n",
+        encoding="utf-8",
+    )
+    model_path.write_bytes(b"changed model")
+
+    restored = GlobalTrackingDialog(
+        1,
+        3,
+        registry=registry,
+        initial_request=original_request,
+        calibration=Calibration(1.0, 2.0),
+    )
+    qtbot.addWidget(restored)
+    request = restored.get_request()
+
+    assert restored._threshold_spin.value() == pytest.approx(8.0)
+    assert request.detector.settings["STARRYNITE_CELL_COUNT"] == 90
+    assert request.detector.settings["STARRYNITE_STAGE_INDEX"] == 2
+    assert request.detector.settings["STARRYNITE_PARAMETER_SHA256"] == (
+        hashlib.sha256(parameter_path.read_bytes()).hexdigest()
+    )
+    assert request.tracker.settings["STARRYNITE_MODEL_SHA256"] == (
+        hashlib.sha256(model_path.read_bytes()).hexdigest()
+    )
+    assert request.tracker.settings["CANDIDATE_CUTOFF"] == pytest.approx(2.2)
+    assert "Source/model changed" in restored._starrynite_file_label.text()
+    assert "dataset uses" in restored._starrynite_file_label.toolTip()
+
+
+def test_global_review_surfaces_division_control_and_event_counts(qtbot) -> None:
+    dialog = GlobalTrackingDialog(
+        1,
+        2,
+        registry=build_default_registry(discover_plugins=False),
+    )
+    qtbot.addWidget(dialog)
+    parent = Detection("parent", 1, 3.0, 4.0, 1.0, 2.0, 9.0)
+    first = Detection("daughter-a", 2, 2.5, 4.0, 1.0, 2.0, 8.0)
+    second = Detection("daughter-b", 2, 3.5, 4.0, 1.0, 2.0, 8.0)
+    result = TrackingResult(
+        request=dialog.get_request(),
+        detections=(parent, first, second),
+        edges=(
+            TrackEdge("parent", "daughter-a", 1.0, kind="split"),
+            TrackEdge("parent", "daughter-b", 1.0, kind="split"),
+        ),
+    )
+    dialog._proposal = result
+    dialog._expanded_preview = expand_tracking_preview(result)
+    dialog._populate_review()
+
+    assert not dialog._advanced_widget.isAncestorOf(dialog._division_check)
+    assert "1 proposed division" in dialog._summary_label.text()
+    assert "1 proposed division" in dialog._table.item(0, 6).text()
+    assert "forked path" in dialog._legend_label.text()
 
 
 def test_global_workbench_uses_host_slots_and_reviews_every_frame(qtbot):

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -22,9 +22,11 @@ from .api import (
     ComponentSpec,
     Detection,
     TrackEdge,
+    TrackerGraphResult,
     TrackingOutcome,
     TrackingRequest,
     TrackingResult,
+    WholeMoviePreflightContext,
 )
 from .registry import TrackingRegistry, get_default_registry
 
@@ -38,6 +40,15 @@ class TrackingCancelled(RuntimeError):
 
 ProgressCallback = Callable[[int, int, str], None]
 CancelCallback = Callable[[], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class _ForwardBranchState:
+    """One live branch in selected-cell sparse forward tracking."""
+
+    previous: Detection | None
+    last: Detection
+    missing: int = 0
 
 
 class TrackingPipeline:
@@ -158,6 +169,23 @@ class TrackingPipeline:
         detector = self.registry.create_detector(request.detector.plugin_id)
         tracker = self.registry.create_tracker(request.tracker.plugin_id)
         channel = _target_channel(request)
+        preflight_movie = getattr(tracker, "preflight_movie", None)
+        if callable(preflight_movie):
+            _check_cancelled(cancelled)
+            preflight_result = preflight_movie(
+                request.tracker.settings,
+                context=WholeMoviePreflightContext(
+                    detector_spec=request.detector,
+                    calibration=calibration,
+                    scope=request.scope,
+                    source_num_timepoints=image_provider.num_timepoints,
+                    source_num_channels=image_provider.num_channels,
+                    target_channel=channel,
+                ),
+            )
+            if preflight_result is not None:
+                raise TypeError("A tracker's preflight_movie method must return None")
+            _check_cancelled(cancelled)
         frames = range(request.scope.start_frame, request.scope.end_frame + 1)
         total = max(0, request.scope.end_frame - request.scope.start_frame + 1)
         detections: list[Detection] = []
@@ -177,16 +205,70 @@ class TrackingPipeline:
                 progress(done, total, f"Detecting nuclei at time {frame}")
 
         _check_cancelled(cancelled)
-        edges = tracker.track(tuple(detections), request.tracker.settings)
+        raw_detections = tuple(detections)
+        refine_movie = getattr(tracker, "refine_movie", None)
+        refine_graph = getattr(tracker, "refine_graph", None)
+        graph_provenance: dict[str, Any] = {}
+        warnings: tuple[str, ...] = ()
+        used_refinement = False
+        if callable(refine_movie):
+            # Whole-movie compatibility backends need the immutable run scope
+            # and voxel calibration to validate legacy anisotropy and temporal
+            # history.  Keep this separate from the lightweight refine_graph
+            # hook so existing graph refiners retain their two-argument API.
+            graph = refine_movie(
+                raw_detections,
+                request.tracker.settings,
+                detector_spec=request.detector,
+                calibration=calibration,
+                start_frame=request.scope.start_frame,
+                end_frame=request.scope.end_frame,
+                cancelled=cancelled,
+                progress=progress,
+            )
+            used_refinement = True
+        elif callable(refine_graph):
+            graph = refine_graph(raw_detections, request.tracker.settings)
+            used_refinement = True
+        else:
+            graph = None
+        if used_refinement:
+            if not isinstance(graph, TrackerGraphResult):
+                raise TypeError(
+                    "A tracker's whole-graph refinement method must return "
+                    "TrackerGraphResult"
+                )
+            raw_ids = {item.detection_id for item in raw_detections}
+            retained_ids = {item.detection_id for item in graph.detections}
+            if not retained_ids <= raw_ids:
+                raise ValueError("A graph refiner cannot invent detector positions")
+            expected_rejected = raw_ids - retained_ids
+            if set(graph.rejected_detection_ids) != expected_rejected:
+                raise ValueError(
+                    "Graph refinement must identify every omitted detector position"
+                )
+            result_detections = graph.detections
+            edges = graph.edges
+            warnings = graph.warnings
+            graph_provenance = {
+                "rejected_detection_count": len(graph.rejected_detection_ids),
+                **dict(graph.provenance),
+            }
+        else:
+            result_detections = raw_detections
+            edges = tracker.track(raw_detections, request.tracker.settings)
         if progress is not None:
             progress(total, total, "Linking detections")
+        provenance = _provenance(self.registry, request, mode="global")
+        if graph_provenance:
+            provenance["graph_refinement"] = graph_provenance
         return TrackingResult(
             request=request,
-            detections=tuple(detections),
+            detections=tuple(result_detections),
             edges=tuple(edges),
             existing_anchors={},
-            warnings=(),
-            provenance=_provenance(self.registry, request, mode="global"),
+            warnings=warnings,
+            provenance=provenance,
         )
 
     def _run_selected_forward(
@@ -225,6 +307,21 @@ class TrackingPipeline:
             quality=1.0,
             features={"MANUAL_SEED": True, "acetree_existing": 1.0},
         )
+
+        branch_policy = getattr(request.scope, "branch_policy", "stop")
+        if branch_policy == "follow_both":
+            return self._run_selected_forward_branches(
+                image_provider,
+                calibration,
+                request,
+                nuclei_record,
+                seed_detection,
+                detector,
+                tracker,
+                channel,
+                cancelled=cancelled,
+                progress=progress,
+            )
 
         accepted: list[Detection] = [seed_detection]
         edges: list[TrackEdge] = []
@@ -304,10 +401,11 @@ class TrackingPipeline:
             # biologically actionable than the generic equal-cost condition.
             # Diagnose the probable division first so review can show both
             # daughter candidates with the appropriate explanation.
-            if _looks_like_division(candidates, ranked, predicted):
+            probable_division = _looks_like_division(candidates, ranked, predicted)
+            if probable_division and branch_policy == "stop":
                 warnings.append(
                     f"Stopped at t={frame}: two candidates form a probable division; "
-                    "Simple LAP does not create daughter branches"
+                    "division behavior is set to stop and review"
                 )
                 outcome = _stopped_outcome(
                     "division",
@@ -318,7 +416,11 @@ class TrackingPipeline:
                     _ranked_review_candidates(candidates, ranked),
                 )
                 break
-            if len(ranked) > 1 and _costs_are_ambiguous(ranked, ambiguity_ratio):
+            if (
+                len(ranked) > 1
+                and _costs_are_ambiguous(ranked, ambiguity_ratio)
+                and not (probable_division and branch_policy == "follow_best")
+            ):
                 warnings.append(
                     f"Stopped at t={frame}: two candidates had similar assignment costs"
                 )
@@ -343,6 +445,29 @@ class TrackingPipeline:
                 (edge for edge in candidate_edges if edge.source_id == last.detection_id),
                 key=lambda edge: (edge.cost, edge.target_id),
             )
+
+            split_edges = tuple(edge for edge in outgoing if edge.kind == "split")
+            if split_edges and len(split_edges) != 2:
+                raise RuntimeError("Tracker returned an incomplete division event")
+            if split_edges and branch_policy == "stop":
+                by_id = {candidate.detection_id: candidate for candidate in candidates}
+                daughters = tuple(
+                    by_id[edge.target_id]
+                    for edge in split_edges
+                    if edge.target_id in by_id
+                )
+                warnings.append(
+                    f"Stopped at t={frame}: the tracker proposed a two-daughter division"
+                )
+                outcome = _stopped_outcome(
+                    "division",
+                    frame,
+                    last,
+                    predicted,
+                    search_radius_um,
+                    daughters,
+                )
+                break
 
             if not outgoing:
                 missing += 1
@@ -413,6 +538,353 @@ class TrackingPipeline:
             existing_anchors={seed_id: (seed_time, seed_index)},
             warnings=tuple(warnings),
             provenance=_provenance(self.registry, request, mode="selected_forward"),
+            outcome=outcome,
+        )
+
+    def _run_selected_forward_branches(
+        self,
+        image_provider: ImageProvider,
+        calibration: Calibration,
+        request: TrackingRequest,
+        nuclei_record: list[list[Nucleus]],
+        seed_detection: Detection,
+        detector,
+        tracker,
+        channel: int,
+        *,
+        cancelled: CancelCallback | None,
+        progress: ProgressCallback | None,
+    ) -> TrackingResult:
+        """Track a small selected lineage frontier and retain two-daughter splits.
+
+        This path intentionally stays local: every active branch owns one moving
+        ROI and asks the registered tracker to choose among only those nearby
+        observations.  Events are then reconciled deterministically so two
+        branches cannot claim the same detection.  It is suitable for selected
+        cells, not embryo-wide exhaustive detection.
+        """
+
+        descriptor = self.registry.get_descriptor(request.tracker.plugin_id)
+        if "splitting" not in descriptor.capabilities:
+            raise ValueError(
+                f"Tracker {request.tracker.plugin_id!r} cannot follow both daughters"
+            )
+        if not bool(request.tracker.settings.get("ALLOW_TRACK_SPLITTING", False)):
+            raise ValueError("Follow-both tracking requires ALLOW_TRACK_SPLITTING")
+
+        scope = request.scope
+        search_radius_um = scope.roi_radius_um or 12.0
+        ambiguity_ratio = max(1.0, float(scope.ambiguity_ratio))
+        max_missing = max(
+            0,
+            int(request.tracker.settings.get("MAX_FRAME_GAP", 1)) - 1,
+        )
+        allow_gap = bool(request.tracker.settings.get("ALLOW_GAP_CLOSING", True))
+        if (
+            allow_gap
+            and max_missing > 0
+            and "frontier_tracking" not in descriptor.capabilities
+        ):
+            raise ValueError(
+                f"Tracker {request.tracker.plugin_id!r} cannot combine follow-both "
+                "division tracking with gap closure"
+            )
+        max_active = max(2, int(request.tracker.settings.get("MAX_ACTIVE_BRANCHES", 8)))
+        total = scope.end_frame - scope.start_frame
+
+        active: dict[str, _ForwardBranchState] = {
+            seed_detection.detection_id: _ForwardBranchState(None, seed_detection)
+        }
+        accepted: dict[str, Detection] = {
+            seed_detection.detection_id: seed_detection
+        }
+        edges: list[TrackEdge] = []
+        warnings: list[str] = []
+
+        for done, frame in enumerate(
+            range(scope.start_frame + 1, scope.end_frame + 1), start=1
+        ):
+            _check_cancelled(cancelled)
+            stack = np.asarray(image_provider.get_stack(frame, channel))
+            candidate_by_id: dict[str, Detection] = {}
+            predictions: dict[str, tuple[float, float, float]] = {}
+            for branch_id in sorted(active):
+                branch = active[branch_id]
+                predicted = _predict_position(branch.previous, branch.last, frame)
+                predictions[branch_id] = predicted
+                crop, offset_zyx = _crop_around(
+                    stack,
+                    predicted,
+                    calibration,
+                    search_radius_um,
+                )
+                for candidate in detector.detect(
+                    crop,
+                    frame,
+                    calibration,
+                    request.detector.settings,
+                    offset_zyx=offset_zyx,
+                ):
+                    current = candidate_by_id.get(candidate.detection_id)
+                    if current is None or (
+                        candidate.quality,
+                        -candidate.z_um,
+                        -candidate.y_um,
+                        -candidate.x_um,
+                    ) > (
+                        current.quality,
+                        -current.z_um,
+                        -current.y_um,
+                        -current.x_um,
+                    ):
+                        candidate_by_id[candidate.detection_id] = candidate
+
+            detected_candidates = tuple(
+                sorted(candidate_by_id.values(), key=lambda item: item.detection_id)
+            )
+            candidates, collided_ids = _exclude_existing_detections(
+                detected_candidates,
+                nuclei_record,
+                frame,
+                calibration,
+            )
+            candidates = tuple(candidates)
+
+            # Solve each same-time lineage frontier together.  Calling a
+            # division tracker once per branch would make two ordinary sister
+            # continuations look like an excess-target split to each sister.
+            # A frontier-aware tracker keeps source/target roles explicit even
+            # when one branch is behind after a missing frame. Older splitting
+            # plugins can use the ordinary API while every source shares a frame.
+            candidate_ids = {candidate.detection_id for candidate in candidates}
+            proposed_by_source: dict[str, tuple[TrackEdge, ...]] = {}
+            frontier_tracker = getattr(tracker, "track_frontier", None)
+            if callable(frontier_tracker):
+                frontier = tuple(
+                    active[branch_id].last for branch_id in sorted(active)
+                )
+                proposed = frontier_tracker(
+                    frontier,
+                    candidates,
+                    request.tracker.settings,
+                )
+                for source in frontier:
+                    source_id = source.detection_id
+                    proposed_by_source[source_id] = tuple(
+                        edge
+                        for edge in proposed
+                        if edge.source_id == source_id and edge.target_id in candidate_ids
+                    )
+            else:
+                active_by_last_frame: dict[int, list[_ForwardBranchState]] = {}
+                for branch in active.values():
+                    active_by_last_frame.setdefault(branch.last.frame, []).append(branch)
+                if len(active_by_last_frame) > 1:
+                    raise ValueError(
+                        "This splitting tracker cannot solve a sparse frontier with "
+                        "branches separated by missing frames"
+                    )
+                for last_frame in sorted(active_by_last_frame):
+                    frontier = sorted(
+                        active_by_last_frame[last_frame],
+                        key=lambda branch: branch.last.detection_id,
+                    )
+                    source_ids = {branch.last.detection_id for branch in frontier}
+                    proposed = tracker.track(
+                        tuple(branch.last for branch in frontier) + candidates,
+                        request.tracker.settings,
+                    )
+                    for source_id in source_ids:
+                        proposed_by_source[source_id] = tuple(
+                            edge
+                            for edge in proposed
+                            if edge.source_id == source_id
+                            and edge.target_id in candidate_ids
+                        )
+
+            # Build one atomic event (continuation or two-daughter split) per
+            # branch.  Ambiguous non-division branches pause independently;
+            # other branches remain useful and can continue.
+            events: list[tuple[float, str, tuple[TrackEdge, ...]]] = []
+            paused: dict[str, str] = {}
+            for branch_id in sorted(active):
+                branch = active[branch_id]
+                ranked_before_conflicts = _rank_candidates(
+                    branch.last, detected_candidates, request
+                )
+                if (
+                    ranked_before_conflicts
+                    and ranked_before_conflicts[0][1] in collided_ids
+                ):
+                    paused[branch_id] = "overlaps an existing curated nucleus"
+                    continue
+
+                ranked = _rank_candidates(branch.last, candidates, request)
+                probable_division = _looks_like_division(
+                    candidates,
+                    ranked,
+                    predictions[branch_id],
+                )
+                outgoing = sorted(
+                    proposed_by_source.get(branch.last.detection_id, ()),
+                    key=lambda edge: (edge.cost, edge.kind, edge.target_id),
+                )
+                split_edges = tuple(edge for edge in outgoing if edge.kind == "split")
+                if split_edges:
+                    if len(split_edges) != 2:
+                        paused[branch_id] = "tracker returned an incomplete division"
+                        continue
+                    event_edges = split_edges
+                elif probable_division and len(candidates) > len(active):
+                    paused[branch_id] = (
+                        "candidates form a probable division but the tracker did not "
+                        "return both daughters"
+                    )
+                    continue
+                elif len(ranked) > 1 and _costs_are_ambiguous(
+                    ranked,
+                    ambiguity_ratio,
+                ):
+                    paused[branch_id] = "two candidates had similar assignment costs"
+                    continue
+                elif outgoing:
+                    event_edges = (outgoing[0],)
+                else:
+                    event_edges = ()
+                if event_edges:
+                    events.append(
+                        (
+                            float(sum(edge.cost for edge in event_edges)),
+                            branch_id,
+                            event_edges,
+                        )
+                    )
+
+            # Lowest event cost wins any shared target.  A split is selected or
+            # rejected as a pair, never half-applied.
+            selected_events: dict[str, tuple[TrackEdge, ...]] = {}
+            claimed_targets: set[str] = set()
+            for _cost, branch_id, event_edges in sorted(
+                events,
+                key=lambda item: (
+                    item[0],
+                    item[1],
+                    tuple(edge.target_id for edge in item[2]),
+                ),
+            ):
+                targets = {edge.target_id for edge in event_edges}
+                if targets & claimed_targets:
+                    paused[branch_id] = "another selected branch claimed the same candidate"
+                    continue
+                selected_events[branch_id] = event_edges
+                claimed_targets.update(targets)
+
+            by_candidate_id = {candidate.detection_id: candidate for candidate in candidates}
+            next_active: dict[str, _ForwardBranchState] = {}
+            for branch_id in sorted(active):
+                branch = active[branch_id]
+                event_edges = selected_events.get(branch_id, ())
+                if event_edges:
+                    for edge in event_edges:
+                        target = by_candidate_id.get(edge.target_id)
+                        if target is None:
+                            raise RuntimeError(
+                                "Tracker returned an edge to an unknown sparse candidate"
+                            )
+                        kind = "gap" if target.frame - branch.last.frame > 1 else edge.kind
+                        edges.append(replace(edge, kind=kind))
+                        accepted[target.detection_id] = target
+                        next_active[target.detection_id] = _ForwardBranchState(
+                            branch.last,
+                            target,
+                            0,
+                        )
+                    continue
+
+                if branch_id in paused:
+                    warnings.append(
+                        f"Paused branch {branch.last.detection_id} at t={frame}: "
+                        f"{paused[branch_id]}"
+                    )
+                    continue
+                missing = branch.missing + 1
+                if allow_gap and missing <= max_missing:
+                    next_active[branch_id] = _ForwardBranchState(
+                        branch.previous,
+                        branch.last,
+                        missing,
+                    )
+                else:
+                    warnings.append(
+                        f"Stopped branch {branch.last.detection_id} at t={frame}: "
+                        "no candidate passed the distance gate"
+                    )
+
+            if len(next_active) > max_active:
+                keep = sorted(
+                    next_active.values(),
+                    key=lambda branch: (
+                        -branch.last.quality,
+                        branch.last.detection_id,
+                    ),
+                )[:max_active]
+                dropped = len(next_active) - len(keep)
+                next_active = {branch.last.detection_id: branch for branch in keep}
+                warnings.append(
+                    f"Paused {dropped} branch(es) at t={frame}: the sparse tracking "
+                    f"limit is {max_active} active branches"
+                )
+            active = next_active
+            if progress is not None:
+                progress(
+                    done,
+                    total,
+                    f"Tracking {len(active)} selected branch(es) at time {frame}",
+                )
+            if not active:
+                break
+
+        ordered_detections = tuple(
+            sorted(accepted.values(), key=lambda item: (item.frame, item.detection_id))
+        )
+        ordered_edges = tuple(
+            sorted(
+                edges,
+                key=lambda edge: (
+                    accepted[edge.source_id].frame,
+                    edge.source_id,
+                    edge.target_id,
+                    edge.kind,
+                ),
+            )
+        )
+        outcome = None
+        if not warnings and active and all(
+            branch.last.frame == scope.end_frame for branch in active.values()
+        ):
+            outcome = TrackingOutcome(
+                code="completed",
+                stop_frame=None,
+                last_accepted_frame=scope.end_frame,
+                predicted_position_um=None,
+                search_radius_um=search_radius_um,
+            )
+        elif not warnings:
+            warnings.append("Sparse forward tracking ended before every branch reached the end")
+
+        return TrackingResult(
+            request=request,
+            detections=ordered_detections,
+            edges=ordered_edges,
+            existing_anchors={
+                seed_detection.detection_id: scope.seed_anchors[0]
+            },
+            warnings=tuple(warnings),
+            provenance=_provenance(
+                self.registry,
+                request,
+                mode="selected_forward_follow_both",
+            ),
             outcome=outcome,
         )
 

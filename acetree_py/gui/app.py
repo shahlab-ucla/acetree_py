@@ -164,6 +164,10 @@ class AceTreeApp:
         self._last_global_tracking_request: TrackingRequest | None = None
         self._global_tracking_dialog = None
         self._global_tracking_jobs: dict[tuple[int, int], tuple] = {}
+        # A worker can be complete while its QThread is still draining queued
+        # teardown events. Keep those Qt objects alive without treating the
+        # analysis as active or blocking the next workbench.
+        self._global_tracking_retiring_jobs: dict[tuple[int, int], tuple] = {}
         self._tracking_shutdown_connected = False
 
         # GUI components (initialized in launch())
@@ -525,6 +529,16 @@ class AceTreeApp:
         config = self.manager.config
         if config is None:
             raise ValueError("Tracking requires dataset calibration")
+        if (
+            request.tracker.plugin_id == "acetree.starrynite_legacy_exact"
+            and self.manager.num_timepoints != self.image_provider.num_timepoints
+        ):
+            raise ValueError(
+                "Exact StarryNite whole-movie tracking requires the nuclei record "
+                "and image source to describe the same number of timepoints "
+                f"(record: {self.manager.num_timepoints}; images: "
+                f"{self.image_provider.num_timepoints})."
+            )
 
         from ..tracking.api import Calibration
 
@@ -803,10 +817,17 @@ class AceTreeApp:
                 "Whole-dataset tracking needs pixel and Z calibration.",
             )
             return None
-        end_time = min(
-            self.manager.num_timepoints,
-            self.image_provider.num_timepoints,
-        )
+        record_timepoints = self.manager.num_timepoints
+        image_timepoints = self.image_provider.num_timepoints
+        end_time = min(record_timepoints, image_timepoints)
+        exact_scope_error = ""
+        if record_timepoints != image_timepoints:
+            exact_scope_error = (
+                "Exact StarryNite whole-movie tracking is unavailable because "
+                f"the nuclei record has {record_timepoints} timepoint(s), while "
+                f"the image source has {image_timepoints}. Reopen the dataset with "
+                "matching movie and nuclei ranges."
+            )
         request = initial_request or self._last_global_tracking_request
         dialog = GlobalTrackingDialog(
             start_time=1,
@@ -835,6 +856,7 @@ class AceTreeApp:
             dataset_empty_getter=lambda: not any(
                 frame for frame in self.manager.nuclei_record
             ),
+            exact_scope_error=exact_scope_error,
         )
         dialog.finished.connect(
             lambda _result, dlg=dialog: self._global_tracking_dialog_closed(dlg)
@@ -937,37 +959,89 @@ class AceTreeApp:
 
         cancel_event = Event()
 
+        def cancel_matching_run(requested_run_id: int) -> None:
+            # The worker can enter plugin code before ``start_analysis`` has
+            # received and stored the returned cancellation handle. Keep a
+            # direct signal path so closing during that startup window cannot
+            # strand a background job.
+            if int(requested_run_id) == int(run_id):
+                cancel_event.set()
+
         thread = QThread()
         worker = TrackingAnalysisWorker(analysis, cancel_event)
+        job_key = (id(dialog), run_id)
         relay = TrackingWorkerRelay(
             run_id,
             dialog.update_analysis_progress,
             success_slot,
             failure_slot,
+            lambda key=job_key: self._global_tracking_worker_finished(key),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(relay.progress)
         worker.succeeded.connect(relay.succeeded)
         worker.failed.connect(relay.failed)
+        # This queued GUI-thread callback clears the active-job guard as soon
+        # as plugin code returns. The tuple moves to a retiring collection so
+        # the QThread cannot be destroyed before its own ``finished`` signal.
+        worker.finished.connect(relay.finished)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda key=job_key: self._global_tracking_thread_finished(key)
+        )
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(relay.deleteLater)
-        job_key = (id(dialog), run_id)
-        thread.finished.connect(
-            lambda key=job_key: self._global_tracking_jobs.pop(key, None)
-        )
+        dialog.cancelRequested.connect(cancel_matching_run)
         self._global_tracking_jobs[job_key] = (
             thread,
             worker,
             cancel_event,
             relay,
+            cancel_matching_run,
         )
         thread.start()
         return cancel_event.set
 
+    def _global_tracking_worker_finished(self, job_key: tuple[int, int]) -> None:
+        """Mark completed plugin code inactive while retaining Qt teardown refs."""
+
+        job = self._global_tracking_jobs.pop(job_key, None)
+        if job is not None:
+            self._global_tracking_retiring_jobs[job_key] = job
+
+    def _global_tracking_thread_finished(self, job_key: tuple[int, int]) -> None:
+        """Release worker references after Qt has dispatched ``finished``.
+
+        Dropping the last Python reference to a ``QThread`` from inside its own
+        ``finished`` signal can destroy the wrapper while Qt is still unwinding
+        that signal.  This is especially easy to hit when a canceled analysis
+        is immediately followed by another workbench.  Keep the retiring tuple
+        alive for one GUI turn so destruction happens from the ordinary event
+        loop instead of the thread's completion callback.
+        """
+
+        from qtpy.QtCore import QTimer
+
+        QTimer.singleShot(
+            0,
+            lambda key=job_key: self._release_global_tracking_job(key),
+        )
+
+    def _release_global_tracking_job(self, job_key: tuple[int, int]) -> None:
+        """Drop references for a worker whose Qt completion signal has returned."""
+
+        self._global_tracking_jobs.pop(job_key, None)
+        self._global_tracking_retiring_jobs.pop(job_key, None)
+
     def _global_tracking_dialog_closed(self, dialog) -> None:
+        # Closing is allowed during the tiny interval between ``thread.start``
+        # and the dialog receiving its callable cancellation handle. Reinforce
+        # the dialog signal at the host boundary for every run it owns.
+        for (dialog_id, _run_id), job in tuple(self._global_tracking_jobs.items()):
+            if dialog_id == id(dialog):
+                job[2].set()
         try:
             self._last_global_tracking_request = dialog.get_request()
         except (AttributeError, RuntimeError, ValueError):
@@ -980,7 +1054,10 @@ class AceTreeApp:
 
         import time
 
-        jobs = list(self._global_tracking_jobs.values())
+        jobs = [
+            *self._global_tracking_jobs.values(),
+            *self._global_tracking_retiring_jobs.values(),
+        ]
         for _thread, _worker, cancel_event, *_relay in jobs:
             cancel_event.set()
         deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0

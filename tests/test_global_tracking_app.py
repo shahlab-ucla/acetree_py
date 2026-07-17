@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -12,12 +13,26 @@ import pytest
 pytest.importorskip("qtpy")
 
 from qtpy.QtWidgets import QWidget
+from qtpy.QtCore import QSettings
 
 from acetree_py.core.nuclei_manager import NucleiManager
 from acetree_py.gui.app import AceTreeApp
 from acetree_py.io.config import AceTreeConfig
 from acetree_py.io.image_provider import NumpyProvider
-from acetree_py.tracking.api import ComponentSpec, TrackingRequest, TrackingScope
+from acetree_py.tracking.api import (
+    Calibration,
+    ComponentSpec,
+    TrackingRequest,
+    TrackingScope,
+)
+from acetree_py.tracking.registry import build_default_registry
+from acetree_py.tracking.starrynite import (
+    CategoricalFeatureDistribution,
+    GaussianFeatureDistribution,
+    NeutralNaiveBayesClassifier,
+    SingleModelFeatureLayout,
+    save_neutral_classifier,
+)
 
 
 def _blob_movie() -> np.ndarray:
@@ -60,6 +75,120 @@ def _request() -> TrackingRequest:
     )
 
 
+def _exact_classifier(source_hash: str) -> NeutralNaiveBayesClassifier:
+    layout = SingleModelFeatureLayout(
+        daughter_keep=(True,) * 12 + (False,) * 10,
+        backward_keep=(False,) * 11,
+        forward_keep=(True,) * 8 + (False,) * 5,
+    )
+    continuous = GaussianFeatureDistribution(
+        means=(0.0, 1.0, 2.0, 3.0),
+        standard_deviations=(1.0, 1.0, 1.0, 1.0),
+    )
+    topology = CategoricalFeatureDistribution(
+        categories=(1.0, 2.0, 3.0, 4.0, 5.0),
+        probabilities=((0.2,) * 5,) * 4,
+    )
+    return NeutralNaiveBayesClassifier(
+        source_model_sha256=source_hash,
+        classifier_family="new_classifier",
+        feature_layout=layout,
+        feature_names=("topology_class",)
+        + tuple(f"feature_{index}" for index in range(layout.selected_feature_count)),
+        class_labels=(0, 1, 2, 3),
+        class_priors=(0.25, 0.25, 0.25, 0.25),
+        misclassification_costs=(
+            (0.0, 1.0, 1.0, 1.0),
+            (1.0, 0.0, 1.0, 1.0),
+            (1.0, 1.0, 0.0, 1.0),
+            (1.0, 1.0, 1.0, 0.0),
+        ),
+        distributions=(topology,) + (continuous,) * layout.selected_feature_count,
+    )
+
+
+def _exact_workbench_assets(tmp_path: Path) -> Path:
+    scipy_io = pytest.importorskip("scipy.io")
+    covariance = np.eye(7, dtype=np.float64)
+    mean = np.zeros((1, 7), dtype=np.float64)
+    scipy_io.savemat(
+        tmp_path / "detector-distribution.mat",
+        {
+            "allbadlm": mean,
+            "allbadlc": covariance,
+            "allgoodlm": mean,
+            "allgoodlc": covariance,
+            "allbadrm": mean,
+            "allbadrc": covariance,
+            "allgoodrm": mean,
+            "allgoodrc": covariance,
+        },
+    )
+    scipy_io.savemat(
+        tmp_path / "tracking-model.mat",
+        {
+            "trackingparameters": {
+                "model": {
+                    "div_mean": np.zeros(2),
+                    "div_std": np.eye(2),
+                    "div_triple_mean": np.zeros(10),
+                    "div_triple_std": np.eye(10),
+                    "nodiv_mean": np.zeros(4),
+                    "nodiv_std": np.eye(4),
+                },
+                "interval": 1,
+                "candidateCutoff": 1.2,
+                "temporalcutoff": 1,
+                "temporalcutoffstart": 1,
+                "smallcutoff": 4,
+                "endtime": 2,
+                "anisotropyvector": np.asarray([1, 1, 1]),
+                "starttime": 1,
+                "safefilter": False,
+                "safefactor": 2,
+                "conflictfilter": False,
+                "nnnumber": 2,
+                "forwardnnnumber": 4,
+                "minnondivscore": 0,
+                "nondivscorestep": 1,
+                "maxnondivscore": 0,
+                "mindivscore": 0,
+                "divscorestep": 1,
+                "maxdivscore": 0,
+                "polarbodyfilter": False,
+                "hysteresis": False,
+                "deleteisolated": False,
+            }
+        },
+    )
+    parameter_path = tmp_path / "exact-parameters.m"
+    parameter_path.write_text(
+        "xyres=1;\n"
+        "zres=1;\n"
+        "firsttimestepdiam=8;\n"
+        "firsttimestepnumcells=1;\n"
+        "downsampling=1;\n"
+        "parameters.staging=[25,80];\n"
+        "parameters.sigma=.5;\n"
+        "parameters.intensitythreshold=.25;\n"
+        "parameters.rangethreshold=1;\n"
+        "parameters.boundary_percent=.35;\n"
+        "parameters.large_ray_threshold=1.5;\n"
+        "parameters.small_ray_threshold=.333333333333;\n"
+        "parameters.mergelower=-300;\n"
+        "parameters.mergesplit=1;\n"
+        "parameters.split=100;\n"
+        "parameters.nndist_merge=.8;\n"
+        "parameters.armerge=1.6;\n"
+        "distribution_file='detector-distribution.mat';\n"
+        "load 'tracking-model.mat';\n"
+        "trackingparameters.nonDivCostFunction=@distanceCostFunction;\n"
+        "trackingparameters.DivCostFunction=@divScoreModelCostFunction;\n",
+        encoding="utf-8",
+    )
+    return parameter_path
+
+
 class _PreviewSpy:
     def __init__(self, app: AceTreeApp) -> None:
         self.app = app
@@ -91,6 +220,45 @@ class _PreviewSpy:
 
     def update_overlays(self) -> None:
         pass
+
+
+def test_exact_workbench_fails_closed_when_movie_and_record_lengths_differ(
+    qtbot,
+) -> None:
+    provider = NumpyProvider(_blob_movie())
+    manager = NucleiManager.new_empty(AceTreeConfig(), num_timepoints=3)
+    app = AceTreeApp(manager, provider)
+    window = QWidget()
+    qtbot.addWidget(window)
+    app.viewer = SimpleNamespace(window=SimpleNamespace(_qt_window=window))
+    app._image_layers = [SimpleNamespace(data=None, scale=(1.0, 1.0), visible=True)]
+    app._viewer_integration = _PreviewSpy(app)
+
+    dialog = app.open_global_tracking_workbench()
+    assert dialog is not None
+    qtbot.addWidget(dialog)
+    dialog._tracker_combo.setCurrentIndex(
+        dialog._tracker_combo.findData("acetree.starrynite_legacy_exact")
+    )
+
+    error = dialog._settings_validation_error()
+    assert "nuclei record has 3 timepoint" in error
+    assert "image source has 2" in error
+    assert not dialog._preview_button.isEnabled()
+
+    exact_request = TrackingRequest(
+        detector=ComponentSpec("acetree.starrynite_detector", {}),
+        tracker=ComponentSpec(
+            "acetree.starrynite_legacy_exact",
+            {"STARRYNITE_COMPATIBILITY_MODE": "legacy_exact_refinement"},
+        ),
+        scope=TrackingScope("global", 1, 2),
+    )
+    with pytest.raises(ValueError, match="same number of timepoints"):
+        app.prepare_tracking_analysis(exact_request)
+
+    dialog.reject()
+    qtbot.waitUntil(lambda: app._global_tracking_dialog is None)
 
 
 def test_initial_global_analysis_remains_empty_until_explicit_accept(qtbot) -> None:
@@ -126,6 +294,109 @@ def test_initial_global_analysis_remains_empty_until_explicit_accept(qtbot) -> N
     assert app.edit_history.num_undoable == 1
     assert len(app._tracking_results) == 1
     assert app._viewer_integration.cleared == 1
+
+
+def test_exact_workbench_request_runs_accepts_and_restores_sources(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from acetree_py.gui.global_tracking_dialog import GlobalTrackingDialog
+
+    settings_path = tmp_path / "workbench-settings.ini"
+
+    def settings_store() -> QSettings:
+        return QSettings(str(settings_path), QSettings.IniFormat)
+
+    monkeypatch.setattr(
+        GlobalTrackingDialog,
+        "_settings_store",
+        staticmethod(settings_store),
+    )
+    parameter_path = _exact_workbench_assets(tmp_path)
+    provider = NumpyProvider(_blob_movie())
+    manager = NucleiManager.new_empty(
+        AceTreeConfig(xy_res=1.0, z_res=1.0, plane_end=7),
+        num_timepoints=2,
+    )
+    app = AceTreeApp(manager, provider)
+    window = QWidget()
+    qtbot.addWidget(window)
+    app.viewer = SimpleNamespace(window=SimpleNamespace(_qt_window=window))
+    app._image_layers = [
+        SimpleNamespace(data=None, scale=(1.0, 1.0), visible=True)
+    ]
+    app._viewer_integration = _PreviewSpy(app)
+
+    dialog = app.open_global_tracking_workbench()
+    assert dialog is not None
+    qtbot.addWidget(dialog)
+    dialog.load_starrynite_parameter_file(str(parameter_path))
+    profile = dialog._starrynite_profile
+    assert profile is not None and profile.model_sha256 is not None
+    classifier_path = tmp_path / "tracking-model.neutral.json"
+    save_neutral_classifier(
+        classifier_path,
+        _exact_classifier(profile.model_sha256),
+    )
+    dialog.attach_starrynite_neutral_classifier(classifier_path)
+    dialog._select_combo_value(
+        dialog._tracker_combo,
+        "acetree.starrynite_legacy_exact",
+    )
+
+    request = dialog.get_request()
+    assert request.detector.plugin_id == "acetree.starrynite_detector"
+    assert request.tracker.plugin_id == "acetree.starrynite_legacy_exact"
+    assert request.tracker.settings["STARRYNITE_MODEL_FILE"] == str(
+        (tmp_path / "tracking-model.mat").resolve()
+    )
+    assert request.tracker.settings["STARRYNITE_NEUTRAL_CLASSIFIER_FILE"] == str(
+        classifier_path.resolve()
+    )
+
+    dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY, timeout=20_000)
+    qtbot.waitUntil(lambda: not app._global_tracking_jobs, timeout=20_000)
+    assert manager.nuclei_record == [[], []]
+    assert dialog.proposal is not None
+    refinement = dialog.proposal.provenance["graph_refinement"]
+    assert refinement["backend"] == "legacy_exact_refinement"
+    assert refinement["event_order_validated"] is True
+
+    proposed_count = len(dialog.proposal.detections)
+    assert proposed_count >= 2
+    dialog._accept_button.click()
+    qtbot.waitUntil(lambda: app._global_tracking_dialog is None, timeout=10_000)
+    qtbot.waitUntil(lambda: not app._global_tracking_jobs, timeout=10_000)
+    assert sum(len(frame) for frame in manager.nuclei_record) == proposed_count
+    assert app.edit_history.num_undoable == 1
+    assert len(app._tracking_results) == 1
+
+    registry = build_default_registry(discover_plugins=False)
+    restored = GlobalTrackingDialog(
+        1,
+        2,
+        registry=registry,
+        calibration=Calibration(1.0, 1.0),
+    )
+    qtbot.addWidget(restored)
+    assert restored.recent_starrynite_parameter_file() == parameter_path.resolve()
+    restored.load_starrynite_parameter_file(str(parameter_path))
+    assert restored._starrynite_profile is not None
+    assert restored._starrynite_profile.model_path == (
+        tmp_path / "tracking-model.mat"
+    ).resolve()
+    assert restored._starrynite_neutral_classifier_path == classifier_path.resolve()
+    model_key = restored._neutral_classifier_settings_key()
+    assert model_key is not None
+    assert Path(str(settings_store().value(model_key))).resolve() == (
+        classifier_path.resolve()
+    )
+    assert refinement["event_order_validation_scope"] == (
+        "structural_sequence_trace_coverage_and_unique_frame_row_order"
+    )
+    assert refinement["event_omission_completeness_proven"] is False
 
 
 def test_async_current_frame_detector_preview_is_lightweight_and_non_mutating(
@@ -200,6 +471,7 @@ def test_closing_global_workbench_cancels_worker_without_late_commit(qtbot) -> N
     dialog.reject()
     qtbot.waitUntil(lambda: app._global_tracking_dialog is None)
     qtbot.waitUntil(lambda: not app._global_tracking_jobs, timeout=10_000)
+    qtbot.waitUntil(lambda: not app._global_tracking_retiring_jobs, timeout=10_000)
 
     assert manager.nuclei_record == [[], []]
     assert app.edit_history.num_undoable == 0

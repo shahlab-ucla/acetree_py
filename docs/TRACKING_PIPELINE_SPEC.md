@@ -1,6 +1,6 @@
 # AceTree Image-Analysis and Tracking Pipeline Specification
 
-- **Status:** Prototype implemented; full workflow contract proposed
+- **Status:** Reference implementation active; advanced envelope and interchange contract proposed
 - **Specification version:** `1.0.0-alpha.1`
 - **Implemented component API:** `1.0` (strict major-version negotiation)
 - **Implemented sidecar schema:** `acetree.tracking-proposal`, version `1`
@@ -13,13 +13,14 @@ modular image detection and tracking to AceTree-Py. It is deliberately more
 strict than an implementation sketch: compatible components must obey the
 coordinate, lifecycle, validation, review, commit, and persistence rules below.
 
-The first reference implementation will provide independent SciPy-based
-Laplacian-of-Gaussian (LoG) and Difference-of-Gaussian (DoG) detectors and a
-simple Linear Assignment Problem (LAP) linker. The same contracts are intended
-to support learned detectors, external executables, TrackMate interchange, and
-eventually a backward-compatible StarryNite replacement.
+The reference implementation provides independent SciPy-based
+Laplacian-of-Gaussian (LoG), Difference-of-Gaussian (DoG), and StarryNite
+detectors; Simple LAP, native StarryNite division, and fail-closed StarryNite
+legacy-exact trackers; and one shared proposal/commit path. The same contracts
+remain open to learned detectors, external executables, and TrackMate
+interchange.
 
-### Implemented prototype profile (July 2026)
+### Implemented reference profile (July 2026)
 
 The repository currently implements the immutable physical-coordinate values,
 component registry, SciPy LoG/DoG detectors, Simple LAP tracker, global creation
@@ -34,11 +35,13 @@ layers in the 2D, embedded 3D, and detached 3D viewers; navigation and detached
 time sync are preserved while users inspect, adjust, rerun, accept, or discard.
 
 The richer `acetree.tracking/v1alpha1` request envelope, multi-run transactional
-provenance ledger, division-aware tracker, third-party worker image-source factory contract, and
-TrackMate/StarryNite adapters remain staged requirements. Sections that
-describe those pieces are the target contract, not claims about current code.
-The implemented Python interfaces in `acetree_py/tracking/api.py` are the
-authoritative prototype wire shape until the alpha envelope is ratified.
+provenance ledger, third-party worker image-source factory contract, and
+TrackMate interchange remain staged requirements. Division-aware native
+StarryNite tracking and the global-only legacy-exact StarryNite adapter are
+implemented. Sections that describe the remaining staged pieces are the target
+contract, not claims about current code. The implemented Python interfaces in
+`acetree_py/tracking/api.py` are the authoritative wire shape until the alpha
+envelope is ratified.
 
 ## 1. Normative language
 
@@ -65,8 +68,8 @@ and accepted tracking provenance.
 6. Preserve forced names and allow the existing naming pipeline to name newly
    accepted automatic tracks.
 7. Record enough provenance to reproduce or audit every automated proposal.
-8. Provide an adapter boundary that can later host a StarryNite-compatible
-   pipeline without creating a second editing or persistence path.
+8. Provide one adapter boundary that hosts the StarryNite-compatible pipeline
+   without creating a second editing or persistence path.
 
 ### 2.2 Non-goals for v1
 
@@ -136,7 +139,7 @@ acetree_py/tracking/
   detectors/log_dog.py     # independent SciPy LoG/DoG implementation
   trackers/lap.py          # independent SciPy LAP implementation
   adapters/trackmate.py    # interchange only
-  adapters/starrynite.py   # future external/native implementation bridge
+  starrynite/              # native detector/tracker + strict whole-movie runtime
 
 acetree_py/gui/
   tracking_panel.py        # global + selected-forward controls
@@ -359,8 +362,22 @@ class Tracker(Protocol):
 
 In the implemented component API, an entry point exposes or returns a
 `PluginContribution(descriptor, factory)`. The zero-argument component factory
-then returns a detector with `detect(...)` or a tracker with `track(...)`. This
-keeps descriptor/API validation ahead of component execution.
+then returns a detector with `detect(...)` or a tracker with `track(...)`. A
+tracker may additionally expose `refine_graph(...)` for atomic graph cleanup or
+`refine_movie(...)` for a capability-declared, global-only backend that needs
+the detector specification, calibration, complete frame range, cancellation,
+and progress boundary. Both refiners return `TrackerGraphResult`; the pipeline
+verifies that they neither invent detector positions nor omit rejected IDs.
+Trackers advertising `whole_movie_preflight` must also expose
+`preflight_movie(settings, *, context) -> None`. Before reading frame 1, the
+global pipeline supplies an immutable `WholeMoviePreflightContext` containing
+the detector spec, calibration, requested scope, source frame/channel counts,
+and zero-based target channel. The hook is validation-only. Exact backends
+revalidate the same source-bound inputs inside `refine_movie(...)` so preflight
+cannot become a stale cache or a time-of-check/time-of-use bypass.
+This keeps descriptor/API validation ahead of component execution while
+allowing a legacy whole-movie algorithm to remain one ordinary registered
+tracker rather than creating a second persistence path.
 
 ## 6. Plugin discovery and installation
 
@@ -692,8 +709,9 @@ accepted initial proposal before rerunning whole-dataset tracking.
    pipeline MUST NOT populate unrelated global nuclei as a side effect.
 8. Tracking stops when the configured missing-frame allowance is exhausted,
    when a requested range ends with an unclosed gap, or at the first ambiguous,
-   conflicting, gated-out, or division-like transition. Stop behavior is fixed
-   in the prototype; a configurable branch-policy API is future work.
+   conflicting, or gated-out transition. Division behavior is selected
+   explicitly as stop, follow-best, or follow-both; follow-both is available
+   only when the tracker advertises splitting support.
 9. The preview explains why and where it stopped. Accepted points extend the
    selected lineage and retain the parent continuation's manual naming state
    through the normal host naming rules.
@@ -1115,9 +1133,11 @@ identity where algorithms intentionally differ.
 ### Phase 4 — selected-forward workflow (prototype implemented)
 
 - Implemented: physical-seed capture, local ROI detection, motion prediction,
-  and fixed ambiguity/division/conflict/lost stopping.
+  ambiguity/conflict/lost stopping, and explicit stop/follow-best/follow-both
+  division behavior gated by tracker splitting capability.
 - Implemented: stop-frame navigation, diagnostic candidates and search region,
-  parameter adjustment, rerun, and a documented manual continuation path.
+  parameter adjustment, rerun, two-daughter preview/commit, and a documented
+  manual continuation path.
 - Remaining: trimming an accepted prefix inside the workbench before commit;
   the current draft accepts its reliable prefix as generated.
 

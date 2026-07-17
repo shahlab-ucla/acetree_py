@@ -55,7 +55,40 @@ acetree-py create
 acetree-py create path/to/images/ --output path/to/output/ --xy-res 0.1625 --z-res 0.65 --split
 ```
 
-See [Manual Tracking & Dataset Creation](docs/user_guide.md#14-manual-tracking--dataset-creation) in the User Guide for a full walkthrough.
+See [Tracking & Dataset Creation](docs/user_guide.md#14-tracking--dataset-creation)
+in the User Guide for a full walkthrough.
+
+### Real-world StarryNite tracking
+
+AceTree-Py exposes two deliberately different StarryNite workflows:
+
+- **StarryNite legacy exact (whole movie)** is the global, MATLAB-compatibility
+  backend. Start with an empty dataset at time 1 and provide the legacy
+  parameter file, every distribution/model file it references, and an inert
+  numeric classifier export bound to that exact MAT model. Dataset calibration
+  must match the parameter source. The workbench runs sequential detection,
+  staged geometry, classifier cleanup, and divisions as one reviewable draft.
+- **StarryNite native division tracking** is the practical tuning and sparse
+  curation backend. It can follow one selected lineage with **Auto Forward**,
+  including both daughters, while leaving the rest of the embryo untouched. A
+  legacy parameter file can seed its editable controls, but its scorer is native
+  and an attached MATLAB classifier export is report-only in this mode.
+
+Use **Start from StarryNite parameters...** to load a standard file, edit the
+visible basic controls, and **Save tuned parameter copy...** to create a
+source-preserving copy. The copy becomes active immediately, and **Use recent**
+recalls the last usable file across both tracking workbenches. Exact mode never
+silently substitutes a missing source or falls back to native scoring: its
+compatibility check reports the first blocker before analysis, and no nuclei are
+changed until **Accept Draft**.
+
+See the [real-world StarryNite checklist](docs/user_guide.md#real-world-starrynite-test-checklist)
+for the complete UI sequence, prerequisites, failure guidance, current
+boundaries, and dated validation status. The opt-in MATLAB commands and parity
+method are in [StarryNite Differential Testing](docs/STARRYNITE_DIFFERENTIAL_TESTING.md#running-locally).
+The 2026-07-16 release gate completed with `1308 passed, 71 skipped` without
+MATLAB and `19 passed, 1 skipped` in the complete R2025a oracle suite; the one
+expected skip is the historical four-model export boundary.
 
 ### CLI
 
@@ -95,6 +128,7 @@ acetree-py info config.xml --cell ABala
 - **3D volume view** — toggle 2D/3D in the main viewer, or open a detached 3D window with independent visualization controls
 - **Ghost trails** — visualize selected cell's movement history as a semi-transparent trail
 - **Manual tracking** — click-to-add nuclei, D-pad nudge controls, create datasets from raw images
+- **StarryNite tracking** — use a fast native detector/division tracker or an explicitly selected, fail-closed whole-movie compatibility backend. The exact backend reads source-bound legacy parameter, distribution, tracking-model, and neutral-classifier files; reproduces sequential detection, staged geometry, class 0/1/2/3 cleanup, and divisions through the ordinary tracking proposal workflow; and records hashes plus stage/classifier validation provenance. Unsupported legacy options are reported before a run rather than approximated silently.
 - **Topology-based naming** — automatic Sulston name assignment from lineage structure, with rotation-invariant axis estimation robust to embryo rotations during imaging
 - **Interactive relink** — click-based predecessor editing with automatic interpolation
 - **Cell-scoped rename and atomic swap** — the Rename command writes a forced name across the cell's entire continuation chain in one undoable step; name collisions can be resolved with an atomic swap between two cells
@@ -110,6 +144,8 @@ acetree-py info config.xml --cell ABala
 - [User Guide](docs/user_guide.md) — navigation, editing, saving, manual tracking, 3D view
 - [Architecture Reference](docs/architecture.md) — package structure, data model, GUI system
 - [Algorithm Reference](docs/algorithms.md) — naming pipeline, coordinate transforms, edit commands
+- [StarryNite Rebuild Plan](docs/STARRYNITE_REBUILD_PLAN.md) — clean-room compatibility roadmap, native tracker architecture, and verification gates
+- [StarryNite Differential Testing](docs/STARRYNITE_DIFFERENTIAL_TESTING.md) — deterministic simulations, local MATLAB oracle, parity metrics, parameter sweeps, and current results
 
 ## Development
 

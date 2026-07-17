@@ -76,6 +76,32 @@ def _diagnostic_result() -> TrackingResult:
     )
 
 
+def _split_result() -> TrackingResult:
+    request = TrackingRequest(
+        detector=ComponentSpec("example.division_detector", {}),
+        tracker=ComponentSpec("example.division_tracker", {}),
+        scope=TrackingScope(
+            "selected_forward",
+            1,
+            2,
+            seed_anchors=((1, 1),),
+            branch_policy="follow_both",
+        ),
+    )
+    seed = Detection("seed", 1, 2.0, 4.0, 6.0, 2.0, 5.0)
+    first = Detection("daughter-a", 2, 3.0, 3.0, 6.0, 1.5, 8.0)
+    second = Detection("daughter-b", 2, 3.0, 5.0, 6.0, 1.5, 7.5)
+    return TrackingResult(
+        request=request,
+        detections=(seed, first, second),
+        edges=(
+            TrackEdge("seed", "daughter-a", 1.0, kind="split"),
+            TrackEdge("seed", "daughter-b", 1.0, kind="split"),
+        ),
+        existing_anchors={"seed": (1, 1)},
+    )
+
+
 def test_gap_preview_matches_materialized_interpolation():
     preview = expand_tracking_preview(_gap_result())
 
@@ -93,6 +119,13 @@ def test_gap_preview_matches_materialized_interpolation():
     assert preview.proposed_count == 2
     assert preview.interpolated_count == 1
     assert [link.kind for link in preview.links] == ["gap", "gap"]
+
+
+def test_split_preview_preserves_division_links_and_counts_events():
+    preview = expand_tracking_preview(_split_result())
+
+    assert [link.kind for link in preview.links] == ["split", "split"]
+    assert preview.split_count == 1
 
 
 def test_expanding_preview_does_not_change_result():

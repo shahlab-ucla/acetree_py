@@ -13,6 +13,7 @@ pytest.importorskip("qtpy")
 
 from acetree_py.gui.dataset_dialog import DatasetCreationDialog
 from acetree_py.gui.edit_panel import AutoTrackForwardDialog
+from acetree_py.gui.auto_tracking_dialog import _unique_new_terminal
 from acetree_py.core.nucleus import Nucleus
 from acetree_py.core.nuclei_manager import NucleiManager
 from acetree_py.editing.commands import AddNucleus
@@ -21,7 +22,17 @@ from acetree_py.gui.app import AceTreeApp
 from acetree_py.gui.viewer_integration import ViewerIntegration
 from acetree_py.io.config import AceTreeConfig
 from acetree_py.io.image_provider import NumpyProvider
-from acetree_py.tracking.api import Calibration, Detection, TrackEdge, TrackingResult
+from acetree_py.tracking.api import (
+    Calibration,
+    ComponentSpec,
+    Detection,
+    TrackEdge,
+    TrackingRequest,
+    TrackingResult,
+    TrackingScope,
+)
+from acetree_py.tracking.registry import ComponentDescriptor, TrackingRegistry
+from acetree_py.tracking.starrynite import read_parameter_file
 
 
 def test_dataset_wizard_defaults_to_manual_and_has_tracking_page(qtbot):
@@ -51,6 +62,54 @@ def test_dataset_wizard_builds_trackmate_keyed_global_request(qtbot):
     assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is False
 
 
+def test_dataset_wizard_enables_reviewed_divisions_for_starrynite(qtbot):
+    dialog = DatasetCreationDialog()
+    qtbot.addWidget(dialog)
+    dialog._radio_tracking_auto.setChecked(True)
+
+    assert not dialog._tracking_division_check.isEnabled()
+    assert not dialog._tracking_division_check.isChecked()
+    assert "does not propose divisions" in dialog._tracking_capability_label.text()
+
+    tracker_index = dialog._tracking_tracker_combo.findData(
+        "acetree.starrynite_division"
+    )
+    assert tracker_index >= 0
+    dialog._tracking_tracker_combo.setCurrentIndex(tracker_index)
+
+    request = dialog.get_tracking_request()
+
+    assert dialog._tracking_division_check.isEnabled()
+    assert dialog._tracking_division_check.isChecked()
+    assert "can propose two-daughter divisions" in (
+        dialog._tracking_capability_label.text()
+    )
+    assert request is not None
+    assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is True
+    assert request.tracker.settings["ALLOW_TRACK_MERGING"] is False
+    assert "divisions=on" in dialog._tracking_description()
+
+    dialog._tracking_division_check.setChecked(False)
+    request = dialog.get_tracking_request()
+    assert request is not None
+    assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is False
+
+
+def test_dataset_wizard_preserves_starrynite_localization_default(qtbot):
+    dialog = DatasetCreationDialog()
+    qtbot.addWidget(dialog)
+    dialog._radio_tracking_auto.setChecked(True)
+    detector_index = dialog._tracking_detector_combo.findData(
+        "acetree.starrynite_detector"
+    )
+    dialog._tracking_detector_combo.setCurrentIndex(detector_index)
+
+    request = dialog.get_tracking_request()
+
+    assert request is not None
+    assert request.detector.settings["DO_SUBPIXEL_LOCALIZATION"] is False
+
+
 def test_selected_forward_dialog_keeps_physical_seed_and_local_scope(qtbot):
     dialog = AutoTrackForwardDialog(start_time=7, end_time=20, num_channels=2)
     qtbot.addWidget(dialog)
@@ -63,7 +122,99 @@ def test_selected_forward_dialog_keeps_physical_seed_and_local_scope(qtbot):
     assert request.scope.seed_anchors == ((7, 3),)
     assert request.scope.end_frame == 15
     assert request.scope.roi_radius_um > 0
+    assert request.scope.branch_policy == "stop"
     assert request.detector.settings["TARGET_CHANNEL"] == 2
+    assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is False
+    assert not dialog._branch_policy_combo.model().item(
+        dialog._follow_both_index
+    ).isEnabled()
+
+
+def test_selected_forward_enables_follow_both_for_splitting_tracker(
+    qtbot,
+    monkeypatch,
+):
+    registry = TrackingRegistry()
+    registry.register_detector(
+        ComponentDescriptor(
+            "example.detector",
+            "detector",
+            "Example detector",
+            settings_schema={
+                "TARGET_CHANNEL": {"default": 1},
+                "RADIUS": {"default": 4.0},
+                "THRESHOLD": {"default": 0.0},
+                "DO_SUBPIXEL_LOCALIZATION": {"default": True},
+                "DO_MEDIAN_FILTERING": {"default": False},
+            },
+        ),
+        lambda: SimpleNamespace(detect=lambda *_args, **_kwargs: ()),
+    )
+    registry.register_tracker(
+        ComponentDescriptor(
+            "example.splitting_tracker",
+            "tracker",
+            "Splitting tracker",
+            settings_schema={
+                "LINKING_MAX_DISTANCE": {"default": 8.0},
+                "ALLOW_GAP_CLOSING": {"default": True},
+                "GAP_CLOSING_MAX_DISTANCE": {"default": 8.0},
+                "MAX_FRAME_GAP": {"default": 2},
+                "ALLOW_TRACK_SPLITTING": {"default": False},
+                "ALLOW_TRACK_MERGING": {"default": False},
+            },
+            capabilities=("splitting",),
+        ),
+        lambda: SimpleNamespace(track=lambda *_args, **_kwargs: ()),
+    )
+    import acetree_py.tracking.registry as registry_module
+
+    monkeypatch.setattr(registry_module, "get_default_registry", lambda: registry)
+    dialog = AutoTrackForwardDialog(
+        start_time=3,
+        end_time=8,
+        initial_settings={"branch_policy": "follow_both"},
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog._branch_policy_combo.model().item(
+        dialog._follow_both_index
+    ).isEnabled()
+    request = dialog.get_request((3, 2))
+    assert request.scope.branch_policy == "follow_both"
+    assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is True
+    assert request.tracker.settings["ALLOW_TRACK_MERGING"] is False
+    assert request.tracker.settings["ALLOW_GAP_CLOSING"] is False
+    assert not dialog._gap_spin.isEnabled()
+    assert dialog.export_settings()["branch_policy"] == "follow_both"
+
+
+def test_multiple_daughter_terminals_do_not_choose_an_arbitrary_endpoint():
+    request = TrackingRequest(
+        ComponentSpec("example.detector", {}),
+        ComponentSpec("example.splitting_tracker", {}),
+        TrackingScope(
+            "selected_forward",
+            1,
+            2,
+            seed_anchors=((1, 1),),
+            branch_policy="follow_both",
+        ),
+    )
+    seed = Detection("seed", 1, 0.0, 0.0, 0.0, 1.0, 1.0)
+    first = Detection("first", 2, -1.0, 0.0, 0.0, 1.0, 1.0)
+    second = Detection("second", 2, 1.0, 0.0, 0.0, 1.0, 1.0)
+    proposal = TrackingResult(
+        request=request,
+        detections=(seed, first, second),
+        edges=(
+            TrackEdge("seed", "first", 1.0, kind="split"),
+            TrackEdge("seed", "second", 1.0, kind="split"),
+        ),
+        existing_anchors={"seed": (1, 1)},
+    )
+
+    assert _unique_new_terminal(proposal) is None
 
 
 class _PreviewSpy:
@@ -142,6 +293,99 @@ class _TrackingDialogApp:
         pass
 
 
+def test_auto_forward_parameter_preset_uses_alive_cell_count_for_stage(
+    qtbot,
+    tmp_path,
+):
+    app = _TrackingDialogApp()
+    app.manager.nuclei_record[0] = [
+        Nucleus(index=index, x=index, y=5, z=2.0, size=4, status=1)
+        for index in range(1, 82)
+    ]
+    parameter_path = tmp_path / "late-stage.txt"
+    parameter_path.write_text(
+        "xyres=.25;\n"
+        "firsttimestepdiam=40;\n"
+        "parameters.staging=[25,80];\n"
+        "parameters.intensitythreshold=[10,20,30];\n"
+        "load 'missing-model.mat';\n",
+        encoding="utf-8",
+    )
+    dialog = AutoTrackForwardDialog(
+        1,
+        3,
+        app=app,
+        seed_anchor=(1, 1),
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.load_starrynite_parameter_file(str(parameter_path))
+    request = dialog.get_request()
+
+    assert dialog._threshold_spin.value() == pytest.approx(30.0)
+    assert request.detector.plugin_id == "acetree.starrynite_detector"
+    assert request.detector.settings["STARRYNITE_CELL_COUNT"] == 81
+    assert request.detector.settings["STARRYNITE_STAGE_INDEX"] == 2
+    assert request.detector.settings["THRESHOLD"] == 0.0
+    assert request.detector.settings["INTENSITY_THRESHOLD"] == pytest.approx(30.0)
+    assert request.detector.settings["DO_SUBPIXEL_LOCALIZATION"] is False
+    assert not dialog._subpixel_check.isChecked()
+    assert dialog._starrynite_save_button.isEnabled()
+    assert "not applied by this workbench" in dialog._starrynite_file_label.text()
+
+    dialog._generated_settings = dialog.export_settings()
+    stop_index = dialog._branch_policy_combo.findData("stop")
+    dialog._branch_policy_combo.setCurrentIndex(stop_index)
+    assert "division behavior" in dialog._changed_setting_labels()
+    follow_both_index = dialog._branch_policy_combo.findData("follow_both")
+    dialog._branch_policy_combo.setCurrentIndex(follow_both_index)
+
+    dialog._radius_spin.setValue(6.0)
+    dialog._threshold_spin.setValue(33.0)
+    dialog._gap_spin.setValue(2)
+    dialog._roi_spin.setValue(27.0)
+    dialog._distance_spin.setValue(13.0)
+    dialog._ambiguity_spin.setValue(1.65)
+    dialog._branch_policy_combo.setCurrentIndex(stop_index)
+    dialog._subpixel_check.setChecked(True)
+    dialog._median_check.setChecked(True)
+    saved_path = tmp_path / "late-stage-tuned.txt"
+    warnings = dialog.save_starrynite_parameter_file(str(saved_path))
+    saved = read_parameter_file(saved_path)
+
+    assert warnings == ()
+    assert saved.normalized_settings["parameters.intensitythreshold"] == (
+        10,
+        20,
+        33.0,
+    )
+    assert saved.normalized_settings["firsttimestepdiam"] == pytest.approx(48.0)
+    assert saved.normalized_settings["trackingparameters.temporalcutoff"] == 3
+    assert dialog.recent_starrynite_parameter_file() == saved_path.resolve()
+    assert "expected radius" in dialog._starrynite_save_explanation.text()
+    assert dialog._roi_spin.value() == pytest.approx(27.0)
+    assert dialog._distance_spin.value() == pytest.approx(13.0)
+    assert dialog._ambiguity_spin.value() == pytest.approx(1.65)
+    assert dialog._branch_policy_combo.currentData() == "stop"
+    assert dialog._subpixel_check.isChecked()
+    assert dialog._median_check.isChecked()
+
+    reopened = AutoTrackForwardDialog(
+        1,
+        3,
+        app=app,
+        seed_anchor=(1, 1),
+    )
+    qtbot.addWidget(reopened)
+    assert reopened.recent_starrynite_parameter_file() == saved_path.resolve()
+    assert not reopened._starrynite_recent_button.isHidden()
+    assert saved_path.name in reopened._starrynite_recent_button.text()
+
+    reopened._starrynite_recent_button.click()
+    assert reopened._starrynite_parameter_path == saved_path.resolve()
+    assert reopened._starrynite_recent_button.isHidden()
+
+
 class _FakeShapesLayer:
     def __init__(self):
         self.data = []
@@ -172,6 +416,7 @@ def test_auto_forward_starts_safe_and_supports_adjust_rerun(qtbot):
     qtbot.waitUntil(lambda: dialog.state == dialog.READY)
     first = dialog.proposal
     assert dialog.state == dialog.READY
+    assert dialog._analysis_thread is None
     assert dialog._accept_button.isEnabled()
     assert len(app._viewer_integration.shown) == 1
 
@@ -183,6 +428,7 @@ def test_auto_forward_starts_safe_and_supports_adjust_rerun(qtbot):
     dialog._preview_button.click()
     qtbot.waitUntil(lambda: dialog.state == dialog.READY)
     assert dialog.state == dialog.READY
+    assert dialog._analysis_thread is None
     assert dialog.proposal is not first
     assert len(app.analysis_calls) == 2
 
@@ -313,6 +559,7 @@ def test_no_continuation_keeps_settings_available_for_rerun(qtbot):
     qtbot.waitUntil(lambda: dialog.state == dialog.EMPTY)
 
     assert dialog.state == dialog.EMPTY
+    assert dialog._analysis_thread is None
     assert not dialog._accept_button.isEnabled()
     assert dialog._settings_widget.isEnabled()
     dialog._threshold_spin.setValue(1.0)

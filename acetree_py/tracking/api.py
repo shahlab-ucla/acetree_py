@@ -18,6 +18,7 @@ TRACKING_API_MAJOR = 1
 TRACKING_OUTCOME_CODES = frozenset(
     {"completed", "lost", "ambiguity", "division", "conflict"}
 )
+TRACKING_BRANCH_POLICIES = frozenset({"stop", "follow_best", "follow_both"})
 
 
 def _immutable_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
@@ -373,10 +374,15 @@ class TrackingScope:
     seed_anchors: tuple[tuple[int, int], ...] = ()
     roi_radius_um: float | None = None
     ambiguity_ratio: float = 1.2
+    branch_policy: str = "stop"
 
     def __post_init__(self) -> None:
         if self.kind not in {"global", "selected_forward"}:
             raise ValueError(f"Unsupported tracking scope: {self.kind}")
+        if self.branch_policy not in TRACKING_BRANCH_POLICIES:
+            raise ValueError(
+                f"Unsupported tracking branch policy: {self.branch_policy!r}"
+            )
         if self.start_frame < 1 or self.end_frame < self.start_frame:
             raise ValueError("Tracking scope has an invalid frame range")
         anchors = tuple((int(t), int(i)) for t, i in self.seed_anchors)
@@ -401,6 +407,7 @@ class TrackingScope:
             "seed_anchors": [list(anchor) for anchor in self.seed_anchors],
             "roi_radius_um": self.roi_radius_um,
             "ambiguity_ratio": self.ambiguity_ratio,
+            "branch_policy": self.branch_policy,
         }
 
     @classmethod
@@ -414,6 +421,7 @@ class TrackingScope:
                 None if data.get("roi_radius_um") is None else float(data["roi_radius_um"])
             ),
             ambiguity_ratio=float(data.get("ambiguity_ratio", 1.2)),
+            branch_policy=str(data.get("branch_policy", "stop")),
         )
 
 
@@ -459,6 +467,104 @@ class TrackingRequest:
             tracker=ComponentSpec.from_dict(data["tracker"]),
             scope=TrackingScope.from_dict(data["scope"]),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class WholeMoviePreflightContext:
+    """Immutable source facts supplied to an optional tracker preflight.
+
+    A global tracker may expose ``preflight_movie(settings, *, context)`` to
+    validate its detector binding and whole-movie inputs before the pipeline
+    reads the first image stack.  Preflight is validation-only: plugins must
+    not retain or mutate this context, the selected component settings, or
+    external source files. ``target_channel`` is the zero-based channel index
+    used by :class:`~acetree_py.io.image_provider.ImageProvider`.
+    """
+
+    detector_spec: ComponentSpec
+    calibration: Calibration
+    scope: TrackingScope
+    source_num_timepoints: int
+    source_num_channels: int
+    target_channel: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.detector_spec, ComponentSpec):
+            raise TypeError("detector_spec must be ComponentSpec")
+        if not isinstance(self.calibration, Calibration):
+            raise TypeError("calibration must be Calibration")
+        if not isinstance(self.scope, TrackingScope):
+            raise TypeError("scope must be TrackingScope")
+        for name, value in (
+            ("source_num_timepoints", self.source_num_timepoints),
+            ("source_num_channels", self.source_num_channels),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if value < 1:
+                raise ValueError(f"{name} must be positive")
+        if self.scope.end_frame > self.source_num_timepoints:
+            raise ValueError("Tracking scope extends beyond the image source")
+        if isinstance(self.target_channel, bool) or not isinstance(
+            self.target_channel, int
+        ):
+            raise TypeError("target_channel must be an integer")
+        if self.target_channel < 0 or self.target_channel >= self.source_num_channels:
+            raise ValueError(
+                "Target channel extends beyond the image source channel count"
+            )
+
+    @property
+    def covers_complete_global_movie(self) -> bool:
+        """Whether the request spans every frame without selected-cell seeds."""
+
+        return (
+            self.scope.kind == "global"
+            and self.scope.start_frame == 1
+            and self.scope.end_frame == self.source_num_timepoints
+            and not self.scope.seed_anchors
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TrackerGraphResult:
+    """Optional whole-graph refinement returned by lineage-aware trackers.
+
+    Basic trackers continue to return only edges. A classifier-backed tracker
+    may additionally reject detector artifacts or rewrite tentative links, so
+    the global pipeline accepts this richer result through an optional
+    ``refine_graph`` method. Whole-movie compatibility backends may instead
+    expose ``refine_movie`` to receive the immutable frame range and voxel
+    calibration. Trackers advertising whole-movie preflight may additionally
+    expose ``preflight_movie`` as documented by
+    :class:`WholeMoviePreflightContext`.
+    """
+
+    detections: tuple[Detection, ...]
+    edges: tuple[TrackEdge, ...]
+    rejected_detection_ids: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    provenance: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        detections = tuple(self.detections)
+        edges = tuple(self.edges)
+        identifiers = [item.detection_id for item in detections]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("Refined graph detection IDs must be unique")
+        known = set(identifiers)
+        if any(edge.source_id not in known or edge.target_id not in known for edge in edges):
+            raise ValueError("Refined graph edges must reference retained detections")
+        rejected = tuple(str(item) for item in self.rejected_detection_ids)
+        if any(not item for item in rejected) or len(rejected) != len(set(rejected)):
+            raise ValueError("Rejected detection IDs must be unique and non-empty")
+        if known & set(rejected):
+            raise ValueError("A refined graph detection cannot also be rejected")
+        object.__setattr__(self, "detections", detections)
+        object.__setattr__(self, "edges", edges)
+        object.__setattr__(self, "rejected_detection_ids", rejected)
+        object.__setattr__(self, "warnings", tuple(str(item) for item in self.warnings))
+        object.__setattr__(self, "provenance", _immutable_mapping(self.provenance))
 
 
 @dataclass(frozen=True, slots=True)
