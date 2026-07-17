@@ -114,13 +114,14 @@ class AutoTrackForwardDialog(QDialog):
         self._starrynite_compatibility_report = None
         self._starrynite_session_note_html = ""
         self._starrynite_classifier_note_html = ""
+        self._workflow_change_in_progress = False
         self._solo_channel_visibility: list[tuple[object, bool]] | None = None
         self._review_timer = QTimer(self)
         self._review_timer.setInterval(350)
         self._review_timer.timeout.connect(self._advance_review_playback)
         self._original_view = self._capture_view_state()
 
-        self.setWindowTitle(f"Auto Forward — {seed_label}")
+        self.setWindowTitle(f"Track Selected Cell — {seed_label}")
         self.setModal(False)
         self.setWindowModality(Qt.NonModal)
         self.setMinimumSize(760, 520)
@@ -130,6 +131,10 @@ class AutoTrackForwardDialog(QDialog):
 
         self._build_ui(max(1, num_channels))
         self._apply_initial_settings(initial_settings or {})
+        if not initial_settings:
+            self._apply_tracking_workflow("modern_starrynite")
+        else:
+            self._sync_tracking_workflow_from_components()
         self._refresh_recent_parameter_button()
         self._connect_parameter_signals()
         self._apply_accessibility_descriptions()
@@ -175,10 +180,40 @@ class AutoTrackForwardDialog(QDialog):
         form = QFormLayout(self._settings_widget)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
+        from ..tracking.workflows import FORWARD_TRACKING_WORKFLOWS
+
+        self._workflow_combo = QComboBox()
+        for workflow in FORWARD_TRACKING_WORKFLOWS:
+            self._workflow_combo.addItem(workflow.display_name, workflow.workflow_id)
+        self._workflow_combo.setToolTip(
+            "Choose a complete selected-cell tracking workflow. Modern StarryNite "
+            "supports reviewed two-daughter divisions."
+        )
+        form.addRow("Tracking method:", self._workflow_combo)
+
+        self._workflow_description = QLabel()
+        self._workflow_description.setWordWrap(True)
+        form.addRow("", self._workflow_description)
+
+        from ..tracking.starrynite import bundled_parameter_presets
+
+        self._starrynite_preset_combo = QComboBox()
+        for preset in bundled_parameter_presets():
+            self._starrynite_preset_combo.addItem(preset.display_name, preset.preset_id)
+            index = self._starrynite_preset_combo.count() - 1
+            self._starrynite_preset_combo.setItemData(index, preset.description, Qt.ToolTipRole)
+        self._starrynite_preset_combo.setToolTip(
+            "Install-ready parameter files distributed with StarryNite."
+        )
+        form.addRow("Imaging preset:", self._starrynite_preset_combo)
+        self._starrynite_preset_label = form.labelForField(
+            self._starrynite_preset_combo
+        )
+
         self._end_spin = QSpinBox()
         self._end_spin.setRange(self._start_time + 1, max(self._start_time + 1, self._end_time))
         self._end_spin.setValue(max(self._start_time + 1, self._end_time))
-        self._end_spin.setToolTip("Last timepoint Auto Forward should attempt")
+        self._end_spin.setToolTip("Last timepoint selected-cell tracking should attempt")
         form.addRow("Track through:", self._end_spin)
 
         from ..tracking.registry import get_default_registry
@@ -190,6 +225,9 @@ class AutoTrackForwardDialog(QDialog):
             self._detector_combo.addItem(descriptor.display_name, descriptor.plugin_id)
         self._detector_combo.setToolTip("Method used to find nucleus-like bright blobs")
         form.addRow("Detector:", self._detector_combo)
+        self._detector_label = form.labelForField(self._detector_combo)
+        self._detector_combo.hide()
+        self._detector_label.hide()
 
         self._tracker_combo = QComboBox()
         for descriptor in registry.tracker_descriptors():
@@ -198,6 +236,9 @@ class AutoTrackForwardDialog(QDialog):
             self._tracker_combo.addItem(descriptor.display_name, descriptor.plugin_id)
         self._tracker_combo.setToolTip("Method used to connect detections over time")
         form.addRow("Tracker:", self._tracker_combo)
+        self._tracker_label = form.labelForField(self._tracker_combo)
+        self._tracker_combo.hide()
+        self._tracker_label.hide()
 
         self._channel_spin = QSpinBox()
         self._channel_spin.setRange(1, num_channels)
@@ -317,12 +358,11 @@ class AutoTrackForwardDialog(QDialog):
         configure_layout.addWidget(self._starrynite_file_label)
         starrynite_compatibility_actions = QHBoxLayout()
         self._starrynite_neutral_button = QPushButton(
-            "Validate classifier export (report only)…"
+            "Use another legacy model (report only)…"
         )
         self._starrynite_neutral_button.setToolTip(
-            "Validate a numeric JSON classifier export against the MAT model "
-            "referenced by the loaded parameter file. This does not change the "
-            "tracker used by this draft."
+            "Advanced: validate an AceTree-compatible model exported from another "
+            "legacy MAT file. Bundled presets need no conversion or selection."
         )
         self._starrynite_neutral_button.clicked.connect(
             self._choose_starrynite_neutral_classifier
@@ -340,7 +380,7 @@ class AutoTrackForwardDialog(QDialog):
         starrynite_compatibility_actions.addWidget(self._starrynite_report_button)
         configure_layout.addLayout(starrynite_compatibility_actions)
 
-        self._advanced_toggle = QCheckBox("Show advanced detection options")
+        self._advanced_toggle = QCheckBox("Show advanced and custom settings")
         self._advanced_toggle.toggled.connect(self._set_advanced_visible)
         configure_layout.addWidget(self._advanced_toggle)
 
@@ -494,6 +534,12 @@ class AutoTrackForwardDialog(QDialog):
         outer.addLayout(footer)
 
     def _connect_parameter_signals(self) -> None:
+        self._workflow_combo.currentIndexChanged.connect(
+            self._tracking_workflow_changed
+        )
+        self._starrynite_preset_combo.currentIndexChanged.connect(
+            self._bundled_starrynite_preset_changed
+        )
         for widget in (
             self._end_spin,
             self._channel_spin,
@@ -519,6 +565,8 @@ class AutoTrackForwardDialog(QDialog):
 
         for widget in (
             self._end_spin,
+            self._workflow_combo,
+            self._starrynite_preset_combo,
             self._detector_combo,
             self._tracker_combo,
             self._channel_spin,
@@ -546,6 +594,141 @@ class AutoTrackForwardDialog(QDialog):
             if description:
                 widget.setAccessibleDescription(description)
 
+    def _tracking_workflow_changed(self, *_args) -> None:
+        if self._workflow_change_in_progress:
+            return
+        workflow_id = self._workflow_combo.currentData()
+        if workflow_id is not None:
+            self._apply_tracking_workflow(str(workflow_id))
+
+    def _apply_tracking_workflow(self, workflow_id: str) -> None:
+        from ..tracking.workflows import CUSTOM_COMPONENTS, tracking_workflow
+
+        workflow = tracking_workflow(workflow_id, forward=True)
+        self._workflow_change_in_progress = True
+        try:
+            if workflow is not CUSTOM_COMPONENTS:
+                if workflow.uses_bundled_starrynite:
+                    self._load_selected_bundled_starrynite_preset()
+                self._select_combo_value(self._detector_combo, workflow.detector_id)
+                self._select_combo_value(self._tracker_combo, workflow.tracker_id)
+            self._workflow_description.setText(workflow.description)
+        finally:
+            self._workflow_change_in_progress = False
+        self._update_workflow_visibility()
+        self._update_division_behavior_availability()
+        self._parameters_changed()
+
+    def _load_selected_bundled_starrynite_preset(self) -> None:
+        from ..tracking.starrynite import (
+            DEFAULT_BUNDLED_PRESET_ID,
+            bundled_parameter_preset,
+        )
+
+        preset_id = self._starrynite_preset_combo.currentData()
+        if not preset_id or str(preset_id).startswith("__custom__"):
+            preset_id = DEFAULT_BUNDLED_PRESET_ID
+            index = self._starrynite_preset_combo.findData(preset_id)
+            if index >= 0:
+                self._starrynite_preset_combo.setCurrentIndex(index)
+        preset = bundled_parameter_preset(str(preset_id))
+        target = preset.parameter_file.resolve(strict=False)
+        current = self._starrynite_parameter_path
+        if current is None or current.resolve(strict=False) != target:
+            self.load_starrynite_parameter_file(
+                str(target),
+                cell_count=self._alive_cell_count_at_start(),
+            )
+
+    def _bundled_starrynite_preset_changed(self, *_args) -> None:
+        if self._workflow_change_in_progress:
+            return
+        if self._workflow_combo.currentData() != "modern_starrynite":
+            return
+        self._workflow_change_in_progress = True
+        try:
+            self._load_selected_bundled_starrynite_preset()
+            from ..tracking.workflows import MODERN_STARRYNITE
+
+            self._select_combo_value(
+                self._detector_combo, MODERN_STARRYNITE.detector_id
+            )
+            self._select_combo_value(
+                self._tracker_combo, MODERN_STARRYNITE.tracker_id
+            )
+        finally:
+            self._workflow_change_in_progress = False
+        self._update_workflow_visibility()
+        self._parameters_changed()
+
+    def _sync_tracking_workflow_from_components(self) -> None:
+        from ..tracking.workflows import workflow_for_components
+
+        workflow = workflow_for_components(
+            self._detector_combo.currentData(),
+            self._tracker_combo.currentData(),
+            forward=True,
+        )
+        self._workflow_change_in_progress = True
+        try:
+            index = self._workflow_combo.findData(workflow.workflow_id)
+            if index >= 0:
+                self._workflow_combo.setCurrentIndex(index)
+            self._workflow_description.setText(workflow.description)
+        finally:
+            self._workflow_change_in_progress = False
+        self._update_workflow_visibility()
+
+    def _sync_bundled_preset_for_path(self, path: Path) -> None:
+        from ..tracking.starrynite import bundled_parameter_presets
+
+        resolved = path.resolve(strict=False)
+        for preset in bundled_parameter_presets():
+            if preset.parameter_file.resolve(strict=False) == resolved:
+                index = self._starrynite_preset_combo.findData(preset.preset_id)
+                if index >= 0:
+                    self._workflow_change_in_progress = True
+                    try:
+                        self._starrynite_preset_combo.setCurrentIndex(index)
+                    finally:
+                        self._workflow_change_in_progress = False
+                return
+        custom_id = f"__custom__:{resolved}"
+        index = self._starrynite_preset_combo.findData(custom_id)
+        if index < 0:
+            self._starrynite_preset_combo.addItem(f"Custom: {resolved.name}", custom_id)
+            index = self._starrynite_preset_combo.count() - 1
+        self._workflow_change_in_progress = True
+        try:
+            self._starrynite_preset_combo.setCurrentIndex(index)
+        finally:
+            self._workflow_change_in_progress = False
+
+    def _update_workflow_visibility(self) -> None:
+        uses_starrynite = self._workflow_combo.currentData() == "modern_starrynite"
+        self._starrynite_preset_combo.setVisible(uses_starrynite)
+        self._starrynite_preset_label.setVisible(uses_starrynite)
+        self._starrynite_report_button.setVisible(uses_starrynite)
+        self._starrynite_file_label.setVisible(
+            uses_starrynite and self._starrynite_profile is not None
+        )
+        advanced = self._advanced_toggle.isChecked()
+        for widget in (
+            self._detector_combo,
+            self._detector_label,
+            self._tracker_combo,
+            self._tracker_label,
+        ):
+            widget.setVisible(advanced)
+        for widget in (
+            self._starrynite_file_button,
+            self._starrynite_save_button,
+            self._starrynite_neutral_button,
+            self._starrynite_save_explanation,
+        ):
+            widget.setVisible(advanced and uses_starrynite)
+        self._refresh_recent_parameter_button()
+
     def _apply_initial_settings(self, settings: Mapping[str, Any]) -> None:
         detector_preset = settings.get("starrynite_detector_settings", {})
         tracker_preset = settings.get("starrynite_tracker_settings", {})
@@ -563,7 +746,7 @@ class AutoTrackForwardDialog(QDialog):
             if requested_mode in (None, "", "native_fast"):
                 continue
             raise ValueError(
-                "Auto Forward cannot restore StarryNite compatibility backend "
+                "Selected-cell tracking cannot restore StarryNite compatibility backend "
                 f"{requested_mode!r}; this workbench supports only the explicit "
                 "native_fast backend"
             )
@@ -671,6 +854,8 @@ class AutoTrackForwardDialog(QDialog):
     def _tracker_changed(self, *_args) -> None:
         self._update_division_behavior_availability()
         self._render_starrynite_file_summary()
+        if not self._workflow_change_in_progress:
+            self._sync_tracking_workflow_from_components()
         self._parameters_changed()
 
     def _detector_changed(self, *_args) -> None:
@@ -685,6 +870,8 @@ class AutoTrackForwardDialog(QDialog):
             except (KeyError, ValueError):
                 pass
         self._render_starrynite_file_summary()
+        if not self._workflow_change_in_progress:
+            self._sync_tracking_workflow_from_components()
         self._parameters_changed()
 
     def _branch_policy_changed(self, *_args) -> None:
@@ -747,6 +934,8 @@ class AutoTrackForwardDialog(QDialog):
         if revalidate:
             self._refresh_starrynite_compatibility()
         return {
+            "workflow_id": self._workflow_combo.currentData(),
+            "bundled_starrynite_preset_id": self._starrynite_preset_combo.currentData(),
             "detector_id": self._detector_combo.currentData(),
             "tracker_id": self._tracker_combo.currentData(),
             "end_time": self._end_spin.value(),
@@ -788,7 +977,7 @@ class AutoTrackForwardDialog(QDialog):
         from ..tracking.api import ComponentSpec, TrackingRequest, TrackingScope
         anchor = seed_anchor or self._seed_anchor
         if anchor is None:
-            raise ValueError("Auto Forward needs a selected seed nucleus")
+            raise ValueError("Track Selected Cell needs a selected seed nucleus")
         registry = self._registry
         detector_id = str(self._detector_combo.currentData())
         tracker_id = str(self._tracker_combo.currentData())
@@ -911,13 +1100,13 @@ class AutoTrackForwardDialog(QDialog):
         ):
             if tracker_is_starrynite:
                 parts.append(
-                    f"Classifier export {html.escape(neutral_path.name)} was validated "
+                    f"Tracking model {html.escape(neutral_path.name)} was validated "
                     "as source-bound for reporting only; native geometry scoring "
                     "remains active."
                 )
             else:
                 parts.append(
-                    f"Classifier export {html.escape(neutral_path.name)} is "
+                    f"Tracking model {html.escape(neutral_path.name)} is "
                     "source-bound to the loaded preset for reporting only; the "
                     "selected tracker does not use it."
                 )
@@ -988,6 +1177,10 @@ class AutoTrackForwardDialog(QDialog):
         return candidate.resolve(strict=False) if candidate.is_file() else None
 
     def _remember_starrynite_parameter_file(self, path: Path) -> None:
+        from ..tracking.starrynite import is_bundled_parameter_file
+
+        if is_bundled_parameter_file(path):
+            return
         try:
             settings = self._settings_store()
             settings.setValue(
@@ -1106,6 +1299,7 @@ class AutoTrackForwardDialog(QDialog):
 
         from ..tracking.starrynite import (
             build_compatibility_report,
+            bundled_classifier_for_profile,
             load_tuning_profile,
         )
 
@@ -1125,9 +1319,11 @@ class AutoTrackForwardDialog(QDialog):
         source = profile.parameters.source_path or Path(path)
         self._starrynite_parameter_path = source.resolve(strict=False)
         self._starrynite_profile = profile
+        self._sync_bundled_preset_for_path(self._starrynite_parameter_path)
         restored_from_settings = neutral_classifier_path is None
         requested_neutral = (
-            self._remembered_neutral_classifier(profile)
+            bundled_classifier_for_profile(profile)
+            or self._remembered_neutral_classifier(profile)
             if restored_from_settings
             else Path(neutral_classifier_path).expanduser().resolve(strict=False)
         )
@@ -1175,10 +1371,12 @@ class AutoTrackForwardDialog(QDialog):
         self._distance_spin.setValue(max(self._distance_spin.minimum(), radius * 2.0))
         max_frame_gap = int(profile.tracker_settings.get("MAX_FRAME_GAP", 2))
         self._gap_spin.setValue(max(0, max_frame_gap - 1))
-        follow_both = self._branch_policy_combo.findData("follow_both")
-        if follow_both >= 0:
-            self._branch_policy_combo.setCurrentIndex(follow_both)
+        stop_for_review = self._branch_policy_combo.findData("stop")
+        if stop_for_review >= 0:
+            self._branch_policy_combo.setCurrentIndex(stop_for_review)
         self._render_starrynite_file_summary()
+        if not self._workflow_change_in_progress:
+            self._sync_tracking_workflow_from_components()
         self._parameters_changed()
 
     def _choose_starrynite_neutral_classifier(self) -> None:
@@ -1190,9 +1388,9 @@ class AutoTrackForwardDialog(QDialog):
             initial = profile.model_path or self._starrynite_parameter_path
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
-            "Choose a StarryNite classifier export",
+            "Choose an AceTree-compatible StarryNite model",
             "" if initial is None else str(initial),
-            "Classifier export JSON (*.json);;All files (*)",
+            "AceTree tracking models (*.atpy-model *.json);;All files (*)",
         )
         if not path:
             return
@@ -1200,7 +1398,7 @@ class AutoTrackForwardDialog(QDialog):
             self.attach_starrynite_neutral_classifier(path)
         except Exception as exc:
             logger.exception("Could not validate neutral StarryNite classifier")
-            self._show_failure("That classifier export could not be used.", exc)
+            self._show_failure("That tracking model could not be used.", exc)
 
     def attach_starrynite_neutral_classifier(self, path: str | Path) -> None:
         """Validate and retain a neutral export without claiming run support."""
@@ -1237,7 +1435,7 @@ class AutoTrackForwardDialog(QDialog):
             error_message = (
                 issue.message
                 if issue is not None
-                else "The classifier export could not be proven source-bound."
+                else "The tracking model could not be proven source-bound."
             )
             previous_path = self._starrynite_neutral_classifier_path
             if previous_path is not None:
@@ -1467,7 +1665,10 @@ class AutoTrackForwardDialog(QDialog):
                 self._preview_button.setEnabled(False)
             return
         if self.app is None or self._seed_anchor is None:
-            self._set_state(self.FAILED, "Auto Forward is not connected to an open dataset.")
+            self._set_state(
+                self.FAILED,
+                "Selected-cell tracking is not connected to an open dataset.",
+            )
             return
         try:
             request = self.get_request()
@@ -1630,7 +1831,7 @@ class AutoTrackForwardDialog(QDialog):
             exc_info=(type(error), error, error.__traceback__),
         )
         self._show_failure(
-            "Auto Forward could not build a draft. No changes were made.",
+            "Selected-cell tracking could not build a draft. No changes were made.",
             error,
         )
         if self._proposal is not None:
@@ -2044,6 +2245,8 @@ class AutoTrackForwardDialog(QDialog):
 
     def _set_advanced_visible(self, visible: bool) -> None:
         self._advanced_widget.setVisible(visible)
+        self._update_workflow_visibility()
+        self._refresh_recent_parameter_button()
 
     def _on_table_current_cell_changed(
         self,

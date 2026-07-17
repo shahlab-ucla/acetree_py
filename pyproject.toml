@@ -33,6 +33,9 @@ all = ["acetree-py[gui,dev]"]
 acetree-py = "acetree_py.__main__:app"
 acetree-starrynite-export-model = "acetree_py.tracking.starrynite.oracle.model_export:main"
 
+[tool.hatch.build.targets.wheel.force-include]
+"acetree_py/tracking/starrynite/assets" = "acetree_py/tracking/starrynite/assets"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

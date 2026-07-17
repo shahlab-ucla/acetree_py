@@ -704,7 +704,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Export a StarryNite MATLAB classifier to validated inert numeric JSON. "
+            "Export a StarryNite MATLAB classifier to a validated AceTree runtime model. "
             "The exporter supports historical NaiveBayes runtimes without -batch."
         )
     )
@@ -719,7 +719,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Compatible matlab executable (or MATLAB_EXECUTABLE).",
     )
     parser.add_argument("--model", required=True, type=Path, help="Source model MAT file.")
-    parser.add_argument("--output", required=True, type=Path, help="Neutral model JSON.")
+    parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="AceTree runtime model (.atpy-model recommended).",
+    )
     parser.add_argument(
         "--kind",
         choices=tuple(sorted(_EXPORT_KINDS)),

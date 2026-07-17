@@ -211,7 +211,7 @@ reported as unresolved rather than found by an implicit basename search.
 Classifier sensitivity is tested at the feature boundary. MATLAB exports only
 inert numeric state, including class names, priors, costs, feature masks, and
 per-class categorical/normal/kernel distribution parameters. Python binds the
-neutral JSON to the original MAT SHA-256 and rejects shape drift, unsupported
+runtime model to the original MAT SHA-256 and rejects shape drift, unsupported
 distributions, censored/truncated kernels, nonidentity standardization or score
 transforms, or a hash mismatch. Raw infinite predictors are retained because
 MATLAB passes them to `predict`; all-zero likelihoods use the same prior
@@ -238,7 +238,7 @@ acetree-starrynite-export-model `
   --starrynite-root C:\path\to\StarryNite `
   --matlab "C:\Program Files\MATLAB\R20xx\bin\matlab.exe" `
   --model C:\path\to\tracking-model.mat `
-  --output C:\path\to\tracking-model.numeric.json `
+  --output C:\path\to\tracking-model.atpy-model `
   --kind auto
 ```
 
@@ -254,7 +254,7 @@ approximate classifier.
 For old models the helper reads `ClassLevels`, `Prior`, `Dist`, `Params`, and
 the kernel/category metadata from the reconstructed object. It supports normal,
 multivariate-multinomial, and unbounded Gaussian-kernel predictors. Before any
-JSON is saved, it creates finite parameter-center/mode and scale/category-
+runtime model is saved, it creates finite parameter-center/mode and scale/category-
 perturbed rows per class, calls
 the same loaded object's `predict(..., 'HandleMissing', 'on')` and `posterior`,
 and returns those probes with the numeric state. Python reconstructs the inert

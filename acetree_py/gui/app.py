@@ -779,7 +779,7 @@ class AceTreeApp:
             QMessageBox.information(
                 parent,
                 "Previous Analysis Is Stopping",
-                "Please wait for the previous whole-dataset analysis to finish "
+                "Please wait for the previous whole-movie analysis to finish "
                 "canceling before starting another run.",
             )
             return None
@@ -800,7 +800,7 @@ class AceTreeApp:
                 "Dataset Is Not Empty",
                 "Whole-dataset tracking currently adds a new initial draft and is only "
                 "available before curation begins. Undo the accepted initial draft, or "
-                "use Auto Forward for a selected cell.",
+                "use Track Selected Cell for a selected lineage.",
             )
             return None
 
@@ -863,12 +863,12 @@ class AceTreeApp:
         )
         dialog.draftAccepted.connect(
             lambda count: self._set_tracking_status(
-                f"Accepted {count} reviewed whole-dataset positions"
+                f"Accepted {count} reviewed whole-movie positions"
             )
         )
         dialog.draftDiscarded.connect(
             lambda: self._set_tracking_status(
-                "Discarded the whole-dataset draft; no positions were added"
+                "Discarded the whole-movie draft; no positions were added"
             )
         )
         self._global_tracking_dialog = dialog

@@ -60,27 +60,28 @@ in the User Guide for a full walkthrough.
 
 ### Real-world StarryNite tracking
 
-AceTree-Py exposes two deliberately different StarryNite workflows:
+AceTree-Py exposes four named workflows in the tracking dialogs:
 
-- **StarryNite legacy exact (whole movie)** is the global, MATLAB-compatibility
-  backend. Start with an empty dataset at time 1 and provide the legacy
-  parameter file, every distribution/model file it references, and an inert
-  numeric classifier export bound to that exact MAT model. Dataset calibration
-  must match the parameter source. The workbench runs sequential detection,
-  staged geometry, classifier cleanup, and divisions as one reviewable draft.
-- **StarryNite native division tracking** is the practical tuning and sparse
-  curation backend. It can follow one selected lineage with **Auto Forward**,
-  including both daughters, while leaving the rest of the embryo untouched. A
-  legacy parameter file can seed its editable controls, but its scorer is native
-  and an attached MATLAB classifier export is report-only in this mode.
+- **Modern StarryNite (recommended)** is the practical whole-movie and sparse
+  workflow, combining stage-aware detection with fast division-aware tracking.
+- **LoG detection + LAP tracking** and **DoG detection + LAP tracking** are
+  continuation-only alternatives that need no StarryNite assets.
+- **Legacy StarryNite 2019 exact replay** is the global MATLAB-compatibility
+  backend, with sequential detection, staged geometry, source-bound
+  classification, cleanup, and divisions in one reviewable draft.
 
-Use **Start from StarryNite parameters...** to load a standard file, edit the
-visible basic controls, and **Save tuned parameter copy...** to create a
-source-preserving copy. The copy becomes active immediately, and **Use recent**
-recalls the last usable file across both tracking workbenches. Exact mode never
-silently substitutes a missing source or falls back to native scoring: its
-compatibility check reports the first blocker before analysis, and no nuclei are
-changed until **Accept Draft**.
+All six parameter files from StarryNite's `example_parameter_files/newmatlab`
+directory are bundled as **Imaging preset** choices. Their distributions, the
+2019 model, and the additional Gaussian light-sheet model are source-bound and
+ready to use; users do not generate JSON files. The pre-2019 red-channel model
+source and a MATLAB export helper are included for advanced compatibility work.
+
+Use **Track Selected Cell...** for sparse forward tracking in any new or loaded
+XML dataset. Use **Track Whole Movie...** for an empty record, including the
+initial draft offered by the dataset wizard. **Advanced and custom settings**
+can load, edit, and save an external legacy parameter file, and AceTree remembers
+the most recently selected external file. Exact mode never silently falls back
+to native scoring, and no nuclei change until **Accept Draft**.
 
 See the [real-world StarryNite checklist](docs/user_guide.md#real-world-starrynite-test-checklist)
 for the complete UI sequence, prerequisites, failure guidance, current

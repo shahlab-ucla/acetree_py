@@ -217,7 +217,7 @@ All edits are **undoable** (`Ctrl+Z`) and **redoable** (`Ctrl+Y`). Up to 1000 ed
 │                              │
 │ Link Operations              │
 │ [Relink] [Manual Track]      │
-│ [Auto Forward...]            │
+│ [Track Selected Cell...]     │
 │                              │
 │ Body Orientation             │
 │ Endpoint: [Anterior ▾]       │
@@ -325,25 +325,25 @@ If no cell is selected, Manual Track enters root mode: a single right-click plac
 
 When a placement creates a second daughter, AceTree evaluates the division rule for the **actual parent**. The preview can therefore propose `ABal/ABar`, `E/MS`, `C/P3`, or other parent-specific pairs rather than always proposing `a/p`. The preview reports its axis, confidence, and orientation source. Suggested names remain automatic (`identity`); use Rename only when you intend to force a correction. Low-confidence or ambiguous geometry is an invitation to inspect the body axes and daughter positions.
 
-#### Auto Forward Tracking Workbench
+#### Track Selected Cell Workbench
 
-**Edit Tools > Auto Forward** follows one selected cell without detecting or replacing the rest of the embryo:
+**Edit Tools > Track Selected Cell** follows one selected cell without detecting or replacing the rest of the embryo. It is available after manual initialization and after opening an existing XML dataset:
 
-1. Select a live cell and click **Auto Forward**. If the selection is earlier in an existing one-child continuation, AceTree safely starts from its terminal nucleus. It never chooses a daughter at a division.
-2. In **1. Configure**, choose a detector and tracker, channel, approximate nucleus radius, detection threshold, search area, maximum movement, allowed missing frames, caution for close choices, and division behavior. Tooltips explain whether increasing each value makes tracking broader or more selective. **Follow both daughters** is available only when the selected tracker advertises division support. Advanced options expose subpixel refinement and median filtering.
+1. Select a live cell and click **Track Selected Cell**. If the selection is earlier in an existing one-child continuation, AceTree safely starts from its terminal nucleus. It never chooses a daughter at a division.
+2. In **1. Configure**, choose **Modern StarryNite (recommended)**, **LoG detection + LAP tracking**, or **DoG detection + LAP tracking**. Modern StarryNite also offers six bundled imaging presets. Basic controls cover channel, radius, threshold, search area, movement, gaps, caution, and division behavior; individual components are under **Advanced and custom settings**.
 3. Click **Build Preview**. Analysis runs in the background, progress is reported by frame, and **Cancel analysis** stops cooperatively without retaining a partial result or changing the dataset. Closing the window during analysis requests cancellation before its worker is released.
 4. In **2. Review**, inspect every proposed and interpolated position in the table. The overlay uses both shape and color: circles are proposed detections, diamonds are interpolated gaps, square/cross marks are diagnostic candidates that will not be accepted, and paths show movement. When a run stops, a ring/crosshair in 2D or wireframe search sphere in 3D shows the predicted search region. Click or keyboard-select a row, use **Previous**, **Next**, **Play Draft**, or **Go to stop**, and optionally center the camera on the selected position.
 5. If the draft needs work, change any parameter. AceTree marks the old overlay as out of date and disables acceptance until **Update Preview** finishes. Settings are remembered when the workbench is reopened.
-6. Read the human-language stopping explanation. Auto Forward stops rather than guessing at similarly likely candidates, likely divisions, conflicts with existing annotations, or a lost continuation. The stopped frame, last accepted frame, predicted location, search radius, and review-only candidates are structured proposal data and remain available after save/reload of the tracking sidecar.
+6. Read the human-language stopping explanation. Selected-cell tracking stops rather than guessing at similarly likely candidates, likely divisions, conflicts with existing annotations, or a lost continuation. The stopped frame, last accepted frame, predicted location, search radius, and review-only candidates are structured proposal data and remain available after save/reload of the tracking sidecar.
 7. Choose **Accept Draft** to add exactly the visible proposal as one undoable edit, or **Discard Draft** to restore the original view without editing anything. After acceptance, AceTree selects the new terminal nucleus so curation can continue immediately.
 
 Use **Solo detection channel while reviewing** when other fluorescence channels obscure the detector input; it applies to the main and all open detached viewers, then restores each layer's prior visibility on close. Draft layers remain read-only and visible in editing colors, visualization-rule colors, the main 3D volume, and every detached 3D window. Detached windows honor their own timepoint when Sync is off, and changing a review highlight updates only draft layers rather than rereading the image stacks.
 
 Simple LAP supports one-to-one continuations and short gaps. It does **not** create divisions or merges. The StarryNite division tracker can stop at a likely division, follow the best daughter, or include both daughters in the review draft; merges remain disabled. A manual edit, Undo, or Redo while a draft is open makes that draft stale and requires **Update Preview** before it can be accepted.
 
-To tune from an existing MATLAB setup, choose **Start from StarryNite parameters…**. AceTree reads the legacy file, selects the stage from the number of live cells at the starting frame, switches to the StarryNite detector/tracker, and fills the editable basic controls. **Save tuned parameter copy…** preserves the original text and comments while appending compatible edits for stage-aware intensity threshold, physical radius, and missing-frame allowance. Search area, movement caution, and other Python-only review controls are not written back. The saved copy becomes active immediately, and the most recently selected usable file is offered the next time the workbench opens. Keep a copy beside its original model files when the legacy file uses relative model paths.
+The default imaging preset is bundled and needs no conversion. Under **Advanced and custom settings**, **Use another parameter file...** reads an external legacy file, selects its stage from the live-cell count, and fills the editable controls. **Save tuned parameter copy...** preserves its original text and comments while appending compatible edits. The copy becomes active immediately, and the most recently selected external file is offered the next time either tracking workbench opens.
 
-Auto Forward always uses the native StarryNite division tracker; the global
+Selected-cell tracking always uses the native StarryNite division tracker; the global
 legacy-exact backend is intentionally unavailable for a selected-cell scope.
 **Validate classifier export (report only)…** can confirm that a numeric export
 belongs to the referenced MAT model, but does not execute that classifier or
@@ -352,24 +352,24 @@ the best daughter only**, or **Follow both daughters** according to the curation
 goal. Following both daughters adds exactly two reviewed branches when the
 tracker supports splitting; it does not start tracking the rest of the embryo.
 
-#### Whole-Dataset Tracking Workbench
+#### Track Whole Movie Workbench
 
-Choosing automated tracking in the dataset wizard creates the empty ZIP/XML first, launches the viewer, and opens **Review Initial Tracking Draft**. The selected detector/tracker settings are prefilled, then AceTree runs a fast detector test on the first requested frame. The wizard enables its division option only for a tracker that advertises splitting support; StarryNite's tracker defaults to proposing reviewed two-daughter branches, while Simple LAP remains continuation-only. The detector test reads that frame's complete 3D stack but does not run tracking, create links, populate the review table, or enable **Accept Draft**.
+Choosing automated tracking in the dataset wizard creates the empty ZIP/XML first, launches the viewer, and opens **Review Initial Tracking Draft**. The wizard defaults to **Modern StarryNite (recommended)** and exposes the same LoG+LAP and DoG+LAP alternatives. Modern StarryNite offers every upstream `newmatlab` imaging preset and defaults to reviewed two-daughter proposals; LAP remains continuation-only.
 
-The whole-dataset workbench also supports **Start from StarryNite parameters…**, **Use recent**, and **Save tuned parameter copy…**. Loading safely maps compatible staged values to the StarryNite detector and native division tracker; saving losslessly appends edits for radius, intensity threshold, and missing frames while preserving comments and unsupported MATLAB statements. The active usable file is remembered across both whole-dataset and Auto Forward workbenches.
+The whole-movie workbench uses the bundled presets directly. External parameter loading, the remembered recent file, tuned-copy saving, and alternate legacy-model selection remain available under **Advanced and custom settings**.
 
 After loading a StarryNite file, keep tuning the visible controls normally and
 open **Compatibility details…** to see the selected stage, effective values,
 model identity, and any fail-closed limitations. In this whole-dataset
-workbench, **Attach classifier export…** checks that an inert numeric classifier
-JSON is bound to the exact MAT file referenced by the active parameters. The
-workbench remembers a validated export by model hash. Editing or replacing a
-parameter, distribution, model, or classifier source invalidates the
-corresponding identity check and requires a fresh validation.
+workbench, the bundled tracking model is attached automatically and checked
+against the exact MAT source hash. **Use another legacy model...** accepts both
+the `.atpy-model` format and older JSON exports for backward compatibility.
+Editing or replacing a parameter, distribution, model, or runtime-model source
+invalidates the corresponding identity check and requires fresh validation.
 
-For MATLAB-equivalent whole-movie processing, select **StarryNite legacy exact
-(whole movie)** after loading the parameter file and attaching its classifier
-export. Exact mode automatically pairs the StarryNite detector, requires time 1
+For MATLAB-equivalent whole-movie processing, select **Legacy StarryNite 2019
+exact replay** and choose the matching bundled imaging preset. Exact mode
+automatically pairs the StarryNite detector and ready source-bound model, requires time 1
 as the start, uses the parameter-file calibration, enables divisions, and runs
 sequential detection followed by every staged geometry and classifier cleanup
 pass. It never falls back to the native scorer. Missing source fields, changed
@@ -386,7 +386,7 @@ Before creation, the wizard verifies every requested channel source, multichanne
 
 The per-frame table appears only for a full draft and includes every requested frame, including frames with no detections, interpolated gap positions, new track starts, mean quality, and warnings. Select rows by mouse or keyboard while inspecting the same read-only overlay in 2D, main 3D, or detached 3D. Change settings and choose **Update Full Draft** as often as needed; the previous overlay is visibly stale and cannot be accepted after a setting or document change. **Accept Draft** is the only action that adds positions, as one undoable edit. **Discard Draft**, cancellation, failure, or closing the window leaves the dataset empty.
 
-For discoverability, **Edit Tools > Tracking & Links > Whole Dataset…** reopens this workbench while the dataset is still empty. Once any nucleus record exists, use **Auto Forward** for a selected lineage or Undo the accepted initial draft before rerunning whole-dataset tracking. This restriction prevents an embryo-wide run from duplicating curated nuclei.
+For discoverability, **Edit Tools > Tracking & Links > Track Whole Movie...** reopens this workbench while the dataset is still empty. Once any nucleus record exists, use **Track Selected Cell...** for a selected lineage or Undo the accepted initial draft before rerunning whole-movie tracking. This restriction prevents an embryo-wide run from duplicating curated nuclei.
 
 #### Real-world StarryNite test checklist
 
@@ -399,33 +399,31 @@ currently needs all of the following before it reads frame 1:
   available at every requested frame;
 - dataset XY and Z calibration equal to the values resolved from the parameter
   file, and XY downsampling equal to 1;
-- the original legacy parameter file plus every detector-distribution and
-  tracking-model file it references, at paths that resolve exactly; and
-- a numeric classifier JSON exported from that same MAT model and validated by
-  source hash. The Python runtime never executes the serialized MATLAB object.
+- one of the six bundled imaging presets with its ready detector distribution,
+  MAT source model, and source-bound `.atpy-model` runtime model; or an external
+  source set whose parameter, distribution, and model paths resolve exactly.
 
-Create that JSON once with `acetree-starrynite-export-model` under a MATLAB
-release that can reconstruct the original model object. The exporter verifies
-MATLAB predictions/posteriors before saving and writes a provenance manifest
-beside the JSON. See [Exporting a source-bound classifier](STARRYNITE_DIFFERENTIAL_TESTING.md#exporting-a-source-bound-classifier)
+No export is needed for the bundled 2019 or Gaussian models. For the bundled
+pre-2019 red-channel source or another retired external model, run
+`acetree-starrynite-export-model` under a MATLAB release that reconstructs the
+object and write an `.atpy-model` file. The exporter verifies MATLAB predictions
+and writes a provenance manifest. See [Exporting a source-bound classifier](STARRYNITE_DIFFERENTIAL_TESTING.md#exporting-a-source-bound-classifier)
 for the command and old/new MATLAB model boundary.
 
 Recommended whole-movie sequence:
 
 1. Create or open an empty dataset, then open **Review Initial Tracking Draft**
-   or **Edit Tools > Tracking & Links > Whole Dataset…**.
-2. Choose **Start from StarryNite parameters…**. If the previous source is
-   still present, **Use recent: _filename_** reloads it. Loading selects the
-   StarryNite detector and native tracker initially and shows the resolved stage.
+   or **Edit Tools > Tracking & Links > Track Whole Movie...**.
+2. Choose **Modern StarryNite (recommended)** or **Legacy StarryNite 2019 exact
+   replay**, then select the bundled imaging preset matching the microscope.
 3. If radius, intensity threshold, or missing-frame allowance needs adjustment,
    edit the visible control and choose **Save tuned parameter copy…**. AceTree
    preserves the original statements and comments, appends supported edits,
    reloads the copy, and makes it the new recent file. It never edits the source
    model. Put the copy beside the source file when its model paths are relative,
    or update those paths explicitly.
-4. Choose **Attach classifier export…**, then select **StarryNite legacy exact
-   (whole movie)**. Exact selection forces the StarryNite detector, divisions,
-   and a start time of 1; turn off native-only subpixel and median-filter options.
+4. For exact replay, the bundled runtime model is selected automatically. Use
+   **Use another legacy model...** only for an externally exported model.
 5. Open **Compatibility details…**. Continue only when the exact backend is
    reported runnable. A detector test at time 1 is optional; later exact frames
    require prior-frame state and must be assessed with **Build Full Draft**.
@@ -441,13 +439,13 @@ Common fail-closed messages identify a corrective next step:
 | Parameter, model, distribution, or classifier source changed | Reload the parameter file and attach a newly validated export. Exact mode rehashes sources and will not use a stale association. |
 | Required legacy value or referenced file is missing | Add or correct it in a parameter-file copy. AceTree does not invent a default distribution or search for a same-named file elsewhere. |
 | Calibration mismatch or downsampling is not 1 | Correct the dataset calibration/source selection, or use the native tracker. Do not rescale exact inputs implicitly. |
-| Exact mode must start at time 1 or the dataset is not empty | Create/restore an empty record and run the complete range from time 1; use Auto Forward for an existing curated lineage. |
+| Exact mode must start at time 1 or the dataset is not empty | Create/restore an empty record and run the complete range from time 1; use Track Selected Cell for an existing curated lineage. |
 | Unsupported statement, polar-body mode, or hysteresis mode | Use the native workflow or retain MATLAB for that run. The exact backend stops because the required raw measurement or safe parameter meaning is unavailable. |
-| Classifier cannot be reconstructed or is not source-bound | Export inert numeric state with a MATLAB release that can load the original object, then attach the resulting JSON. Never substitute a retrained classifier. |
+| Model cannot be reconstructed or is not source-bound | Export inert numeric state with a MATLAB release that can load the original object, then select the resulting `.atpy-model`. Never substitute a retrained model. |
 
-For sparse real-world testing, select a trustworthy live nucleus and use **Auto
-Forward** with the native StarryNite tracker. Load the same standard parameter
-file as a starting preset, tune the local search and caution controls, choose a
+For sparse real-world testing, select a trustworthy live nucleus and use **Track
+Selected Cell** with the native StarryNite tracker. Choose the same bundled
+imaging preset, tune the local search and caution controls, choose a
 division policy, build and inspect a short draft, and accept only the visible
 branches. This is the supported way to track a few cells in an already curated
 embryo; it is not a partial invocation of the exact whole-movie classifier.
@@ -962,7 +960,7 @@ Manual Track mode automatically handles:
 - **Predecessor linking**: direct link if adjacent, interpolation if there's a gap.
 - **Size inheritance**: the placed nucleus inherits the parent's diameter.
 
-To follow only one existing cell automatically, use **Edit Tools > Auto Forward** as described in Section 6.5. It searches a moving local ROI, shows a proposal summary, stops on ambiguity, and applies an accepted draft as one undoable edit.
+To follow only one existing cell automatically, use **Edit Tools > Track Selected Cell** as described in Section 6.5. It searches a moving local ROI, shows a proposal summary, stops on ambiguity, and applies an accepted draft as one undoable edit.
 
 ### 14.5 Workflow for Single-Frame Annotation
 
@@ -978,7 +976,7 @@ acetree-py create /data/single_frame/
 3. Use **Rename** to assign cell identities.
 4. **Save** (`Ctrl+S`) to persist annotations.
 
-Each placed nucleus becomes an independent root cell. Manual Track and Auto Forward are not useful in single-frame mode (there are no future timepoints to track to).
+Each placed nucleus becomes an independent root cell. Manual Track and Track Selected Cell are not useful in single-frame mode (there are no future timepoints to track to).
 
 ### 14.6 Saving and Reloading
 
@@ -994,6 +992,6 @@ After annotation:
 
 - **Use the 3D view** (Section 6.6) to verify nucleus positions in three dimensions.
 - **Place nuclei on the z-plane where the nucleus is brightest** for the most accurate position.
-- **Use Manual Track** for curated long tracks, or **Auto Forward** for a reviewable draft of one continuation.
+- **Use Manual Track** for curated long tracks, or **Track Selected Cell** for a reviewable draft of one continuation.
 - **Use Relink** to correct mistakes after the fact rather than undoing many steps.
 - **Save frequently** (`Ctrl+S`) — there is no autosave.

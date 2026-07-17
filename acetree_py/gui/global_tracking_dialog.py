@@ -185,6 +185,7 @@ class GlobalTrackingDialog(QDialog):
         self._starrynite_compatibility_report = None
         self._starrynite_session_note_html = ""
         self._starrynite_classifier_note_html = ""
+        self._workflow_change_in_progress = False
         self._solo_channel_visibility: list[tuple[object, bool]] | None = None
         self._original_view = self._capture_view_state()
 
@@ -199,6 +200,10 @@ class GlobalTrackingDialog(QDialog):
 
         self._build_ui()
         self._apply_initial_request(initial_request)
+        if initial_request is None:
+            self._apply_tracking_workflow("modern_starrynite")
+        else:
+            self._sync_tracking_workflow_from_components()
         self._refresh_recent_parameter_button()
         self._sync_division_capability(use_default=initial_request is None)
         self._update_starrynite_behavior_visibility()
@@ -260,6 +265,40 @@ class GlobalTrackingDialog(QDialog):
         form = QFormLayout(self._settings_widget)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
+        from ..tracking.workflows import GLOBAL_TRACKING_WORKFLOWS
+
+        self._workflow_combo = QComboBox()
+        for workflow in GLOBAL_TRACKING_WORKFLOWS:
+            self._workflow_combo.addItem(workflow.display_name, workflow.workflow_id)
+        self._workflow_combo.setToolTip(
+            "Choose a complete detector and tracker workflow. Modern StarryNite "
+            "is the recommended default."
+        )
+        self._workflow_combo.setAccessibleName("Tracking workflow")
+        form.addRow("Tracking method:", self._workflow_combo)
+
+        self._workflow_description = QLabel()
+        self._workflow_description.setWordWrap(True)
+        self._workflow_description.setAccessibleName("Tracking workflow explanation")
+        form.addRow("", self._workflow_description)
+
+        from ..tracking.starrynite import bundled_parameter_presets
+
+        self._starrynite_preset_combo = QComboBox()
+        for preset in bundled_parameter_presets():
+            self._starrynite_preset_combo.addItem(preset.display_name, preset.preset_id)
+            index = self._starrynite_preset_combo.count() - 1
+            self._starrynite_preset_combo.setItemData(index, preset.description, Qt.ToolTipRole)
+        self._starrynite_preset_combo.setToolTip(
+            "Install-ready parameter files distributed with StarryNite. No model "
+            "conversion or classifier-file selection is needed."
+        )
+        self._starrynite_preset_combo.setAccessibleName("Bundled StarryNite preset")
+        form.addRow("Imaging preset:", self._starrynite_preset_combo)
+        self._starrynite_preset_label = form.labelForField(
+            self._starrynite_preset_combo
+        )
+
         self._start_spin = QSpinBox()
         self._start_spin.setRange(self._range_start, self._range_end)
         self._start_spin.setValue(self._range_start)
@@ -280,6 +319,9 @@ class GlobalTrackingDialog(QDialog):
         self._detector_combo.setToolTip("Method used to find nucleus-like bright blobs")
         self._detector_combo.setAccessibleName("Nucleus detector")
         form.addRow("Detector:", self._detector_combo)
+        self._detector_label = form.labelForField(self._detector_combo)
+        self._detector_combo.hide()
+        self._detector_label.hide()
 
         self._tracker_combo = QComboBox()
         for descriptor in self._registry.tracker_descriptors():
@@ -287,6 +329,9 @@ class GlobalTrackingDialog(QDialog):
         self._tracker_combo.setToolTip("Method used to connect detections over time")
         self._tracker_combo.setAccessibleName("Detection linker")
         form.addRow("Tracker:", self._tracker_combo)
+        self._tracker_label = form.labelForField(self._tracker_combo)
+        self._tracker_combo.hide()
+        self._tracker_label.hide()
 
         self._channel_spin = QSpinBox()
         self._channel_spin.setRange(1, self._num_channels)
@@ -384,12 +429,11 @@ class GlobalTrackingDialog(QDialog):
 
         starrynite_compatibility_actions = QHBoxLayout()
         self._starrynite_neutral_button = QPushButton(
-            "Attach classifier export..."
+            "Use another legacy model..."
         )
         self._starrynite_neutral_button.setToolTip(
-            "Attach a numeric JSON classifier export to the loaded MAT model. "
-            "Exact whole-movie tracking requires and executes it; the native "
-            "tracker remains unchanged."
+            "Advanced: select an AceTree-compatible model exported from another "
+            "legacy StarryNite MAT file. Bundled presets already include their models."
         )
         self._starrynite_neutral_button.clicked.connect(
             self._choose_starrynite_neutral_classifier
@@ -424,7 +468,7 @@ class GlobalTrackingDialog(QDialog):
         self._starrynite_behavior_label.hide()
         configure_layout.addWidget(self._starrynite_behavior_label)
 
-        self._advanced_toggle = QCheckBox("Show advanced detection options")
+        self._advanced_toggle = QCheckBox("Show advanced and custom settings")
         self._advanced_toggle.toggled.connect(self._set_advanced_visible)
         configure_layout.addWidget(self._advanced_toggle)
 
@@ -599,6 +643,12 @@ class GlobalTrackingDialog(QDialog):
         outer.addLayout(footer)
 
     def _connect_parameter_signals(self) -> None:
+        self._workflow_combo.currentIndexChanged.connect(
+            self._tracking_workflow_changed
+        )
+        self._starrynite_preset_combo.currentIndexChanged.connect(
+            self._bundled_starrynite_preset_changed
+        )
         for widget in (
             self._channel_spin,
             self._radius_spin,
@@ -625,6 +675,8 @@ class GlobalTrackingDialog(QDialog):
         for widget in (
             self._start_spin,
             self._end_spin,
+            self._workflow_combo,
+            self._starrynite_preset_combo,
             self._detector_combo,
             self._tracker_combo,
             self._channel_spin,
@@ -646,6 +698,142 @@ class GlobalTrackingDialog(QDialog):
         ):
             if widget.toolTip():
                 widget.setAccessibleDescription(widget.toolTip())
+
+    def _tracking_workflow_changed(self, *_args) -> None:
+        if self._workflow_change_in_progress:
+            return
+        workflow_id = self._workflow_combo.currentData()
+        if workflow_id is not None:
+            self._apply_tracking_workflow(str(workflow_id))
+
+    def _apply_tracking_workflow(self, workflow_id: str) -> None:
+        from ..tracking.workflows import CUSTOM_COMPONENTS, tracking_workflow
+
+        workflow = tracking_workflow(workflow_id)
+        self._workflow_change_in_progress = True
+        try:
+            if workflow is not CUSTOM_COMPONENTS:
+                if workflow.uses_bundled_starrynite:
+                    self._load_selected_bundled_starrynite_preset()
+                self._select_combo_value(self._detector_combo, workflow.detector_id)
+                self._select_combo_value(self._tracker_combo, workflow.tracker_id)
+                if workflow.workflow_id == "legacy_starrynite_exact":
+                    self._start_spin.setValue(self._range_start)
+                    self._end_spin.setValue(self._range_end)
+            self._workflow_description.setText(workflow.description)
+        finally:
+            self._workflow_change_in_progress = False
+        self._update_workflow_visibility()
+        self._sync_division_capability(use_default=True)
+        self._update_starrynite_behavior_visibility()
+        self._parameters_changed(detector_changed=True)
+
+    def _load_selected_bundled_starrynite_preset(self) -> None:
+        from ..tracking.starrynite import (
+            DEFAULT_BUNDLED_PRESET_ID,
+            bundled_parameter_preset,
+        )
+
+        preset_id = self._starrynite_preset_combo.currentData()
+        if not preset_id or str(preset_id).startswith("__custom__"):
+            preset_id = DEFAULT_BUNDLED_PRESET_ID
+            index = self._starrynite_preset_combo.findData(preset_id)
+            if index >= 0:
+                self._starrynite_preset_combo.setCurrentIndex(index)
+        preset = bundled_parameter_preset(str(preset_id))
+        target = preset.parameter_file.resolve(strict=False)
+        current = self._starrynite_parameter_path
+        if current is None or current.resolve(strict=False) != target:
+            self.load_starrynite_parameter_file(str(target))
+
+    def _bundled_starrynite_preset_changed(self, *_args) -> None:
+        if self._workflow_change_in_progress:
+            return
+        workflow_id = self._workflow_combo.currentData()
+        if workflow_id not in {"modern_starrynite", "legacy_starrynite_exact"}:
+            return
+        self._workflow_change_in_progress = True
+        try:
+            self._load_selected_bundled_starrynite_preset()
+            from ..tracking.workflows import tracking_workflow
+
+            workflow = tracking_workflow(str(workflow_id))
+            self._select_combo_value(self._detector_combo, workflow.detector_id)
+            self._select_combo_value(self._tracker_combo, workflow.tracker_id)
+        finally:
+            self._workflow_change_in_progress = False
+        self._update_workflow_visibility()
+        self._parameters_changed(detector_changed=True)
+
+    def _sync_tracking_workflow_from_components(self) -> None:
+        from ..tracking.workflows import workflow_for_components
+
+        workflow = workflow_for_components(
+            self._detector_combo.currentData(),
+            self._tracker_combo.currentData(),
+        )
+        self._workflow_change_in_progress = True
+        try:
+            index = self._workflow_combo.findData(workflow.workflow_id)
+            if index >= 0:
+                self._workflow_combo.setCurrentIndex(index)
+            self._workflow_description.setText(workflow.description)
+        finally:
+            self._workflow_change_in_progress = False
+        self._update_workflow_visibility()
+
+    def _sync_bundled_preset_for_path(self, path: Path) -> None:
+        from ..tracking.starrynite import bundled_parameter_presets
+
+        resolved = path.resolve(strict=False)
+        for preset in bundled_parameter_presets():
+            if preset.parameter_file.resolve(strict=False) == resolved:
+                index = self._starrynite_preset_combo.findData(preset.preset_id)
+                if index >= 0:
+                    self._workflow_change_in_progress = True
+                    try:
+                        self._starrynite_preset_combo.setCurrentIndex(index)
+                    finally:
+                        self._workflow_change_in_progress = False
+                return
+        custom_id = f"__custom__:{resolved}"
+        index = self._starrynite_preset_combo.findData(custom_id)
+        if index < 0:
+            self._starrynite_preset_combo.addItem(f"Custom: {resolved.name}", custom_id)
+            index = self._starrynite_preset_combo.count() - 1
+        self._workflow_change_in_progress = True
+        try:
+            self._starrynite_preset_combo.setCurrentIndex(index)
+        finally:
+            self._workflow_change_in_progress = False
+
+    def _update_workflow_visibility(self) -> None:
+        workflow_id = self._workflow_combo.currentData()
+        uses_starrynite = workflow_id in {
+            "modern_starrynite",
+            "legacy_starrynite_exact",
+        }
+        self._starrynite_preset_combo.setVisible(uses_starrynite)
+        self._starrynite_preset_label.setVisible(uses_starrynite)
+        self._starrynite_report_button.setVisible(uses_starrynite)
+        self._starrynite_file_label.setVisible(
+            uses_starrynite and self._starrynite_profile is not None
+        )
+        advanced = self._advanced_toggle.isChecked()
+        for widget in (
+            self._detector_combo,
+            self._detector_label,
+            self._tracker_combo,
+            self._tracker_label,
+        ):
+            widget.setVisible(advanced)
+        for widget in (
+            self._starrynite_file_button,
+            self._starrynite_save_button,
+            self._starrynite_neutral_button,
+        ):
+            widget.setVisible(advanced and uses_starrynite)
+        self._refresh_recent_parameter_button()
 
     def _apply_initial_request(self, request: TrackingRequest | None) -> None:
         if request is None:
@@ -912,19 +1100,19 @@ class GlobalTrackingDialog(QDialog):
         ):
             if tracker_is_exact:
                 parts.append(
-                    f"Classifier export {html.escape(neutral_path.name)} is "
+                    f"Tracking model {html.escape(neutral_path.name)} is "
                     "source-bound and will classify tentative divisions in this "
                     "exact whole-movie draft."
                 )
             elif tracker_is_native:
                 parts.append(
-                    f"Classifier export {html.escape(neutral_path.name)} was validated "
+                    f"Tracking model {html.escape(neutral_path.name)} was validated "
                     "as source-bound for reporting only; native geometry scoring "
                     "remains active."
                 )
             else:
                 parts.append(
-                    f"Classifier export {html.escape(neutral_path.name)} is "
+                    f"Tracking model {html.escape(neutral_path.name)} is "
                     "source-bound to the loaded preset for reporting only; the "
                     "selected tracker does not use it."
                 )
@@ -934,8 +1122,8 @@ class GlobalTrackingDialog(QDialog):
                 blocker_codes = {issue.code for issue in readiness.blockers}
                 if "neutral_classifier_not_selected" in blocker_codes:
                     next_step = (
-                        "Attach the classifier export generated from the loaded "
-                        "MAT model."
+                        "Choose a bundled preset with a ready tracking model, or "
+                        "use the advanced legacy-model exporter."
                     )
                 elif blocker_codes & {
                     "parameter_source_changed",
@@ -944,7 +1132,7 @@ class GlobalTrackingDialog(QDialog):
                 }:
                     next_step = (
                         "Reload the parameter file, then attach a freshly "
-                        "source-bound classifier export."
+                        "source-bound tracking model."
                     )
                 elif blocker_codes & {
                     "legacy_exact_detector_parameter_missing",
@@ -1033,6 +1221,12 @@ class GlobalTrackingDialog(QDialog):
         return candidate.resolve(strict=False) if candidate.is_file() else None
 
     def _remember_starrynite_parameter_file(self, path: Path) -> None:
+        from ..tracking.starrynite import is_bundled_parameter_file
+
+        if is_bundled_parameter_file(path):
+            # Loading the recommended default must not erase the user's most
+            # recently selected or tuned custom parameter file.
+            return
         try:
             settings = self._settings_store()
             settings.setValue(
@@ -1158,7 +1352,10 @@ class GlobalTrackingDialog(QDialog):
     ) -> None:
         """Apply a legacy parameter file as editable whole-movie defaults."""
 
-        from ..tracking.starrynite import load_tuning_profile
+        from ..tracking.starrynite import (
+            bundled_classifier_for_profile,
+            load_tuning_profile,
+        )
 
         profile = load_tuning_profile(
             path,
@@ -1171,9 +1368,11 @@ class GlobalTrackingDialog(QDialog):
         source = profile.parameters.source_path or Path(path)
         self._starrynite_parameter_path = source.resolve(strict=False)
         self._starrynite_profile = profile
+        self._sync_bundled_preset_for_path(self._starrynite_parameter_path)
         restored_from_settings = neutral_classifier_path is None
         requested_neutral = (
-            self._remembered_neutral_classifier(profile)
+            bundled_classifier_for_profile(profile)
+            or self._remembered_neutral_classifier(profile)
             if restored_from_settings
             else Path(neutral_classifier_path).expanduser().resolve(strict=False)
         )
@@ -1230,6 +1429,8 @@ class GlobalTrackingDialog(QDialog):
         self._gap_spin.setValue(max(0, max_frame_gap - 1))
         self._render_starrynite_file_summary()
         self._update_starrynite_behavior_visibility()
+        if not self._workflow_change_in_progress:
+            self._sync_tracking_workflow_from_components()
         self._parameters_changed(detector_changed=True)
 
     def _starrynite_calibration_warnings(self, profile) -> tuple[str, ...]:
@@ -1268,9 +1469,9 @@ class GlobalTrackingDialog(QDialog):
             initial = profile.model_path or self._starrynite_parameter_path
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
-            "Choose a StarryNite classifier export",
+            "Choose an AceTree-compatible StarryNite model",
             "" if initial is None else str(initial),
-            "Classifier export JSON (*.json);;All files (*)",
+            "AceTree tracking models (*.atpy-model *.json);;All files (*)",
         )
         if not path:
             return
@@ -1280,8 +1481,8 @@ class GlobalTrackingDialog(QDialog):
             logger.exception("Could not validate neutral StarryNite classifier")
             QMessageBox.warning(
                 self,
-                "Classifier Export Not Usable",
-                f"That classifier export could not be used.\n\n{exc}",
+                "Tracking Model Not Usable",
+                f"That tracking model could not be used.\n\n{exc}",
             )
 
     def attach_starrynite_neutral_classifier(self, path: str | Path) -> None:
@@ -1317,7 +1518,7 @@ class GlobalTrackingDialog(QDialog):
             error_message = (
                 issue.message
                 if issue is not None
-                else "The classifier export could not be proven source-bound."
+                else "The tracking model could not be proven source-bound."
             )
             previous_path = self._starrynite_neutral_classifier_path
             if previous_path is not None:
@@ -1512,7 +1713,7 @@ class GlobalTrackingDialog(QDialog):
         if detector_is_starrynite and tracker_is_exact:
             text = (
                 "Exact mode uses the source-bound detector distribution, staged "
-                "legacy geometry, and attached classifier export. Save any tuning "
+                "legacy geometry, and source-bound tracking model. Save any tuning "
                 "edits to a parameter copy before building; unsupported options "
                 "stop with an actionable compatibility message."
             )
@@ -1544,17 +1745,16 @@ class GlobalTrackingDialog(QDialog):
         self._starrynite_behavior_label.setText(text)
         self._starrynite_behavior_label.setVisible(using_starrynite)
         if tracker_is_exact:
-            self._starrynite_neutral_button.setText("Attach classifier export...")
+            self._starrynite_neutral_button.setText("Use another legacy model...")
             self._starrynite_neutral_button.setToolTip(
-                "Attach the source-bound numeric classifier required and executed "
-                "by exact whole-movie tracking"
+                "Advanced: replace the bundled source-bound model used by exact "
+                "whole-movie tracking"
             )
         else:
-            self._starrynite_neutral_button.setText("Attach classifier export...")
+            self._starrynite_neutral_button.setText("Use another legacy model...")
             self._starrynite_neutral_button.setToolTip(
-                "Attach and validate a numeric classifier export against the MAT "
-                "model. The native tracker remains unchanged; select exact "
-                "whole-movie tracking to execute the classifier."
+                "Advanced: validate another source-bound legacy model. The native "
+                "tracker remains unchanged; exact whole-movie tracking executes it."
             )
 
     def export_settings(self) -> dict[str, Any]:
@@ -1562,6 +1762,8 @@ class GlobalTrackingDialog(QDialog):
 
         self._refresh_starrynite_compatibility()
         return {
+            "workflow_id": self._workflow_combo.currentData(),
+            "bundled_starrynite_preset_id": self._starrynite_preset_combo.currentData(),
             "start_time": self._start_spin.value(),
             "end_time": self._end_spin.value(),
             "detector_id": self._detector_combo.currentData(),
@@ -1898,7 +2100,7 @@ class GlobalTrackingDialog(QDialog):
             self._set_state(
                 self.STALE,
                 "Curated positions were added while analysis was running. The draft "
-                "cannot be accepted; Undo those edits or use Auto Forward.",
+                "cannot be accepted; Undo those edits or use Track Selected Cell.",
                 warning=True,
             )
             self._accept_button.setEnabled(False)
@@ -2027,7 +2229,7 @@ class GlobalTrackingDialog(QDialog):
                 self._set_state(
                     self.STALE,
                     f"Detector test ready for t={frame}, but curated positions are now "
-                    "present. Whole-dataset tracking is disabled; use Auto Forward or "
+                    "present. Whole-movie tracking is disabled; use Track Selected Cell or "
                     "Undo those edits.",
                     warning=True,
                 )
@@ -2179,13 +2381,13 @@ class GlobalTrackingDialog(QDialog):
             if self._proposal is not None:
                 self.mark_stale(
                     "The dataset now contains curated positions. Whole-dataset "
-                    "tracking cannot be accepted; Undo those edits or use Auto Forward."
+                    "tracking cannot be accepted; Undo those edits or use Track Selected Cell."
                 )
             elif self._state not in {self.RUNNING, self.CANCELING, self.ACCEPTING}:
                 self._set_state(
                     self.STALE,
                     "The dataset now contains curated positions. Whole-dataset "
-                    "tracking is disabled; Undo those edits or use Auto Forward.",
+                    "tracking is disabled; Undo those edits or use Track Selected Cell.",
                     warning=True,
                 )
             self._validate_settings()
@@ -2424,6 +2626,8 @@ class GlobalTrackingDialog(QDialog):
             except (KeyError, ValueError):
                 pass
         self._render_starrynite_file_summary()
+        if not self._workflow_change_in_progress:
+            self._sync_tracking_workflow_from_components()
         self._detector_parameters_changed()
 
     def _tracking_parameters_changed(self, *_args) -> None:
@@ -2445,6 +2649,8 @@ class GlobalTrackingDialog(QDialog):
         self._update_starrynite_behavior_visibility()
         self._sync_division_capability(use_default=True)
         self._render_starrynite_file_summary()
+        if not self._workflow_change_in_progress:
+            self._sync_tracking_workflow_from_components()
         self._tracking_parameters_changed()
 
     def _sync_division_capability(self, *, use_default: bool) -> None:
@@ -2616,7 +2822,7 @@ class GlobalTrackingDialog(QDialog):
         if not self._dataset_is_empty():
             return (
                 "Whole-dataset tracking requires an empty nuclei record. Undo "
-                "curation edits or use Auto Forward for a selected cell."
+                "curation edits or use Track Selected Cell for a selected lineage."
             )
         return ""
 
@@ -2640,7 +2846,10 @@ class GlobalTrackingDialog(QDialog):
         if profile is None or self._starrynite_parameter_path is None:
             return "Load a StarryNite parameter file before selecting exact tracking."
         if self._starrynite_neutral_classifier_path is None:
-            return "Select a source-bound classifier export for exact tracking."
+            return (
+                "No source-bound tracking model is available. Choose a bundled "
+                "preset or use the advanced legacy-model exporter."
+            )
         distribution = profile.detector_settings.get(
             "STARRYNITE_DISTRIBUTION_FILE"
         )
@@ -2871,6 +3080,8 @@ class GlobalTrackingDialog(QDialog):
 
     def _set_advanced_visible(self, visible: bool) -> None:
         self._advanced_widget.setVisible(visible)
+        self._update_workflow_visibility()
+        self._refresh_recent_parameter_button()
 
     def _on_table_current_cell_changed(
         self,

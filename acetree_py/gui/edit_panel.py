@@ -259,17 +259,19 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._btn_track.setCheckable(True)
         self._btn_track.clicked.connect(self._on_track)
 
-        self._btn_auto_track = QPushButton("Auto Forward…")
+        self._btn_auto_track = QPushButton("Track Selected Cell…")
         self._btn_auto_track.setToolTip(
-            "Detect and follow only the selected cell in a moving local region.\n"
-            "Review the draft before accepting it as one undoable edit."
+            "Sparse forward tracking from the selected nucleus. Choose Modern "
+            "StarryNite (with divisions), LoG + LAP, or DoG + LAP, then review "
+            "the draft before one undoable acceptance."
         )
         self._btn_auto_track.clicked.connect(self._on_auto_track_forward)
 
-        self._btn_global_track = QPushButton("Whole Dataset…")
+        self._btn_global_track = QPushButton("Track Whole Movie…")
         self._btn_global_track.setToolTip(
-            "Detect and link nuclei throughout an empty dataset.\n"
-            "Review every frame in 2D or 3D before accepting the draft."
+            "Global tracking for an empty nuclei record. Choose ready-to-use "
+            "Modern StarryNite, LoG + LAP, DoG + LAP, or advanced legacy exact "
+            "replay; review every frame before accepting."
         )
         self._btn_global_track.clicked.connect(self._on_global_track)
 
@@ -279,6 +281,14 @@ class EditPanel(QWidget):  # type: ignore[misc]
         automated_row.addWidget(self._btn_global_track)
         link_layout.addLayout(manual_row)
         link_layout.addLayout(automated_row)
+        tracking_help = QLabel(
+            "Use Track Selected Cell while curating any new or loaded XML dataset. "
+            "Track Whole Movie builds an initial draft only while the nuclei record "
+            "is empty."
+        )
+        tracking_help.setWordWrap(True)
+        tracking_help.setStyleSheet("QLabel { color: #777; }")
+        link_layout.addWidget(tracking_help)
         layout.addWidget(link_group)
 
         # ── Anatomical body orientation ──
@@ -1483,7 +1493,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
             QMessageBox.information(
                 self,
                 "Select a Live Cell",
-                "Auto Forward can only start from a live nucleus.",
+                "Track Selected Cell can only start from a live nucleus.",
             )
             return
         if self.app.image_provider is None:
@@ -1500,7 +1510,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
                 self,
                 "Choose a Daughter",
                 "The selected lineage reaches a division. Select the daughter "
-                "you want to follow; Auto Forward will never choose a branch for you.",
+                "you want to follow; selected-cell tracking will never choose a branch for you.",
             )
             return
         nucleus, seed_time, seed_index = terminal
@@ -1542,7 +1552,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
         )
         self._auto_track_dialog = dialog
         self._status_label.setText(
-            f"Auto Forward ready for {seed_label} from t={seed_time}; "
+            f"Selected-cell tracking ready for {seed_label} from t={seed_time}; "
             "build a preview to begin"
         )
         dialog.show()
@@ -1586,7 +1596,7 @@ class EditPanel(QWidget):  # type: ignore[misc]
 
     def _on_auto_track_applied(self, count: int) -> None:
         self._status_label.setText(
-            f"Accepted Auto Forward draft: {count} new position(s), one undoable edit"
+            f"Accepted selected-cell draft: {count} new position(s), one undoable edit"
         )
         self.refresh()
 

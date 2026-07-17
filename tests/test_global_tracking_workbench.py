@@ -740,7 +740,8 @@ def test_detector_result_stays_noncommittable_if_curated_positions_appear(qtbot)
     assert len(preview.detector_shown) == 1
     assert not dialog._preview_button.isEnabled()
     assert not dialog._accept_button.isEnabled()
-    assert "Whole-dataset tracking is disabled" in dialog._banner.text()
+    assert "Whole-movie tracking is disabled" in dialog._banner.text()
+    assert "Track Selected Cell" in dialog._banner.text()
     dialog.reject()
 
 
@@ -803,7 +804,8 @@ def test_dataset_wizard_tracking_channel_follows_layout_immediately(qtbot):
     dialog._radio_single.setChecked(True)
     assert dialog._tracking_channel_spin.maximum() == 1
     assert dialog._tracking_channel_spin.value() == 1
-    assert "review workbench" in dialog._tracking_explanation_label.text()
+    assert "Track Selected Cell" in dialog._tracking_explanation_label.text()
+    assert "existing XML" in dialog._tracking_explanation_label.text()
     assert "Undo" not in dialog._tracking_explanation_label.text()
 
 

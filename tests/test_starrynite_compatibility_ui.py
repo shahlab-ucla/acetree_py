@@ -174,7 +174,7 @@ def test_global_parameter_wizard_exposes_report_and_native_run_identity(
     assert dialog._starrynite_report_button.isEnabled()
     assert dialog._starrynite_neutral_button.isEnabled()
     assert (
-        "attach classifier export"
+        "another legacy model"
         in dialog._starrynite_neutral_button.text().lower()
     )
     assert "native tracker remains unchanged" in (
@@ -209,9 +209,9 @@ def test_global_wizard_builds_source_bound_exact_request_and_hides_it_from_auto(
         "acetree.starrynite_legacy_exact",
     )
     assert "Exact mode is blocked" in dialog._starrynite_file_label.text()
-    assert "Attach the classifier export" in dialog._starrynite_file_label.text()
+    assert "Choose a bundled preset" in dialog._starrynite_file_label.text()
     assert (
-        "attach classifier export"
+        "another legacy model"
         in dialog._starrynite_neutral_button.text().lower()
     )
     assert not dialog._detector_preview_button.isEnabled()
@@ -249,7 +249,7 @@ def test_global_wizard_builds_source_bound_exact_request_and_hides_it_from_auto(
         == LEGACY_EXACT_REFINEMENT_BACKEND
     )
     assert (
-        "attach classifier export"
+        "another legacy model"
         in dialog._starrynite_neutral_button.text().lower()
     )
 

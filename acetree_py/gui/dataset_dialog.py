@@ -19,6 +19,7 @@ from ..io.config import AceTreeConfig, NamingMethod
 logger = logging.getLogger(__name__)
 
 try:
+    from qtpy.QtCore import Qt
     from qtpy.QtWidgets import (
         QCheckBox,
         QComboBox,
@@ -289,6 +290,12 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._output_edit.textChanged.connect(self._refresh_tracking_validation)
         self._dataset_name_edit.textChanged.connect(self._refresh_tracking_validation)
         self._radio_tracking_auto.toggled.connect(self._refresh_tracking_validation)
+        self._tracking_workflow_combo.currentIndexChanged.connect(
+            self._tracking_workflow_changed
+        )
+        self._tracking_starrynite_preset_combo.currentIndexChanged.connect(
+            self._tracking_workflow_changed
+        )
         self._tracking_channel_spin.valueChanged.connect(
             self._refresh_tracking_validation
         )
@@ -324,7 +331,50 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
     def _tracking_tracker_changed(self, *_args) -> None:
         self._sync_tracking_division_capability(use_default=True)
-        self._refresh_tracking_validation()
+        if hasattr(self, "_output_edit"):
+            self._refresh_tracking_validation()
+
+    def _tracking_workflow_changed(self, *_args) -> None:
+        """Apply one understandable workflow to the hidden component choices."""
+
+        from ..tracking.workflows import tracking_workflow
+
+        workflow_id = self._tracking_workflow_combo.currentData()
+        if workflow_id is None:
+            return
+        workflow = tracking_workflow(str(workflow_id))
+        detector_index = self._tracking_detector_combo.findData(workflow.detector_id)
+        tracker_index = self._tracking_tracker_combo.findData(workflow.tracker_id)
+        if detector_index >= 0:
+            self._tracking_detector_combo.setCurrentIndex(detector_index)
+        if tracker_index >= 0:
+            self._tracking_tracker_combo.setCurrentIndex(tracker_index)
+        self._tracking_workflow_description.setText(workflow.description)
+        uses_starrynite = workflow.workflow_id == "modern_starrynite"
+        self._tracking_starrynite_preset_combo.setVisible(uses_starrynite)
+        self._tracking_starrynite_preset_label.setVisible(uses_starrynite)
+        if uses_starrynite:
+            try:
+                from ..tracking.starrynite import (
+                    bundled_parameter_preset,
+                    load_tuning_profile,
+                )
+
+                preset = bundled_parameter_preset(
+                    str(self._tracking_starrynite_preset_combo.currentData())
+                )
+                profile = load_tuning_profile(preset.parameter_file)
+                self._tracking_radius_spin.setValue(
+                    float(profile.detector_settings.get("RADIUS", 4.0))
+                )
+                self._tracking_threshold_spin.setValue(
+                    float(profile.detector_settings.get("INTENSITY_THRESHOLD", 5.0))
+                )
+            except (KeyError, OSError, ValueError):
+                pass
+        self._sync_tracking_division_capability(use_default=True)
+        if hasattr(self, "_output_edit"):
+            self._refresh_tracking_validation()
 
     def _sync_tracking_division_capability(
         self,
@@ -540,10 +590,10 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("<b>Step 4: Initial Tracking</b>"))
         self._tracking_explanation_label = QLabel(
-            "Start with an empty dataset for manual annotation, or open the tracking "
-            "review workbench to test the detector on one frame before building a full "
-            "draft. Automated results are never treated as biological ground truth, "
-            "and only Accept Draft adds reviewed positions."
+            "Start with manual annotation and use Track Selected Cell at any time, or "
+            "open a reviewed whole-movie draft now. The same Track Selected Cell and "
+            "Track Whole Movie tools remain visible after opening this dataset or an "
+            "existing XML file. Automated results are never accepted automatically."
         )
         self._tracking_explanation_label.setWordWrap(True)
         self._tracking_explanation_label.setAccessibleName(
@@ -553,10 +603,12 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
         mode_group = QGroupBox("Starting workflow")
         mode_layout = QVBoxLayout(mode_group)
-        self._radio_tracking_manual = QRadioButton("Manual annotation (recommended)")
+        self._radio_tracking_manual = QRadioButton(
+            "Manual annotation + optional selected-cell forward tracking"
+        )
         self._radio_tracking_manual.setChecked(True)
         self._radio_tracking_auto = QRadioButton(
-            "Tune the detector and build an automated draft"
+            "Open a reviewed whole-movie tracking draft"
         )
         mode_layout.addWidget(self._radio_tracking_manual)
         mode_layout.addWidget(self._radio_tracking_auto)
@@ -566,8 +618,40 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         settings = QFormLayout(self._tracking_settings_group)
 
         from ..tracking.registry import get_default_registry
+        from ..tracking.workflows import INITIAL_TRACKING_WORKFLOWS
 
         registry = get_default_registry()
+        self._tracking_workflow_combo = QComboBox()
+        for workflow in INITIAL_TRACKING_WORKFLOWS:
+            self._tracking_workflow_combo.addItem(
+                workflow.display_name, workflow.workflow_id
+            )
+        self._tracking_workflow_combo.setToolTip(
+            "Modern StarryNite is division-aware; LoG/DoG with LAP provide simpler "
+            "general-purpose whole-movie alternatives."
+        )
+        settings.addRow("Tracking method:", self._tracking_workflow_combo)
+
+        self._tracking_workflow_description = QLabel()
+        self._tracking_workflow_description.setWordWrap(True)
+        settings.addRow("", self._tracking_workflow_description)
+
+        from ..tracking.starrynite import bundled_parameter_presets
+
+        self._tracking_starrynite_preset_combo = QComboBox()
+        for preset in bundled_parameter_presets():
+            self._tracking_starrynite_preset_combo.addItem(
+                preset.display_name, preset.preset_id
+            )
+            index = self._tracking_starrynite_preset_combo.count() - 1
+            self._tracking_starrynite_preset_combo.setItemData(
+                index, preset.description, Qt.ToolTipRole
+            )
+        settings.addRow("Imaging preset:", self._tracking_starrynite_preset_combo)
+        self._tracking_starrynite_preset_label = settings.labelForField(
+            self._tracking_starrynite_preset_combo
+        )
+
         self._tracking_detector_combo = QComboBox()
         for descriptor in registry.detector_descriptors():
             self._tracking_detector_combo.addItem(
@@ -575,6 +659,8 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
                 descriptor.plugin_id,
             )
         settings.addRow("Detector:", self._tracking_detector_combo)
+        self._tracking_detector_combo.hide()
+        settings.labelForField(self._tracking_detector_combo).hide()
 
         self._tracking_tracker_combo = QComboBox()
         for descriptor in registry.tracker_descriptors():
@@ -585,6 +671,8 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
                 descriptor.plugin_id,
             )
         settings.addRow("Tracker:", self._tracking_tracker_combo)
+        self._tracking_tracker_combo.hide()
+        settings.labelForField(self._tracking_tracker_combo).hide()
 
         self._tracking_channel_spin = QSpinBox()
         self._tracking_channel_spin.setRange(1, 8)
@@ -663,7 +751,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._tracking_validation_label.hide()
         layout.addWidget(self._tracking_validation_label)
         layout.addStretch()
-        self._sync_tracking_division_capability()
+        self._tracking_workflow_changed()
         return page
 
     def _build_page5_output(self) -> QWidget:
@@ -818,11 +906,10 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
     def _tracking_description(self) -> str:
         if not self._radio_tracking_auto.isChecked():
-            return "Manual annotation"
+            return "Manual annotation with optional Track Selected Cell"
         return (
             "Uncommitted review: "
-            f"{self._tracking_detector_combo.currentText()} + "
-            f"{self._tracking_tracker_combo.currentText()} draft "
+            f"{self._tracking_workflow_combo.currentText()} draft "
             f"(radius={self._tracking_radius_spin.value():g} µm, "
             f"max displacement={self._tracking_link_distance_spin.value():g} µm, "
             "divisions="
@@ -937,12 +1024,32 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         tracker_id = str(self._tracking_tracker_combo.currentData())
         detector_settings = registry.default_settings(detector_id)
         tracker_settings = registry.default_settings(tracker_id)
+        if self._tracking_workflow_combo.currentData() == "modern_starrynite":
+            from ..tracking.starrynite import (
+                bundled_parameter_preset,
+                load_tuning_profile,
+            )
+
+            preset = bundled_parameter_preset(
+                str(self._tracking_starrynite_preset_combo.currentData())
+            )
+            profile = load_tuning_profile(
+                preset.parameter_file,
+                fallback_radius_um=self._tracking_radius_spin.value(),
+            )
+            detector_settings.update(profile.detector_settings)
+            tracker_settings.update(profile.tracker_settings)
         detector_common = {
             "TARGET_CHANNEL": self._tracking_channel_spin.value(),
             "RADIUS": self._tracking_radius_spin.value(),
             "THRESHOLD": self._tracking_threshold_spin.value(),
             "DO_MEDIAN_FILTERING": False,
         }
+        if detector_id == "acetree.starrynite_detector":
+            detector_common["THRESHOLD"] = 0.0
+            detector_common["INTENSITY_THRESHOLD"] = (
+                self._tracking_threshold_spin.value()
+            )
         tracker_common = {
             "LINKING_MAX_DISTANCE": max_distance,
             "ALLOW_GAP_CLOSING": gap_frames > 0,

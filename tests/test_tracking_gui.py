@@ -54,12 +54,14 @@ def test_dataset_wizard_builds_trackmate_keyed_global_request(qtbot):
 
     assert request is not None
     assert request.scope.kind == "global"
-    assert request.detector.plugin_id in {"acetree.dog3d", "acetree.log3d"}
+    assert dialog._tracking_workflow_combo.currentData() == "modern_starrynite"
+    assert request.detector.plugin_id == "acetree.starrynite_detector"
     assert request.detector.settings["TARGET_CHANNEL"] == 1
-    assert request.tracker.plugin_id == "acetree.simple_lap"
+    assert request.detector.settings["THRESHOLD"] == 0.0
+    assert request.tracker.plugin_id == "acetree.starrynite_division"
     # The UI speaks in missed frames; TrackMate MAX_FRAME_GAP is the frame delta.
     assert request.tracker.settings["MAX_FRAME_GAP"] == 2
-    assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is False
+    assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is True
 
 
 def test_dataset_wizard_enables_reviewed_divisions_for_starrynite(qtbot):
@@ -67,15 +69,22 @@ def test_dataset_wizard_enables_reviewed_divisions_for_starrynite(qtbot):
     qtbot.addWidget(dialog)
     dialog._radio_tracking_auto.setChecked(True)
 
+    assert dialog._tracking_division_check.isEnabled()
+    assert dialog._tracking_division_check.isChecked()
+    assert "can propose two-daughter divisions" in (
+        dialog._tracking_capability_label.text()
+    )
+
+    lap_index = dialog._tracking_workflow_combo.findData("log_lap")
+    assert lap_index >= 0
+    dialog._tracking_workflow_combo.setCurrentIndex(lap_index)
+
     assert not dialog._tracking_division_check.isEnabled()
     assert not dialog._tracking_division_check.isChecked()
     assert "does not propose divisions" in dialog._tracking_capability_label.text()
 
-    tracker_index = dialog._tracking_tracker_combo.findData(
-        "acetree.starrynite_division"
-    )
-    assert tracker_index >= 0
-    dialog._tracking_tracker_combo.setCurrentIndex(tracker_index)
+    modern_index = dialog._tracking_workflow_combo.findData("modern_starrynite")
+    dialog._tracking_workflow_combo.setCurrentIndex(modern_index)
 
     request = dialog.get_tracking_request()
 
@@ -125,7 +134,8 @@ def test_selected_forward_dialog_keeps_physical_seed_and_local_scope(qtbot):
     assert request.scope.branch_policy == "stop"
     assert request.detector.settings["TARGET_CHANNEL"] == 2
     assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is False
-    assert not dialog._branch_policy_combo.model().item(
+    assert dialog._workflow_combo.currentData() == "modern_starrynite"
+    assert dialog._branch_policy_combo.model().item(
         dialog._follow_both_index
     ).isEnabled()
 
@@ -334,11 +344,10 @@ def test_auto_forward_parameter_preset_uses_alive_cell_count_for_stage(
     assert "not applied by this workbench" in dialog._starrynite_file_label.text()
 
     dialog._generated_settings = dialog.export_settings()
-    stop_index = dialog._branch_policy_combo.findData("stop")
-    dialog._branch_policy_combo.setCurrentIndex(stop_index)
-    assert "division behavior" in dialog._changed_setting_labels()
     follow_both_index = dialog._branch_policy_combo.findData("follow_both")
     dialog._branch_policy_combo.setCurrentIndex(follow_both_index)
+    assert "division behavior" in dialog._changed_setting_labels()
+    stop_index = dialog._branch_policy_combo.findData("stop")
 
     dialog._radius_spin.setValue(6.0)
     dialog._threshold_spin.setValue(33.0)
