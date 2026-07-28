@@ -120,7 +120,7 @@ is deliberately conservative.
 | Detection | Native anisotropic DoG plus an exact distribution-backed tail: 8-connected `imregionalmax` plateau semantics and MATLAB `find` order, adjacent-plane maxima, 16-ray diameter/recentering, disk log odds, maximal ranges, overlooked-nucleus rounds, merge/split conflict predicates, staged/regional lookup, sequential previous-frame diameter/cell-count state (including zero-output frames), polygon filtering, and source-defined rectangular ROI cropping with coordinate restoration. Exact requests bind a strictly parsed distribution MAT by SHA-256, rehash sources during execution, reject non-finite voxels, and preserve legacy row identity; source caches reset on discontinuity. | Broader integer-image, crowded-embryo, regional-ROI, and pathological tie corpus; legacy image-loader/orientation choices remain an input-adapter concern rather than hidden detector behavior. |
 | Tracking | Exact initialization, easy links, polar-filter boundary, asymmetric candidate gathering, nondivision/division threshold sweeps, isolated-fragment prepass, immutable row/slot state, one-based binary32 distances, exact 22/11/13 features, single- and four-model classifiers, four-attempt class-0 repair, deleted-row attachment behavior, class 0/1/2/3 mutations, and complete MATLAB frame/row event order. Every early geometry stage and the live class 0/1/2/3 post-greedy cases match the pinned oracle; a registered image-to-lineage division case matches nodes, rows, edges, stages, classifier event, and ancestry. Production retains bounded stage summaries while the full snapshot path remains available for differential testing. | Polar-body and hysteresis modes remain fail-closed until their raw detector measurements cross the AT boundary; expand noisy multi-event class-2/3 and whole-embryo performance corpora. Historical four-model execution is implemented but still needs a real MAT corpus for live certification. |
 | AT integration | Native and `acetree.starrynite_legacy_exact` trackers coexist with LoG, DoG, Simple LAP, and the shared StarryNite detector. An immutable `preflight_movie` boundary validates complete global scope, channel, calibration, detector binding, and every legacy source before frame 1; `TrackingPipeline.refine_movie` revalidates those inputs and supplies progress/cancellation without a stale-cache bypass. Returned omissions and invented positions are validated. Split edges use the ordinary preview and atomic lineage-commit path. Compatibility provenance records parameter, distribution, MAT model, classifier hashes, bounded early-stage summaries, class counts, a classifier-trace hash, and structural event-order validation. That validation proves internal sequence/span/coverage/order consistency for received events, not that the source driver omitted none. | Complete import/export corpus validation, large-movie profiling, packaging/release hardening, and downstream validation against representative curated embryos. |
-| Sparse forward mode | Selected-forward scope has stop/follow-best/follow-both policy hooks; splitting capability is gated; preview and commit retain two daughter branches; standard parameter files populate editable basic controls and can be saved losslessly as tuned copies; compatibility/model diagnostics are visible; and the most recent usable file is shared across the whole-movie and sparse workbenches. | Broader usability tests and branch-budget/ambiguity acceptance studies on partial lineages. |
+| Sparse forward mode | Selected-forward scope has stop/follow-best/follow-both policy hooks; splitting capability is gated; preview and commit retain two daughter branches; a likely-division stop offers a direct follow-both rerun; standard parameter files populate editable controls with an explicit stage override and can be saved losslessly as tuned copies; native settings persist across sessions; next-frame tests remain review-only; accepted prefixes are trim-safe; and post-accept Undo/Save remains explicit. | Broader embryo usability tests and branch-budget/ambiguity acceptance studies on partial lineages. |
 
 This status is a feature inventory, not a release guarantee. The verification
 gates in section 11 determine when a row may be promoted from experimental.
@@ -414,7 +414,8 @@ At each frame it must:
 
 Division behavior is an explicit policy:
 
-- **Stop at division:** end the proposal at the parent for manual handling.
+- **Stop at division:** end the proposal at the parent for review; the workbench
+  offers a direct rerun that follows both daughters when splitting is supported.
 - **Follow best:** continue one branch only; never pretend that the untracked
   daughter does not exist in provenance.
 - **Follow both:** require a tracker advertising `splitting`, emit exactly two
@@ -426,24 +427,39 @@ terminal branches must not cause navigation to select an arbitrary endpoint.
 ### 10.3 Parameter-file setup and tuning workbenches
 
 The implemented UI has two wizard-like entry points. The dataset-creation
-wizard can open the whole-dataset workbench for an empty movie, while **Auto
-Forward** opens the selected-lineage workbench from one live nucleus. Both offer
-**Start from StarryNite parameters…**, a shared **Use recent: _filename_**
-shortcut, **Save tuned parameter copy…**, and **Compatibility details…**.
+wizard can open the whole-dataset workbench for an empty movie, while **Track
+Selected Cell** opens the selected-lineage workbench from one live nucleus. Both
+offer bundled presets and, under **Show advanced and custom settings**, **Use
+another parameter file…**, a shared **Use recent: _filename_** shortcut, **Save
+tuned parameter copy…**, and **Compatibility details…**.
 
 Loading a standard file safely parses its inert assignments, resolves model and
-distribution references relative to the source, chooses effective staged values
-for the starting cell count, and fills the basic editable controls. The recent
-path is persisted only while it remains a usable file. A validated classifier
-export is remembered separately by the SHA-256 of its source MAT model, so one
-model's numeric state cannot be silently reused for another.
+distribution references relative to the source, and fills the editable
+controls. Whole-movie setup can resolve staged values from the complete starting
+cell count. Sparse setup makes developmental stage explicit because the number
+of annotated cells may not represent the embryo stage; automatic count-based
+selection remains available. The recent path is persisted only while it remains
+a usable file. A validated classifier export is remembered separately by the
+SHA-256 of its source MAT model, so one model's numeric state cannot be silently
+reused for another.
 
-The sparse control surface keeps expected radius, intensity threshold, local
-search area, maximum movement, gap allowance, ambiguity caution, end time, and
-division policy visible. Native-only advanced detector controls remain
-available without being written into a legacy file. **Follow both daughters**
-is enabled only for a splitting tracker and grows only the selected sparse
-branches.
+The sparse guided surface starts with a ten-frame relative horizon and keeps the
+imaging preset, developmental stage, expected radius, intensity threshold,
+channel, end time, and division policy visible. Component choices, local search
+area, maximum movement, gap allowance, ambiguity caution, custom sources, and
+native-only detector controls are collapsed under Advanced settings. Native
+settings and the relative horizon persist across application sessions without
+being written into a legacy file. **Test Next Frame** is a review-only tuning
+pass. **Follow both daughters** is enabled only for a splitting tracker and
+grows only the selected sparse branches; a conservative division stop provides
+a direct follow-both rerun.
+
+The full sparse draft or a prefix ending at a selected retained detection can be
+committed through the same revalidation and atomic history boundary. Seeds,
+interpolated gaps, and diagnostic candidates are not valid trim endpoints.
+After commit the workbench remains open with explicit **Undo Accepted Draft**
+and **Save Dataset** actions, avoiding any implication that acceptance has
+already written the dataset.
 
 Saving never overwrites the loaded source implicitly. It preserves original
 text, comments, and unsupported statements and appends compatible edits for
@@ -457,9 +473,9 @@ The global workbench alone can select **StarryNite legacy exact (whole movie)**
 and execute the attached source-bound numeric classifier. Exact mode requires
 the full movie from time 1, an empty nuclei record, matching calibration, unit
 downsampling, and every referenced source. Any visible tuning change must first
-be saved and reloaded as a parameter copy. Auto Forward deliberately uses the
-native division tracker; its classifier action validates compatibility for the
-report only.
+be saved and reloaded as a parameter copy. Track Selected Cell deliberately uses
+the native division tracker; its classifier action validates compatibility for
+the report only.
 
 ## 11. Verification gates
 

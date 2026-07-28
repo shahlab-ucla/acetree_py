@@ -117,6 +117,7 @@ def tuning_profile_from_parameters(
     parameters: StarryNiteParameters,
     *,
     cell_count: int | None = None,
+    stage_index: int | None = None,
     fallback_radius_um: float = 4.0,
 ) -> StarryNiteTuningProfile:
     """Build a native detector/tracker starting point from parsed parameters."""
@@ -130,7 +131,17 @@ def tuning_profile_from_parameters(
             raise StarryNitePresetError("firsttimestepnumcells must be an integer")
         assumed_initial_cell_count = initial_count is None
         cell_count = 0 if initial_count is None else int(initial_count)
-    stage_index = legacy_stage_index(parameters, cell_count)
+    inferred_stage_index = legacy_stage_index(parameters, cell_count)
+    if stage_index is None:
+        stage_index = inferred_stage_index
+    elif (
+        isinstance(stage_index, bool)
+        or not isinstance(stage_index, Integral)
+        or stage_index < 0
+    ):
+        raise StarryNitePresetError("stage_index must be a non-negative integer")
+    else:
+        stage_index = int(stage_index)
     source_path = parameters.source_path
     base_directory = source_path.parent if source_path is not None else Path.cwd()
     source_text = str(source_path.resolve(strict=False)) if source_path else ""
@@ -301,6 +312,7 @@ def load_tuning_profile(
     path: str | Path,
     *,
     cell_count: int | None = None,
+    stage_index: int | None = None,
     fallback_radius_um: float = 4.0,
     encoding: str = "utf-8-sig",
 ) -> StarryNiteTuningProfile:
@@ -310,6 +322,7 @@ def load_tuning_profile(
     return tuning_profile_from_parameters(
         parameters,
         cell_count=cell_count,
+        stage_index=stage_index,
         fallback_radius_um=fallback_radius_um,
     )
 

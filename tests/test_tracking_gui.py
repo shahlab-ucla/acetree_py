@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -27,6 +28,7 @@ from acetree_py.tracking.api import (
     ComponentSpec,
     Detection,
     TrackEdge,
+    TrackingOutcome,
     TrackingRequest,
     TrackingResult,
     TrackingScope,
@@ -303,6 +305,27 @@ class _TrackingDialogApp:
         pass
 
 
+class _CommittingTrackingDialogApp(_TrackingDialogApp):
+    """Small app double that crosses the real atomic tracking-history boundary."""
+
+    def __init__(self, saved_path: Path):
+        super().__init__()
+        self.saved_path = saved_path
+        self.save_calls = 0
+
+    def accept_tracking_proposal(self, proposal, *, expected_revision):
+        self.accept_calls.append((proposal, expected_revision))
+        return AceTreeApp.accept_tracking_proposal(
+            self,
+            proposal,
+            expected_revision=expected_revision,
+        )
+
+    def save(self):
+        self.save_calls += 1
+        return self.saved_path
+
+
 def test_auto_forward_parameter_preset_uses_alive_cell_count_for_stage(
     qtbot,
     tmp_path,
@@ -341,6 +364,9 @@ def test_auto_forward_parameter_preset_uses_alive_cell_count_for_stage(
     assert request.detector.settings["DO_SUBPIXEL_LOCALIZATION"] is False
     assert not dialog._subpixel_check.isChecked()
     assert dialog._starrynite_save_button.isEnabled()
+    assert "Preset ready" in dialog._starrynite_file_label.text()
+    assert "stage 3" in dialog._starrynite_file_label.text()
+    dialog._advanced_toggle.setChecked(True)
     assert "not applied by this workbench" in dialog._starrynite_file_label.text()
 
     dialog._generated_settings = dialog.export_settings()
@@ -446,6 +472,11 @@ def test_auto_forward_starts_safe_and_supports_adjust_rerun(qtbot):
     assert len(app.accept_calls) == 1
     assert app.accept_calls[0][0] is not first
     assert app._viewer_integration.cleared == 1
+    assert dialog.state == dialog.APPLIED
+    assert not dialog._undo_applied_button.isHidden()
+    assert not dialog._save_dataset_button.isHidden()
+    assert dialog._discard_button.text().replace("&", "") == "Close"
+    dialog.reject()
 
 
 def test_auto_forward_discard_restores_view_and_never_commits(qtbot):
@@ -688,3 +719,285 @@ def test_auto_forward_resolves_linear_endpoint_but_never_chooses_at_division():
     ]
     stub.app.manager.nuclei_record = division
     assert EditPanel._resolve_auto_track_seed(stub, 1, 1) is None
+
+
+def test_selected_forward_defaults_to_short_basic_tuning_and_next_frame_test(qtbot):
+    app = _TrackingDialogApp()
+    dialog = AutoTrackForwardDialog(1, 30, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+
+    assert dialog._end_spin.value() == 11
+    assert not dialog._advanced_toggle.isChecked()
+    assert dialog._roi_spin.isHidden()
+    assert dialog._distance_spin.isHidden()
+    assert dialog._gap_spin.isHidden()
+    assert dialog._ambiguity_spin.isHidden()
+
+    dialog._quick_preview_button.click()
+    qtbot.waitUntil(
+        lambda: dialog._analysis_thread is None
+        and dialog.state == dialog.CONFIGURING
+    )
+    assert app.analysis_calls[-1].scope.end_frame == 2
+    assert not dialog._accept_button.isEnabled()
+    assert "review-only" in dialog._quick_preview_button.toolTip()
+
+    dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
+    assert app.analysis_calls[-1].scope.end_frame == 11
+    assert "Modern StarryNite" in dialog._generated_label.text()
+    assert "acetree.starrynite_detector" not in dialog._generated_label.text()
+    dialog.reject()
+
+
+def test_sparse_selected_forward_stage_can_be_overridden_explicitly(
+    qtbot,
+    tmp_path,
+):
+    app = _TrackingDialogApp()
+    parameter_path = tmp_path / "staged.txt"
+    parameter_path.write_text(
+        "parameters.staging=[25,80];\n"
+        "parameters.intensitythreshold=[10,20,30];\n",
+        encoding="utf-8",
+    )
+    dialog = AutoTrackForwardDialog(1, 3, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+
+    dialog.load_starrynite_parameter_file(str(parameter_path))
+    assert dialog._threshold_spin.value() == pytest.approx(10.0)
+    assert dialog._starrynite_stage_combo.currentData() is None
+    assert "26–80 cells" in dialog._starrynite_stage_combo.itemText(2)
+    stage_three = dialog._starrynite_stage_combo.findData(2)
+    assert stage_three >= 0
+
+    dialog._starrynite_stage_combo.setCurrentIndex(stage_three)
+    request = dialog.get_request()
+
+    assert dialog._threshold_spin.value() == pytest.approx(30.0)
+    assert request.detector.settings["STARRYNITE_STAGE_INDEX"] == 2
+    assert request.detector.settings["STARRYNITE_CELL_COUNT"] == 1
+    assert not dialog._starrynite_stage_hint.isHidden()
+    dialog.reject()
+
+
+def test_restore_defaults_reloads_recommended_preset_and_invalidates_draft(qtbot):
+    from acetree_py.tracking.starrynite import DEFAULT_BUNDLED_PRESET_ID
+
+    app = _TrackingDialogApp()
+    dialog = AutoTrackForwardDialog(1, 20, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+    log_index = dialog._workflow_combo.findData("log_lap")
+    dialog._workflow_combo.setCurrentIndex(log_index)
+    dialog._advanced_toggle.setChecked(True)
+    dialog._end_spin.setValue(20)
+    dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
+
+    dialog._restore_defaults()
+
+    assert dialog.state == dialog.OUTDATED
+    assert dialog._workflow_combo.currentData() == "modern_starrynite"
+    assert dialog._starrynite_preset_combo.currentData() == DEFAULT_BUNDLED_PRESET_ID
+    assert dialog._starrynite_profile is not None
+    assert dialog._end_spin.value() == 11
+    assert not dialog._advanced_toggle.isChecked()
+    assert not dialog._accept_button.isEnabled()
+    dialog.reject()
+
+
+def test_restore_defaults_clears_a_pre_preview_failure(qtbot):
+    dialog = AutoTrackForwardDialog(1, 20, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+    dialog._show_failure("Bad custom settings.", ValueError("broken"))
+    assert dialog.state == dialog.FAILED
+
+    dialog._restore_defaults()
+
+    assert dialog.state == dialog.CONFIGURING
+    assert "defaults restored" in dialog._banner.text()
+    assert dialog._warning_label.isHidden()
+    dialog.reject()
+
+
+def test_native_forward_settings_persist_with_relative_horizon(
+    qtbot,
+    tmp_path,
+    monkeypatch,
+):
+    from qtpy.QtCore import QSettings
+
+    store = QSettings(str(tmp_path / "selected-forward.ini"), QSettings.IniFormat)
+    store.clear()
+    monkeypatch.setattr(
+        AutoTrackForwardDialog,
+        "_settings_store",
+        staticmethod(lambda: store),
+    )
+    first = AutoTrackForwardDialog(2, 40, seed_anchor=(2, 1))
+    qtbot.addWidget(first)
+    dog_index = first._workflow_combo.findData("dog_lap")
+    first._workflow_combo.setCurrentIndex(dog_index)
+    first._end_spin.setValue(17)
+    first._threshold_spin.setValue(12.5)
+    first._roi_spin.setValue(31.0)
+    first._advanced_toggle.setChecked(True)
+    AutoTrackForwardDialog.persist_native_settings(first.export_settings())
+
+    restored_settings = AutoTrackForwardDialog.persisted_native_settings()
+    second = AutoTrackForwardDialog(
+        10,
+        40,
+        seed_anchor=(10, 1),
+        initial_settings=restored_settings,
+    )
+    qtbot.addWidget(second)
+
+    assert second._workflow_combo.currentData() == "dog_lap"
+    assert second._end_spin.value() == 25
+    assert second._threshold_spin.value() == pytest.approx(12.5)
+    assert second._roi_spin.value() == pytest.approx(31.0)
+    assert second._advanced_toggle.isChecked()
+    first.reject()
+    second.reject()
+
+
+def test_division_stop_offers_direct_follow_both_rerun(qtbot, monkeypatch):
+    app = _TrackingDialogApp()
+    dialog = AutoTrackForwardDialog(1, 3, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+    request = dialog.get_request()
+    seed = Detection("seed", 1, 5.0, 5.0, 1.0, 2.0, 1.0)
+    prefix = Detection("prefix", 2, 6.0, 5.0, 1.0, 2.0, 8.0)
+    candidates = (
+        Detection("daughter-a", 3, 6.5, 4.0, 1.0, 2.0, 7.0),
+        Detection("daughter-b", 3, 6.5, 6.0, 1.0, 2.0, 6.0),
+    )
+    proposal = TrackingResult(
+        request=request,
+        detections=(seed, prefix),
+        edges=(TrackEdge("seed", "prefix", 1.0),),
+        existing_anchors={"seed": (1, 1)},
+        warnings=("Stopped at t=3: two candidates form a probable division",),
+        outcome=TrackingOutcome(
+            "division",
+            3,
+            2,
+            (6.5, 5.0, 1.0),
+            12.0,
+            candidates,
+        ),
+    )
+    dialog._analysis_is_quick = False
+    dialog._apply_analysis_succeeded(
+        (proposal, app.edit_history.revision, app.edit_history.change_counter)
+    )
+    reruns = []
+    monkeypatch.setattr(
+        dialog,
+        "_run_preview",
+        lambda *, quick=False: reruns.append(quick),
+    )
+
+    assert not dialog._follow_both_rerun_button.isHidden()
+    assert "Rerun Following Both Daughters" in dialog._warning_label.text()
+    dialog._follow_both_rerun_button.click()
+
+    assert dialog._branch_policy_combo.currentData() == "follow_both"
+    assert reruns == [False]
+    dialog.reject()
+
+
+def test_accept_through_selected_frame_can_save_then_undo(qtbot, tmp_path):
+    app = _CommittingTrackingDialogApp(tmp_path / "dataset.zip")
+
+    def three_frame_analysis(request, **_kwargs):
+        seed = Detection("seed", 1, 5.0, 5.0, 1.0, 2.0, 1.0)
+        second = Detection("second", 2, 6.0, 5.0, 1.0, 2.0, 10.0)
+        third = Detection("third", 3, 7.0, 5.0, 1.0, 2.0, 9.0)
+        return (
+            TrackingResult(
+                request=request,
+                detections=(seed, second, third),
+                edges=(
+                    TrackEdge("seed", "second", 1.0),
+                    TrackEdge("second", "third", 1.0),
+                ),
+                existing_anchors={"seed": (1, 1)},
+            ),
+            app.edit_history.revision,
+        )
+
+    app.analyze_tracking_request = three_frame_analysis
+    dialog = AutoTrackForwardDialog(1, 3, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+    dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
+    dialog._table.setCurrentCell(1, 0)
+
+    assert dialog._accept_through_button.isEnabled()
+    assert "t=2" in dialog._accept_through_button.text()
+    dialog._accept_through_button.click()
+
+    assert dialog.state == dialog.APPLIED
+    assert len(app.accept_calls) == 1
+    committed = app.accept_calls[0][0]
+    assert committed.request.scope.end_frame == 2
+    assert [item.detection_id for item in committed.detections] == ["seed", "second"]
+    assert dialog._undo_applied_button.isEnabled()
+    assert dialog._save_dataset_button.isEnabled()
+    assert len(app.manager.nuclei_record[1]) == 1
+    assert len(app.manager.nuclei_record[2]) == 0
+
+    dialog._save_dataset_button.click()
+    assert app.save_calls == 1
+    assert "dataset.zip" in dialog._banner.text()
+
+    dialog._undo_applied_button.click()
+    assert dialog.state == dialog.CONFIGURING
+    assert len(app.manager.nuclei_record[1]) == 0
+    assert dialog._proposal is None
+    assert not dialog._accepted
+    assert dialog._accept_button.text().replace("&", "") == "Accept Draft"
+    assert dialog._accept_through_button.text() == "Accept through selected frame"
+    dialog.reject()
+
+
+def test_main_history_undo_updates_open_applied_workbench(qtbot, tmp_path):
+    app = _CommittingTrackingDialogApp(tmp_path / "dataset.zip")
+    dialog = AutoTrackForwardDialog(1, 3, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+    dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
+    dialog._accept_button.click()
+    assert dialog.state == dialog.APPLIED
+
+    app.edit_history.undo()
+    dialog.sync_document_revision()
+
+    assert dialog.state == dialog.CONFIGURING
+    assert "undone from the main Edit history" in dialog._banner.text()
+    assert dialog._proposal is None
+    assert not dialog._accepted
+    assert dialog._save_dataset_button.isHidden()
+    dialog.reject()
+
+
+def test_undo_button_recovers_after_intervening_edit_is_undone(qtbot, tmp_path):
+    app = _CommittingTrackingDialogApp(tmp_path / "dataset.zip")
+    dialog = AutoTrackForwardDialog(1, 3, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+    dialog._preview_button.click()
+    qtbot.waitUntil(lambda: dialog.state == dialog.READY)
+    dialog._accept_button.click()
+    assert dialog._undo_applied_button.isEnabled()
+
+    app.edit_history.do(AddNucleus(time=3, x=2, y=2, z=1.0, size=2))
+    dialog.sync_document_revision()
+    assert not dialog._undo_applied_button.isEnabled()
+
+    app.edit_history.undo()
+    dialog.sync_document_revision()
+    assert dialog.state == dialog.APPLIED
+    assert dialog._undo_applied_button.isEnabled()
+    dialog.reject()

@@ -88,7 +88,7 @@ When you launch the GUI, you'll see:
 │  (napari canvas with nucleus overlay + hover tips)  │
 │                                                     │
 ├──────────┬──────────────────────┬───────────────────┤
-│ Contrast │                      │ Edit Tools        │
+│ Contrast │                      │ Edit & Tracking   │
 │ (per-ch) │                      │ (color mode,      │
 │          │                      │  buttons, viz)    │
 │ Lineage  │                      │                   │
@@ -108,7 +108,7 @@ When you launch the GUI, you'll see:
 | **Lineage List**     | Left       | Searchable hierarchical cell tree               |
 | **Player Controls**  | Bottom     | Time/plane navigation, labels, deselect, 3D mode, 3D window |
 | **Lineage Tree**     | Bottom     | Visual Sulston tree (multiple panels supported) |
-| **Edit Tools**       | Right      | Color mode toggle, editing operations, visualization tools |
+| **Edit & Tracking Tools** | Right | Manual/automated tracking, color mode, editing, and visualization tools |
 
 Napari's built-in layer list and layer controls are hidden by default to save screen space. They remain accessible via the napari Window menu.
 
@@ -200,7 +200,7 @@ All edits are **undoable** (`Ctrl+Z`) and **redoable** (`Ctrl+Y`). Up to 1000 ed
 ### 6.1 Edit Panel Layout
 
 ```
-┌─ Edit Tools ─────────────────┐
+┌─ Edit & Tracking Tools ──────┐
 │ Color Mode                   │
 │ (o) Editing  (o) Visualization│
 │ Preset: [Lineage depth ▾]   │
@@ -327,21 +327,23 @@ When a placement creates a second daughter, AceTree evaluates the division rule 
 
 #### Track Selected Cell Workbench
 
-**Edit Tools > Track Selected Cell** follows one selected cell without detecting or replacing the rest of the embryo. It is available after manual initialization and after opening an existing XML dataset:
+**Tracking > Track Selected Cell Forward…** (also in **Edit & Tracking Tools**) follows one selected cell without detecting or replacing the rest of the embryo. It is available after manual initialization and after opening an existing XML dataset:
 
 1. Select a live cell and click **Track Selected Cell**. If the selection is earlier in an existing one-child continuation, AceTree safely starts from its terminal nucleus. It never chooses a daughter at a division.
-2. In **1. Configure**, choose **Modern StarryNite (recommended)**, **LoG detection + LAP tracking**, or **DoG detection + LAP tracking**. Modern StarryNite also offers six bundled imaging presets. Basic controls cover channel, radius, threshold, search area, movement, gaps, caution, and division behavior; individual components are under **Advanced and custom settings**.
-3. Click **Build Preview**. Analysis runs in the background, progress is reported by frame, and **Cancel analysis** stops cooperatively without retaining a partial result or changing the dataset. Closing the window during analysis requests cancellation before its worker is released.
-4. In **2. Review**, inspect every proposed and interpolated position in the table. The overlay uses both shape and color: circles are proposed detections, diamonds are interpolated gaps, square/cross marks are diagnostic candidates that will not be accepted, and paths show movement. When a run stops, a ring/crosshair in 2D or wireframe search sphere in 3D shows the predicted search region. Click or keyboard-select a row, use **Previous**, **Next**, **Play Draft**, or **Go to stop**, and optionally center the camera on the selected position.
-5. If the draft needs work, change any parameter. AceTree marks the old overlay as out of date and disables acceptance until **Update Preview** finishes. Settings are remembered when the workbench is reopened.
-6. Read the human-language stopping explanation. Selected-cell tracking stops rather than guessing at similarly likely candidates, likely divisions, conflicts with existing annotations, or a lost continuation. The stopped frame, last accepted frame, predicted location, search radius, and review-only candidates are structured proposal data and remain available after save/reload of the tracking sidecar.
-7. Choose **Accept Draft** to add exactly the visible proposal as one undoable edit, or **Discard Draft** to restore the original view without editing anything. After acceptance, AceTree selects the new terminal nucleus so curation can continue immediately.
+2. In **1. Configure**, choose **Modern StarryNite (recommended)**, **LoG detection + LAP tracking**, or **DoG detection + LAP tracking**. Modern StarryNite also offers six bundled imaging presets. The guided surface starts with a short range of up to ten future frames and keeps the channel, radius, threshold, end time, and division behavior visible. Component selection, local-search tuning, gap/ambiguity controls, and custom parameter/model tools are hidden under **Show advanced and custom settings** by default.
+3. For Modern StarryNite, choose the embryo's actual **Developmental stage**. **Automatic from annotated cells** remains available, but a sparse lineage contains far fewer annotations than the embryo contains cells; an explicit stage prevents that sparse count from selecting an inappropriately early entry in a staged legacy parameter array.
+4. Use **Test Next Frame** for a fast one-frame check of the local detection and link. Its overlay and review table are diagnostic only: it cannot be accepted. Tune the visible controls if needed, then choose **Build Preview** to analyze the requested range. Analysis runs in the background, progress is reported by frame, and **Cancel analysis** stops cooperatively without retaining a partial result or changing the dataset. Closing the window during analysis requests cancellation before its worker is released.
+5. In **2. Review**, inspect every proposed and interpolated position in the table. The overlay uses both shape and color: circles are proposed detections, diamonds are interpolated gaps, square/cross marks are diagnostic candidates that will not be accepted, and paths show movement. When a run stops, a ring/crosshair in 2D or wireframe search sphere in 3D shows the predicted search region. Click or keyboard-select a row, use **Previous**, **Next**, **Play Draft**, or **Go to stop**, and optionally center the camera on the selected position.
+6. If the draft needs work, change any parameter. AceTree marks the old overlay as out of date and disables acceptance until **Update Preview** finishes. Native selected-cell settings, including the relative tracking horizon, workflow/preset, explicit stage, visible tuning values, division policy, review options, and Advanced-panel state, are remembered across application sessions. Because the horizon is stored as a length rather than an absolute time, it is reapplied safely when the next selected cell starts at another frame.
+7. Read the human-language stopping explanation. Selected-cell tracking stops rather than guessing at similarly likely candidates, likely divisions, conflicts with existing annotations, or a lost continuation. If a stop identifies a likely division while the conservative stop policy is active, **Rerun Following Both Daughters** switches to the two-daughter policy and rebuilds the draft. The stopped frame, last accepted frame, predicted location, search radius, and review-only candidates are structured proposal data and remain available after save/reload of the tracking sidecar.
+8. Choose **Accept Draft** to add the complete visible proposal. To keep only an earlier reliable prefix, select an ordinary proposed-detection row and choose **Accept through selected frame**; diagnostic candidates and interpolated rows are not valid cutoff points. Either action applies exactly the displayed full draft or trimmed prefix as one undoable edit.
+9. Acceptance keeps the workbench open, clears the draft overlay, and selects the new terminal nucleus when it is unique. Choose **Undo Accepted Draft** to reverse that just-applied history command and return to configuration, **Save Dataset** to persist the accepted nuclei and tracking provenance, or **Close** to leave the accepted but possibly unsaved document open in AceTree.
 
 Use **Solo detection channel while reviewing** when other fluorescence channels obscure the detector input; it applies to the main and all open detached viewers, then restores each layer's prior visibility on close. Draft layers remain read-only and visible in editing colors, visualization-rule colors, the main 3D volume, and every detached 3D window. Detached windows honor their own timepoint when Sync is off, and changing a review highlight updates only draft layers rather than rereading the image stacks.
 
-Simple LAP supports one-to-one continuations and short gaps. It does **not** create divisions or merges. The StarryNite division tracker can stop at a likely division, follow the best daughter, or include both daughters in the review draft; merges remain disabled. A manual edit, Undo, or Redo while a draft is open makes that draft stale and requires **Update Preview** before it can be accepted.
+Simple LAP supports one-to-one continuations and short gaps. It does **not** create divisions or merges. The StarryNite division tracker can stop at a likely division, follow the best daughter, or include both daughters in the review draft; merges remain disabled. When a conservative run stops at a division, the dedicated **Rerun Following Both Daughters** action avoids a trip back through Advanced settings. A manual edit, Undo, or Redo while an uncommitted draft is open makes that draft stale and requires **Update Preview** before it can be accepted.
 
-The default imaging preset is bundled and needs no conversion. Under **Advanced and custom settings**, **Use another parameter file...** reads an external legacy file, selects its stage from the live-cell count, and fills the editable controls. **Save tuned parameter copy...** preserves its original text and comments while appending compatible edits. The copy becomes active immediately, and the most recently selected external file is offered the next time either tracking workbench opens.
+The default imaging preset is bundled and needs no conversion. Under **Show advanced and custom settings**, **Use another parameter file...** safely reads an external legacy file and fills the editable controls. Confirm or override its staged values with **Developmental stage** instead of assuming that the sparse annotated-cell count represents the whole embryo. **Save tuned parameter copy...** preserves the original text and comments while appending compatible edits. The copy becomes active immediately, and the most recently selected external file is offered the next time either tracking workbench opens.
 
 Selected-cell tracking always uses the native StarryNite division tracker; the global
 legacy-exact backend is intentionally unavailable for a selected-cell scope.
@@ -367,8 +369,8 @@ the `.atpy-model` format and older JSON exports for backward compatibility.
 Editing or replacing a parameter, distribution, model, or runtime-model source
 invalidates the corresponding identity check and requires fresh validation.
 
-For MATLAB-equivalent whole-movie processing, select **Legacy StarryNite 2019
-exact replay** and choose the matching bundled imaging preset. Exact mode
+For MATLAB-equivalent whole-movie processing, select **Legacy StarryNite exact
+replay (advanced)** and choose the matching bundled imaging preset. Exact mode
 automatically pairs the StarryNite detector and ready source-bound model, requires time 1
 as the start, uses the parameter-file calibration, enables divisions, and runs
 sequential detection followed by every staged geometry and classifier cleanup
@@ -386,7 +388,7 @@ Before creation, the wizard verifies every requested channel source, multichanne
 
 The per-frame table appears only for a full draft and includes every requested frame, including frames with no detections, interpolated gap positions, new track starts, mean quality, and warnings. Select rows by mouse or keyboard while inspecting the same read-only overlay in 2D, main 3D, or detached 3D. Change settings and choose **Update Full Draft** as often as needed; the previous overlay is visibly stale and cannot be accepted after a setting or document change. **Accept Draft** is the only action that adds positions, as one undoable edit. **Discard Draft**, cancellation, failure, or closing the window leaves the dataset empty.
 
-For discoverability, **Edit Tools > Tracking & Links > Track Whole Movie...** reopens this workbench while the dataset is still empty. Once any nucleus record exists, use **Track Selected Cell...** for a selected lineage or Undo the accepted initial draft before rerunning whole-movie tracking. This restriction prevents an embryo-wide run from duplicating curated nuclei.
+For discoverability, **Tracking > Track Whole Movie...** and **Edit & Tracking Tools > Tracking & Links > Track Whole Movie...** reopen this workbench while the dataset is still empty. Once any nucleus record exists, use **Track Selected Cell...** for a selected lineage or Undo the accepted initial draft before rerunning whole-movie tracking. This restriction prevents an embryo-wide run from duplicating curated nuclei.
 
 #### Real-world StarryNite test checklist
 
@@ -413,9 +415,10 @@ for the command and old/new MATLAB model boundary.
 Recommended whole-movie sequence:
 
 1. Create or open an empty dataset, then open **Review Initial Tracking Draft**
-   or **Edit Tools > Tracking & Links > Track Whole Movie...**.
-2. Choose **Modern StarryNite (recommended)** or **Legacy StarryNite 2019 exact
-   replay**, then select the bundled imaging preset matching the microscope.
+   or choose **Tracking > Track Whole Movie...** (also available in the
+   **Edit & Tracking Tools** dock).
+2. Choose **Modern StarryNite (recommended)** or **Legacy StarryNite exact replay
+   (advanced)**, then select the bundled imaging preset matching the microscope.
 3. If radius, intensity threshold, or missing-frame allowance needs adjustment,
    edit the visible control and choose **Save tuned parameter copy…**. AceTree
    preserves the original statements and comments, appends supported edits,
@@ -804,7 +807,7 @@ All open panels update synchronously when edits are committed (relink, kill, ren
 4. Use the 3D window's color preset dropdown to switch between lineage depth and expression views independently of the main viewer.
 
 ### Screenshots and recording
-- Click **Screenshot** in the Visualization section of Edit Tools to capture the current view as a PNG.
+- Click **Screenshot** in the Visualization section of **Edit & Tracking Tools** to capture the current view as a PNG.
 - Click **Record...** to export a sequence of PNGs across a timepoint range (useful for making movies).
 
 ### Exporting for analysis
@@ -923,7 +926,7 @@ The non-interactive CLI also defaults to manual mode; select `dog-lap` or
 Once the GUI is open on a new (empty) dataset:
 
 1. Navigate to the desired timepoint and z-plane.
-2. Click **Add** in the Edit Tools panel to enter add mode.
+2. Click **Add** in the **Edit & Tracking Tools** panel to enter add mode.
 3. **Left-click** anywhere in the image to place a nucleus at that position.
 4. The nucleus is created at the current z-plane with a default diameter of 20 pixels.
 5. Press **Esc** to exit add mode.
@@ -960,7 +963,7 @@ Manual Track mode automatically handles:
 - **Predecessor linking**: direct link if adjacent, interpolation if there's a gap.
 - **Size inheritance**: the placed nucleus inherits the parent's diameter.
 
-To follow only one existing cell automatically, use **Edit Tools > Track Selected Cell** as described in Section 6.5. It searches a moving local ROI, shows a proposal summary, stops on ambiguity, and applies an accepted draft as one undoable edit.
+To follow only one existing cell automatically, use **Tracking > Track Selected Cell Forward…** as described in Section 6.5. It defaults to a ten-frame horizon, can run a review-only **Test Next Frame**, searches a moving local ROI, and stops on ambiguity. Accept the full draft or a selected reliable prefix as one undoable edit, then save or undo directly from the still-open workbench.
 
 ### 14.5 Workflow for Single-Frame Annotation
 

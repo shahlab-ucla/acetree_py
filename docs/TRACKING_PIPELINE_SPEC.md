@@ -26,9 +26,10 @@ The repository currently implements the immutable physical-coordinate values,
 component registry, SciPy LoG/DoG detectors, Simple LAP tracker, global creation
 option, selected-forward local search, stale-preview check, atomic proposal
 command, exact undo/redo, single-latest-run JSON sidecar, and modeless review
-workbenches for both Auto Forward and whole-dataset tracking, plus a lightweight
-current-frame detector test. Analysis runs on a cancellable background worker
-and remains uncommitted until the user explicitly accepts a full draft. Draft
+workbenches for both Track Selected Cell and whole-dataset tracking, plus
+lightweight diagnostic tests. Analysis runs on a cancellable background worker
+and remains uncommitted until the user explicitly accepts a draft or a validated
+selected-forward prefix. Draft
 positions, links, interpolation, review-only candidates, predicted search
 regions, and separate detector-test rings appear in dedicated read-only napari
 layers in the 2D, embedded 3D, and detached 3D viewers; navigation and detached
@@ -107,7 +108,7 @@ and accepted tracking provenance.
 
 ```mermaid
 flowchart LR
-    UI["Dataset wizard or Edit Tools"] --> CTRL["TrackingController"]
+    UI["Dataset wizard, Tracking menu, or Edit & Tracking Tools"] --> CTRL["TrackingController"]
     CTRL --> REG["ComponentRegistry"]
     CTRL --> RUN["PipelineRunner (worker)"]
     REG --> DET["Detector plugin"]
@@ -606,9 +607,14 @@ stop guidance, and direct navigation to each position or stopping frame.
 Changing a parameter retains the prior overlay for comparison but disables
 acceptance until the updated preview completes.
 
-The first implementation accepts or rejects the whole proposal. Later versions
-MAY support selecting individual tracks or a subrange, but the accepted subset
-must be revalidated and assigned a new proposal hash.
+The selected-forward workbench accepts either the whole proposal or a reliable
+prefix ending at a selected, retained detection. **Accept through selected
+frame** is disabled for the seed, interpolated gaps, review-only diagnostic
+candidates, the final detection, stale drafts, and next-frame tests. Trimming
+narrows the immutable request scope, removes later detections and edges, updates
+the structured outcome and provenance, and assigns a new proposal hash before
+the normal host validation and atomic commit path runs. Arbitrary individual
+track selection remains outside this boundary.
 
 ## 10. Commit, undo, and document staleness
 
@@ -624,7 +630,7 @@ request captures the baseline revision. A proposal is stale when:
   different links from its captured anchor snapshot;
 - a component required by the proposal is no longer the recorded version.
 
-The implemented Auto Forward session additionally captures EditHistory's
+The implemented Track Selected Cell session additionally captures EditHistory's
 monotonic `change_counter`. The current-state revision may legitimately return
 to an earlier token after Undo; the counter ensures an intervening edit followed
 by Undo cannot silently make an already-open draft acceptable again.
@@ -650,7 +656,11 @@ Accepting a ready proposal performs this sequence:
 Undo restores the exact prior nuclei record and provenance ownership state.
 Redo reapplies the same materialization plan; it does not rerun a detector or
 tracker. A successful commit never writes files immediately; normal Save
-persists the new document transactionally.
+persists the new document transactionally. After a selected-forward commit, the
+workbench remains open with no draft overlay and exposes **Undo Accepted Draft**
+while that command is still the history tip, plus **Save Dataset** for the
+explicit file write. Closing at this point leaves an ordinary dirty document;
+it does not imply that the accepted draft was saved.
 
 ## 11. Workflow specifications
 
@@ -689,32 +699,52 @@ that the result has been saved merely because analysis completed.
 
 The long-term contract permits a global proposal over curated data using a
 `PRESERVE_EXISTING` conflict policy and explicit advanced replacement choices.
-The current prototype deliberately exposes **Edit Tools > Whole Dataset…** only
-while the nuclei record is empty; this prevents duplicate embryo-wide tracks.
-After curation begins, use **Auto Forward** for a selected branch or Undo the
+The current implementation exposes **Tracking > Track Whole Movie…** and the
+matching dock button only for an empty nuclei record; this prevents duplicate
+embryo-wide tracks.
+After curation begins, use **Track Selected Cell** for a selected branch or Undo the
 accepted initial proposal before rerunning whole-dataset tracking.
 
 ### 11.4 Selected-cell forward tracking
 
 1. User right-clicks/selects a concrete live nucleus.
-2. User chooses **Edit Tools > Auto Forward**. This is distinct from the
+2. User chooses **Tracking > Track Selected Cell Forward…** or the matching
+   **Edit & Tracking Tools** button. This is distinct from the
    existing **Manual Track** button.
 3. The host captures the physical seed anchor, current revision, and seed state.
-4. User chooses end time, channel, detector, tracker, ROI radius, maximum
-   displacement, and branch policy.
-5. The seed is a fixed observation. It is not redetected or duplicated.
-6. At each later frame, detection is restricted to an ROI centered on a
+4. The guided configuration defaults to the Modern StarryNite bundled preset
+   and a relative horizon of ten future frames (clamped at the movie end).
+   Channel, radius, threshold, end time, branch policy, and an explicit
+   StarryNite developmental-stage selector remain visible. Component selection,
+   ROI/displacement/gap/ambiguity tuning, and custom legacy sources use the
+   collapsed Advanced panel.
+5. Selected-forward native settings are persisted across application sessions.
+   The range is stored as a horizon so reopening on a different seed does not
+   reuse an unrelated absolute end frame. Sparse StarryNite runs may explicitly
+   select a stage rather than infer it from the incomplete annotated-cell count.
+6. **Test Next Frame** runs only the first future frame and publishes a
+   review-only result. It never enables either acceptance action; the user must
+   explicitly **Build Preview** for the requested range.
+7. The seed is a fixed observation. It is not redetected or duplicated.
+8. At each later frame, detection is restricted to an ROI centered on a
    motion prediction. The prototype uses last position or constant velocity.
-7. LAP links the seed/frontier only to candidates in this local request. The
+9. LAP links the seed/frontier only to candidates in this local request. The
    pipeline MUST NOT populate unrelated global nuclei as a side effect.
-8. Tracking stops when the configured missing-frame allowance is exhausted,
+10. Tracking stops when the configured missing-frame allowance is exhausted,
    when a requested range ends with an unclosed gap, or at the first ambiguous,
    conflicting, or gated-out transition. Division behavior is selected
    explicitly as stop, follow-best, or follow-both; follow-both is available
    only when the tracker advertises splitting support.
-9. The preview explains why and where it stopped. Accepted points extend the
+11. The preview explains why and where it stopped. A division stop from a
+    splitting tracker offers **Rerun Following Both Daughters**, which changes
+    the policy and rebuilds rather than accepting the diagnostic candidates.
+12. The user accepts either the complete draft or a prefix ending at the
+    selected retained detection. Accepted points extend the
    selected lineage and retain the parent continuation's manual naming state
    through the normal host naming rules.
+13. The accepted proposal is one undoable command. The dialog remains open and
+    offers **Undo Accepted Draft**, **Save Dataset**, and **Close** so the dirty
+    versus persisted state is explicit.
 
 This workflow aligns conceptually with TrackMate's documented
 [semi-automatic tracking tool](https://imagej.net/plugins/trackmate/tutorials/manual-tracking),
@@ -1046,6 +1076,13 @@ fallback.
   remain usable.
 - Use progressive disclosure for replacement, gap closing, and future division
   policies.
+- Selected-forward starts with a short ten-frame horizon, keeps legacy stage
+  selection explicit for sparse datasets, and hides specialist component/search
+  controls until **Show advanced and custom settings** is enabled.
+- A selected-forward one-frame test MUST remain review-only. A likely-division
+  stop SHOULD offer a direct two-daughter rerun, and an accepted draft MUST keep
+  explicit Undo and Save actions visible until the workbench closes or the
+  accepted command is undone.
 - A run that fails during dataset creation leaves an obvious **Continue
   manually** action and a valid empty dataset.
 
@@ -1121,7 +1158,8 @@ identity where algorithms intentionally differ.
 
 ### Phase 3 — global GUI workflow (prototype implemented)
 
-- Implemented: Edit Tools entry point, worker controller, full proposal
+- Implemented: Tracking menu and scrollable Edit & Tracking Tools entry points,
+  worker controller, full proposal
   layers, per-frame review summary, accept/discard, cancellation, and stale
   handling.
 - Implemented: Manual/Automated page in dataset creation and matching CLI
@@ -1136,10 +1174,11 @@ identity where algorithms intentionally differ.
   ambiguity/conflict/lost stopping, and explicit stop/follow-best/follow-both
   division behavior gated by tracker splitting capability.
 - Implemented: stop-frame navigation, diagnostic candidates and search region,
-  parameter adjustment, rerun, two-daughter preview/commit, and a documented
-  manual continuation path.
-- Remaining: trimming an accepted prefix inside the workbench before commit;
-  the current draft accepts its reliable prefix as generated.
+  parameter adjustment, review-only next-frame test, direct two-daughter rerun,
+  two-daughter preview/commit, and a documented manual continuation path.
+- Implemented: short relative-horizon defaults, explicit sparse-dataset stage
+  selection, persisted native settings, progressive Advanced controls, prefix
+  trimming through a selected detection, and in-dialog post-accept Undo/Save.
 
 ### Phase 5 — ecosystem adapters
 
@@ -1192,12 +1231,16 @@ identity where algorithms intentionally differ.
 | Selected forward | No candidate in ROI | Stop with frame/reason; earlier proposal reviewable |
 | Selected forward | Nearly tied candidates | Stop rather than guess |
 | Selected forward | Unrelated bright cells outside ROI | No detections or mutations for them |
-| Selected forward | Likely division under STOP | Stop before branch; request user decision |
+| Selected forward | Next-frame test succeeds | Review overlay only; both acceptance actions disabled |
+| Selected forward | Prefix cutoff is proposed detection | Rehashed prefix only; later detections/edges omitted from atomic commit |
+| Selected forward | Prefix cutoff is seed, gap, or diagnostic candidate | Prefix acceptance disabled |
+| Selected forward | Likely division under STOP | Stop before branch; offer direct rerun following both daughters when splitting is supported |
 | Naming | Forced EMS extended then divided | EMS preserved; automatic E/MS naming remains host-owned |
 | Naming | No valid body frame | Neutral names; tracker does not invent biological order |
 | Preview | Scrub time/Z and change contrast | Proposal unchanged; view state retained |
 | Preview | Discard | No model, history, dirty-state, or file change |
 | Commit | Proposal accepted | Exactly one history entry and one naming/tree rebuild |
+| Commit | Selected-forward proposal accepted | Dialog stays open with explicit Undo Accepted Draft and Save Dataset actions |
 | Commit | Failure halfway through materialization | Exact rollback; proposal remains available |
 | Commit | Undo then redo | Exact same nuclei and provenance; no pipeline rerun |
 | Staleness | Any edit/undo/redo after request | Proposal stale |

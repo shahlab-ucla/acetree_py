@@ -44,6 +44,99 @@ class TestCLIHelp:
         assert "log-lap" in result.output
 
 
+class TestCreateCommand:
+    """Test noninteractive dataset creation settings."""
+
+    def test_starrynite_create_uses_bundled_preset_without_launching_gui(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from acetree_py.gui.app import AceTreeApp
+        from acetree_py.tracking.starrynite import (
+            bundled_parameter_preset,
+            load_tuning_profile,
+        )
+
+        image_dir = tmp_path / "images"
+        image_dir.mkdir()
+        # The command deliberately tolerates an unreadable probe and falls back
+        # to a one-plane stack, so no image codec is needed for this request test.
+        (image_dir / "embryo_t1.tif").touch()
+        (image_dir / "embryo_t2.tif").touch()
+        output_dir = tmp_path / "output"
+        captured = {}
+
+        class _CreatedApp:
+            def run(self):
+                captured["run_called"] = True
+
+        def _capture_new_dataset(
+            config,
+            num_timepoints,
+            output_dir_arg,
+            *,
+            tracking_request=None,
+        ):
+            captured.update(
+                config=config,
+                num_timepoints=num_timepoints,
+                output_dir=output_dir_arg,
+                request=tracking_request,
+            )
+            return _CreatedApp()
+
+        monkeypatch.setattr(
+            AceTreeApp,
+            "from_new_dataset",
+            staticmethod(_capture_new_dataset),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "create",
+                str(image_dir),
+                "--output",
+                str(output_dir),
+                "--tracking",
+                "starrynite",
+                "--starrynite-preset",
+                "isim_red_40x",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert captured["run_called"] is True
+        assert captured["num_timepoints"] == 2
+        assert captured["output_dir"] == output_dir.resolve()
+
+        request = captured["request"]
+        preset = bundled_parameter_preset("isim_red_40x")
+        profile = load_tuning_profile(preset.parameter_file)
+        assert request.detector.plugin_id == "acetree.starrynite_detector"
+        assert request.tracker.plugin_id == "acetree.starrynite_division"
+        assert request.scope.kind == "global"
+        assert request.scope.start_frame == 1
+        assert request.scope.end_frame == 2
+        assert request.detector.settings["STARRYNITE_PARAMETER_FILE"] == str(
+            preset.parameter_file.resolve()
+        )
+        assert request.detector.settings["RADIUS"] == profile.detector_settings[
+            "RADIUS"
+        ]
+        assert request.detector.settings["INTENSITY_THRESHOLD"] == (
+            profile.detector_settings["INTENSITY_THRESHOLD"]
+        )
+        assert request.detector.settings["THRESHOLD"] == 0.0
+        assert request.tracker.settings["MAX_FRAME_GAP"] == (
+            profile.tracker_settings["MAX_FRAME_GAP"]
+        )
+        assert request.tracker.settings["ALLOW_GAP_CLOSING"] is True
+        assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is True
+        assert request.tracker.settings["ALLOW_TRACK_MERGING"] is False
+
+
 class TestLoadCommand:
     """Test the load command."""
 

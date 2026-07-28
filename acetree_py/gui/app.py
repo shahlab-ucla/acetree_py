@@ -177,6 +177,8 @@ class AceTreeApp:
         self._cell_info_panel = None
         self._contrast_tools = None
         self._edit_panel = None
+        self._tracking_menu = None
+        self._tracking_menu_actions: dict[str, object] = {}
         self._lineage_widgets: list = []  # Multiple lineage tree panels
         self._lineage_list = None
 
@@ -340,13 +342,13 @@ class AceTreeApp:
         from .dataset_dialog import DatasetCreationDialog
 
         # Need a QApplication for the dialog
-        from qtpy.QtWidgets import QApplication
+        from qtpy.QtWidgets import QApplication, QDialog
         qt_app = QApplication.instance()
         if qt_app is None:
             qt_app = QApplication([])
 
         dlg = DatasetCreationDialog()
-        if dlg.exec_() != dlg.Accepted:
+        if dlg.exec_() != QDialog.Accepted:
             return None
 
         config = dlg.get_config()
@@ -438,11 +440,11 @@ class AceTreeApp:
             area="left",
         )
 
-        # Right: Edit Tools (compact — D-pad and history are popups)
+        # Right: Edit & Tracking Tools (scrollable; D-pad/history are popups)
         self._edit_panel = EditPanel(self)
         self.viewer.window.add_dock_widget(
             self._edit_panel,
-            name="Edit Tools",
+            name="Edit & Tracking Tools",
             area="right",
         )
 
@@ -455,6 +457,9 @@ class AceTreeApp:
 
         # Add toggle actions to Window menu so closed panels can be reopened
         self._add_panel_menu_actions()
+        # Tracking entry points must remain reachable even if the Edit &
+        # Tracking dock is closed or scrolled on a small display.
+        self._add_tracking_menu_actions()
         # Add File → Measure… action
         self._add_file_menu_actions()
 
@@ -3414,6 +3419,106 @@ class AceTreeApp:
                 expr_max=config["expr_max"],
                 cmap_name=config["cmap_name"],
             )
+
+    def _add_tracking_menu_actions(self) -> None:
+        """Add stable, plain-language tracking entry points to the menu bar."""
+
+        if self.viewer is None or self._edit_panel is None:
+            return
+        try:
+            qt_window = self.viewer.window._qt_window
+            menu_bar = qt_window.menuBar()
+        except Exception:
+            return
+
+        tracking_menu = None
+        for action in menu_bar.actions():
+            if action.menu() and action.text().lower().replace("&", "") == "tracking":
+                tracking_menu = action.menu()
+                break
+        if tracking_menu is None:
+            tracking_menu = menu_bar.addMenu("&Tracking")
+
+        from qtpy.QtWidgets import QAction
+
+        manual_action = QAction("Manual Track / Place Nuclei", qt_window)
+        manual_action.setStatusTip(
+            "Toggle manual right-click placement from the selected cell"
+        )
+        manual_action.triggered.connect(
+            lambda _checked=False: self._edit_panel._btn_track.click()
+        )
+        selected_action = QAction("Track Selected Cell Forward…", qt_window)
+        selected_action.setStatusTip(
+            "Build and review a sparse forward draft; divisions are supported"
+        )
+        selected_action.triggered.connect(
+            lambda _checked=False: self._edit_panel._on_auto_track_forward()
+        )
+        whole_action = QAction("Track Whole Movie…", qt_window)
+        whole_action.setStatusTip(
+            "Open reviewed Modern StarryNite, LoG + LAP, DoG + LAP, or advanced "
+            "legacy exact whole-movie tracking"
+        )
+        whole_action.triggered.connect(
+            lambda _checked=False: self._edit_panel._on_global_track()
+        )
+        relink_action = QAction("Relink Selected Cells…", qt_window)
+        relink_action.setStatusTip(
+            "Choose a source and target nucleus and create an undoable link"
+        )
+        relink_action.triggered.connect(
+            lambda _checked=False: self._edit_panel._btn_relink.click()
+        )
+        show_panel_action = QAction("Show Edit & Tracking Tools", qt_window)
+        show_panel_action.setStatusTip(
+            "Reveal the scrollable dock containing all manual and automated tools"
+        )
+        show_panel_action.triggered.connect(
+            lambda _checked=False: self._show_edit_tracking_panel()
+        )
+
+        tracking_menu.addAction(manual_action)
+        tracking_menu.addAction(selected_action)
+        tracking_menu.addAction(whole_action)
+        tracking_menu.addSeparator()
+        tracking_menu.addAction(relink_action)
+        tracking_menu.addSeparator()
+        tracking_menu.addAction(show_panel_action)
+        self._tracking_menu = tracking_menu
+        self._tracking_menu_actions = {
+            "manual": manual_action,
+            "selected_forward": selected_action,
+            "whole_movie": whole_action,
+            "relink": relink_action,
+            "show_panel": show_panel_action,
+        }
+
+    def _show_edit_tracking_panel(self) -> None:
+        """Reveal the Edit & Tracking dock without relying on the Window menu."""
+
+        if self.viewer is None or self._edit_panel is None:
+            return
+        try:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                dock_wrappers = tuple(self.viewer.window._dock_widgets.values())
+            dock = next(
+                (
+                    candidate
+                    for candidate in dock_wrappers
+                    if candidate.widget() is self._edit_panel
+                ),
+                None,
+            )
+            if dock is not None:
+                dock.setVisible(True)
+                dock.raise_()
+            self._edit_panel.setVisible(True)
+        except (AttributeError, RuntimeError):
+            logger.debug("Could not reveal the Edit & Tracking Tools dock")
 
     def _add_file_menu_actions(self) -> None:
         """Add a 'Measure…' action under the File menu.

@@ -32,6 +32,7 @@ from .persistence import (
     write_tracking_proposal,
 )
 from .pipeline import TrackingCancelled, TrackingPipeline
+from .proposals import trim_selected_forward_result
 from .registry import (
     ComponentDescriptor,
     PluginContribution,
@@ -99,6 +100,7 @@ __all__ = [
     "load_tuning_profile",
     "read_tracking_proposal",
     "tracking_sidecar_path",
+    "trim_selected_forward_result",
     "tracking_workflow",
     "workflow_for_components",
     "write_tracking_proposal",

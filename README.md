@@ -53,6 +53,12 @@ acetree-py create
 
 # From the command line with explicit parameters:
 acetree-py create path/to/images/ --output path/to/output/ --xy-res 0.1625 --z-res 0.65 --split
+
+# Prepare a reviewed Modern StarryNite draft from a bundled preset:
+acetree-py create path/to/images/ --output path/to/output/ --tracking starrynite --starrynite-preset dispim_singleview
+
+# Confirm that the installed build contains the tracking integration:
+acetree-py --version
 ```
 
 See [Tracking & Dataset Creation](docs/user_guide.md#14-tracking--dataset-creation)
@@ -66,7 +72,7 @@ AceTree-Py exposes four named workflows in the tracking dialogs:
   workflow, combining stage-aware detection with fast division-aware tracking.
 - **LoG detection + LAP tracking** and **DoG detection + LAP tracking** are
   continuation-only alternatives that need no StarryNite assets.
-- **Legacy StarryNite 2019 exact replay** is the global MATLAB-compatibility
+- **Legacy StarryNite exact replay (advanced)** is the global MATLAB-compatibility
   backend, with sequential detection, staged geometry, source-bound
   classification, cleanup, and divisions in one reviewable draft.
 
@@ -78,7 +84,9 @@ source and a MATLAB export helper are included for advanced compatibility work.
 
 Use **Track Selected Cell...** for sparse forward tracking in any new or loaded
 XML dataset. Use **Track Whole Movie...** for an empty record, including the
-initial draft offered by the dataset wizard. **Advanced and custom settings**
+initial draft offered by the dataset wizard. Both entry points, plus Manual
+Track, are available from the top-level **Tracking** menu and the scrollable
+**Edit & Tracking Tools** dock. **Advanced and custom settings**
 can load, edit, and save an external legacy parameter file, and AceTree remembers
 the most recently selected external file. Exact mode never silently falls back
 to native scoring, and no nuclei change until **Accept Draft**.

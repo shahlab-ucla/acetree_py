@@ -376,6 +376,62 @@ def test_tuning_profile_maps_standard_staged_parameters_and_model(tmp_path: Path
     assert profile.warnings
 
 
+def test_tuning_profile_explicit_stage_overrides_sparse_cell_count_inference() -> None:
+    parameters = parse_parameter_text(
+        "parameters.staging=[25,80];\n"
+        "parameters.intensitythreshold=[5,8,12];\n"
+        "parameters.rangethreshold=[100,50,25];\n"
+        "trackingparameters.temporalcutoff=[1,2,3];\n"
+    )
+
+    assert legacy_stage_index(parameters, 1) == 0
+
+    profile = tuning_profile_from_parameters(
+        parameters,
+        cell_count=1,
+        stage_index=2,
+    )
+
+    assert profile.cell_count == 1
+    assert profile.stage_index == 2
+    assert profile.detector_settings["STARRYNITE_CELL_COUNT"] == 1
+    assert profile.detector_settings["STARRYNITE_STAGE_INDEX"] == 2
+    assert profile.detector_settings["INTENSITY_THRESHOLD"] == pytest.approx(12.0)
+    assert profile.detector_settings["RANGE_THRESHOLD"] == pytest.approx(25.0)
+    assert profile.tracker_settings["MAX_FRAME_GAP"] == 3
+    assert profile.tracker_settings["ALLOW_GAP_CLOSING"] is True
+
+
+def test_load_tuning_profile_forwards_explicit_stage_override(tmp_path: Path) -> None:
+    parameter_path = tmp_path / "parameters.txt"
+    parameter_path.write_text(
+        "parameters.staging=[25,80];\n"
+        "parameters.intensitythreshold=[5,8,12];\n",
+        encoding="utf-8",
+    )
+
+    profile = load_tuning_profile(parameter_path, cell_count=1, stage_index=1)
+
+    assert profile.stage_index == 1
+    assert profile.detector_settings["STARRYNITE_STAGE_INDEX"] == 1
+    assert profile.detector_settings["INTENSITY_THRESHOLD"] == pytest.approx(8.0)
+
+
+@pytest.mark.parametrize("stage_index", [-1, 1.5, True, "1"])
+def test_tuning_profile_rejects_invalid_explicit_stage_index(stage_index: object) -> None:
+    parameters = parse_parameter_text(
+        "parameters.staging=[25,80];\n"
+        "parameters.intensitythreshold=[5,8,12];\n"
+    )
+
+    with pytest.raises(StarryNitePresetError, match="non-negative integer"):
+        tuning_profile_from_parameters(
+            parameters,
+            cell_count=1,
+            stage_index=stage_index,  # type: ignore[arg-type]
+        )
+
+
 def test_tuning_profile_binds_selected_distribution_to_request_time_sha256(
     tmp_path: Path,
 ) -> None:

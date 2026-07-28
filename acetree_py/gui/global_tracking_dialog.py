@@ -45,6 +45,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -189,7 +190,7 @@ class GlobalTrackingDialog(QDialog):
         self._solo_channel_visibility: list[tuple[object, bool]] | None = None
         self._original_view = self._capture_view_state()
 
-        self.setWindowTitle("Review Initial Tracking Draft")
+        self.setWindowTitle("Track Whole Movie — Review Draft")
         self.setModal(False)
         self.setWindowModality(Qt.NonModal)
         self.setMinimumSize(760, 520)
@@ -246,7 +247,7 @@ class GlobalTrackingDialog(QDialog):
         outer.setSpacing(10)
 
         title = QLabel(
-            "<span style='font-size:16px'><b>Review initial tracking draft</b></span>"
+            "<span style='font-size:16px'><b>Track the whole movie</b></span>"
             "<br><span style='color:#9aa0a6'>Analysis is read-only. Inspect every "
             "frame before explicitly accepting the draft.</span>"
         )
@@ -515,7 +516,6 @@ class GlobalTrackingDialog(QDialog):
         configure_actions.addStretch()
         configure_actions.addWidget(self._detector_preview_button)
         configure_actions.addWidget(self._preview_button)
-        configure_layout.addLayout(configure_actions)
 
         self._detector_status_label = QLabel(
             "Fast tuning: test the detector on the image currently shown before "
@@ -525,7 +525,21 @@ class GlobalTrackingDialog(QDialog):
         self._detector_status_label.setAccessibleName("Current-frame detector test status")
         self._detector_status_label.setStyleSheet("QLabel { color: #b8bec7; }")
         configure_layout.addWidget(self._detector_status_label)
-        columns.addWidget(configure_group, stretch=0)
+        configure_scroll = QScrollArea()
+        configure_scroll.setWidgetResizable(True)
+        configure_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        configure_scroll.setMinimumWidth(350)
+        configure_scroll.setAccessibleName("Whole-movie tracking settings")
+        configure_scroll.setWidget(configure_group)
+        self._configure_scroll = configure_scroll
+        configure_column = QWidget()
+        configure_column_layout = QVBoxLayout(configure_column)
+        configure_column_layout.setContentsMargins(0, 0, 0, 0)
+        configure_column_layout.setSpacing(6)
+        configure_column_layout.addWidget(configure_scroll, stretch=1)
+        configure_column_layout.addLayout(configure_actions)
+        self._configure_column = configure_column
+        columns.addWidget(configure_column, stretch=0)
 
         review_group = QGroupBox("2. Review")
         review_layout = QVBoxLayout(review_group)

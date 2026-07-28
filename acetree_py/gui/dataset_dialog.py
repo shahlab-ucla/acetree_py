@@ -34,6 +34,7 @@ try:
         QMessageBox,
         QPushButton,
         QRadioButton,
+        QScrollArea,
         QSpinBox,
         QStackedWidget,
         QTextEdit,
@@ -586,14 +587,19 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
     # ── Page 4: Output ────────────────────────────────────────────
 
     def _build_page4_tracking(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page.setAccessibleName("Initial tracking setup")
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        page.setWidget(content)
         layout.addWidget(QLabel("<b>Step 4: Initial Tracking</b>"))
         self._tracking_explanation_label = QLabel(
-            "Start with manual annotation and use Track Selected Cell at any time, or "
-            "open a reviewed whole-movie draft now. The same Track Selected Cell and "
-            "Track Whole Movie tools remain visible after opening this dataset or an "
-            "existing XML file. Automated results are never accepted automatically."
+            "Choose manual annotation or prepare a reviewed whole-movie draft. After "
+            "this dataset or an existing XML dataset opens, use the Tracking menu or "
+            "the Edit & Tracking panel for Manual Track, Track Selected Cell, and Track "
+            "Whole Movie. Automated results are never accepted automatically."
         )
         self._tracking_explanation_label.setWordWrap(True)
         self._tracking_explanation_label.setAccessibleName(
@@ -732,9 +738,10 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         layout.addWidget(self._tracking_settings_group)
 
         self._tracking_capability_label = QLabel(
-            "Simple LAP links continuations and short gaps, but it does not propose "
-            "divisions or merges. Choose a division-aware tracker to include reviewed "
-            "two-daughter branches in the draft."
+            "Modern StarryNite can propose reviewed two-daughter divisions. LoG + LAP "
+            "and DoG + LAP are simpler one-to-one alternatives. Advanced custom and "
+            "source-bound legacy exact replay are available in Track Whole Movie after "
+            "the empty dataset opens."
         )
         self._tracking_capability_label.setWordWrap(True)
         self._tracking_capability_label.setAccessibleName(

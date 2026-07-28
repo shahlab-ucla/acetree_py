@@ -45,6 +45,7 @@ try:
         QMessageBox,
         QPushButton,
         QRadioButton,
+        QScrollArea,
         QSpinBox,
         QVBoxLayout,
         QWidget,
@@ -85,16 +86,27 @@ class EditPanel(QWidget):  # type: ignore[misc]
             str, tuple[int, int, str]
         ] = {}
         self._auto_track_dialog: AutoTrackForwardDialog | None = None
-        self._auto_track_settings: dict[str, object] = {}
+        self._auto_track_settings: dict[str, object] = (
+            AutoTrackForwardDialog.persisted_native_settings()
+        )
         self._build_ui()
 
     def _build_ui(self) -> None:
         """Build the widget layout."""
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll_area.setAccessibleName("Edit and tracking tools")
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+        self._scroll_area.setWidget(scroll_content)
+        outer_layout.addWidget(self._scroll_area)
 
-        title = QLabel("Edit Tools")
+        title = QLabel("Edit & Tracking Tools")
         title.setFont(QFont("Sans Serif", 12, QFont.Bold))
         layout.addWidget(title)
 
@@ -283,13 +295,16 @@ class EditPanel(QWidget):  # type: ignore[misc]
         link_layout.addLayout(automated_row)
         tracking_help = QLabel(
             "Use Track Selected Cell while curating any new or loaded XML dataset. "
-            "Track Whole Movie builds an initial draft only while the nuclei record "
-            "is empty."
+            "Track Whole Movie offers Modern StarryNite, LoG + LAP, DoG + LAP, and "
+            "advanced legacy exact replay, but safely requires an empty nuclei record."
         )
         tracking_help.setWordWrap(True)
         tracking_help.setStyleSheet("QLabel { color: #777; }")
         link_layout.addWidget(tracking_help)
-        layout.addWidget(link_group)
+        # Tracking is the primary curation workflow. Keep it above the other
+        # edit groups and inside a scroll area so narrow/short docks cannot
+        # silently place these entry points below the visible viewport.
+        layout.insertWidget(1, link_group)
 
         # ── Anatomical body orientation ──
         axis_group = QGroupBox("Body Orientation")
@@ -1603,6 +1618,9 @@ class EditPanel(QWidget):  # type: ignore[misc]
     def _auto_track_closed(self, dialog: AutoTrackForwardDialog) -> None:
         try:
             self._auto_track_settings = dialog.export_settings()
+            AutoTrackForwardDialog.persist_native_settings(
+                self._auto_track_settings
+            )
         except RuntimeError:
             pass
         if self._auto_track_dialog is dialog:

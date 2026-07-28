@@ -43,8 +43,9 @@ DOG_LAP = TrackingWorkflow(
 )
 LEGACY_STARRYNITE_EXACT = TrackingWorkflow(
     "legacy_starrynite_exact",
-    "Legacy StarryNite 2019 exact replay",
-    "Whole-movie source-bound replay for compatibility studies; requires matching calibration.",
+    "Legacy StarryNite exact replay (advanced)",
+    "Whole-movie source-bound replay for compatible legacy parameter/model bundles; "
+    "requires matching calibration and complete movie scope.",
     "acetree.starrynite_detector",
     "acetree.starrynite_legacy_exact",
     supports_forward=False,

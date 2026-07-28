@@ -34,6 +34,29 @@ app = typer.Typer(
 )
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        from acetree_py import __version__
+
+        typer.echo(f"AceTree-Py {__version__} (tracking integration)")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the installed AceTree-Py build version and exit.",
+    ),
+) -> None:
+    """AceTree-Py command-line interface."""
+
+    del version
+
+
 def _load_manager(config_path: str):
     """Load a NucleiManager from a config file."""
     from acetree_py.io.config import load_config
@@ -226,22 +249,40 @@ def create(
     ),
     tracking: str = typer.Option(
         "manual", "--tracking",
-        help="Initial workflow: manual, dog-lap, or log-lap",
+        help="Initial workflow: manual, starrynite, dog-lap, or log-lap",
+    ),
+    starrynite_preset: str = typer.Option(
+        "dispim_singleview",
+        "--starrynite-preset",
+        help=(
+            "Bundled StarryNite preset ID (for --tracking starrynite): "
+            "dispim_singleview, dispim_deconvolved, dispim_gaussian_model, "
+            "isim_red_40x, spinning_disk_red_40x, or spinning_disk_red_60x_si"
+        ),
     ),
     detection_channel: int = typer.Option(
         1, "--detection-channel", help="One-based channel for automated detection",
     ),
-    nucleus_radius: float = typer.Option(
-        4.0, "--nucleus-radius", help="Expected nucleus radius in microns",
+    nucleus_radius: Optional[float] = typer.Option(
+        None,
+        "--nucleus-radius",
+        help="Expected nucleus radius in microns (preset/default when omitted)",
     ),
-    detection_threshold: float = typer.Option(
-        5.0, "--detection-threshold", help="Minimum LoG/DoG response",
+    detection_threshold: Optional[float] = typer.Option(
+        None,
+        "--detection-threshold",
+        help="Detection threshold (bundled StarryNite value/default when omitted)",
     ),
     linking_distance: float = typer.Option(
         8.0, "--linking-distance", help="Maximum LAP displacement in microns",
     ),
-    missing_frames: int = typer.Option(
-        1, "--missing-frames", help="Maximum missed frames to bridge",
+    missing_frames: Optional[int] = typer.Option(
+        None,
+        "--missing-frames",
+        help=(
+            "Maximum missed frames to bridge "
+            "(bundled StarryNite value/default when omitted)"
+        ),
     ),
 ):
     """Create a dataset and launch manual annotation or an automated draft."""
@@ -339,9 +380,11 @@ def create(
         _derive_image_params(config)
 
         tracking_mode = tracking.strip().lower()
-        if tracking_mode not in {"manual", "dog-lap", "log-lap"}:
+        if tracking_mode == "modern-starrynite":
+            tracking_mode = "starrynite"
+        if tracking_mode not in {"manual", "starrynite", "dog-lap", "log-lap"}:
             typer.echo(
-                "Error: --tracking must be manual, dog-lap, or log-lap.",
+                "Error: --tracking must be manual, starrynite, dog-lap, or log-lap.",
                 err=True,
             )
             raise typer.Exit(1)
@@ -351,9 +394,15 @@ def create(
                 err=True,
             )
             raise typer.Exit(1)
-        if nucleus_radius <= 0 or linking_distance <= 0 or missing_frames < 0:
+        if (
+            (nucleus_radius is not None and nucleus_radius <= 0)
+            or (detection_threshold is not None and detection_threshold < 0)
+            or linking_distance <= 0
+            or (missing_frames is not None and missing_frames < 0)
+        ):
             typer.echo(
-                "Error: radius/linking distance must be positive and missing frames non-negative.",
+                "Error: radius/linking distance must be positive; threshold and "
+                "missing frames must be non-negative.",
                 err=True,
             )
             raise typer.Exit(1)
@@ -366,31 +415,98 @@ def create(
                 TrackingScope,
             )
 
-            detector_id = (
-                "acetree.dog3d" if tracking_mode == "dog-lap" else "acetree.log3d"
-            )
-            tracking_request = TrackingRequest(
-                detector=ComponentSpec(
-                    detector_id,
+            from acetree_py.tracking.registry import get_default_registry
+
+            registry = get_default_registry()
+            if tracking_mode == "starrynite":
+                from acetree_py.tracking.starrynite import (
+                    bundled_parameter_preset,
+                    load_tuning_profile,
+                )
+
+                try:
+                    preset = bundled_parameter_preset(starrynite_preset)
+                    profile = load_tuning_profile(preset.parameter_file)
+                except (KeyError, OSError, ValueError) as exc:
+                    typer.echo(
+                        f"Error: --starrynite-preset is not usable: {exc}",
+                        err=True,
+                    )
+                    raise typer.Exit(1) from exc
+                detector_id = "acetree.starrynite_detector"
+                tracker_id = "acetree.starrynite_division"
+                detector_settings = registry.default_settings(detector_id)
+                tracker_settings = registry.default_settings(tracker_id)
+                detector_settings.update(profile.detector_settings)
+                tracker_settings.update(profile.tracker_settings)
+                radius = (
+                    float(profile.detector_settings.get("RADIUS", 4.0))
+                    if nucleus_radius is None
+                    else nucleus_radius
+                )
+                threshold = (
+                    float(
+                        profile.detector_settings.get("INTENSITY_THRESHOLD", 5.0)
+                    )
+                    if detection_threshold is None
+                    else detection_threshold
+                )
+                detector_settings.update(
                     {
                         "TARGET_CHANNEL": detection_channel,
-                        "RADIUS": nucleus_radius,
-                        "THRESHOLD": detection_threshold,
+                        "RADIUS": radius,
+                        "THRESHOLD": 0.0,
+                        "INTENSITY_THRESHOLD": threshold,
+                    }
+                )
+                allow_splitting = True
+            else:
+                detector_id = (
+                    "acetree.dog3d"
+                    if tracking_mode == "dog-lap"
+                    else "acetree.log3d"
+                )
+                tracker_id = "acetree.simple_lap"
+                radius = 4.0 if nucleus_radius is None else nucleus_radius
+                threshold = (
+                    5.0 if detection_threshold is None else detection_threshold
+                )
+                detector_settings = registry.default_settings(detector_id)
+                tracker_settings = registry.default_settings(tracker_id)
+                detector_settings.update(
+                    {
+                        "TARGET_CHANNEL": detection_channel,
+                        "RADIUS": radius,
+                        "THRESHOLD": threshold,
                         "DO_SUBPIXEL_LOCALIZATION": True,
                         "DO_MEDIAN_FILTERING": False,
-                    },
-                ),
-                tracker=ComponentSpec(
-                    "acetree.simple_lap",
-                    {
-                        "LINKING_MAX_DISTANCE": linking_distance,
-                        "ALLOW_GAP_CLOSING": missing_frames > 0,
-                        "GAP_CLOSING_MAX_DISTANCE": linking_distance,
-                        "MAX_FRAME_GAP": missing_frames + 1 if missing_frames > 0 else 1,
-                        "ALLOW_TRACK_SPLITTING": False,
-                        "ALLOW_TRACK_MERGING": False,
-                    },
-                ),
+                    }
+                )
+                allow_splitting = False
+            if missing_frames is None:
+                max_frame_gap = int(tracker_settings.get("MAX_FRAME_GAP", 2))
+                allow_gap_closing = bool(
+                    tracker_settings.get(
+                        "ALLOW_GAP_CLOSING",
+                        max_frame_gap > 1,
+                    )
+                )
+            else:
+                max_frame_gap = missing_frames + 1 if missing_frames > 0 else 1
+                allow_gap_closing = missing_frames > 0
+            tracker_settings.update(
+                {
+                    "LINKING_MAX_DISTANCE": linking_distance,
+                    "ALLOW_GAP_CLOSING": allow_gap_closing,
+                    "GAP_CLOSING_MAX_DISTANCE": linking_distance,
+                    "MAX_FRAME_GAP": max_frame_gap,
+                    "ALLOW_TRACK_SPLITTING": allow_splitting,
+                    "ALLOW_TRACK_MERGING": False,
+                }
+            )
+            tracking_request = TrackingRequest(
+                detector=ComponentSpec(detector_id, detector_settings),
+                tracker=ComponentSpec(tracker_id, tracker_settings),
                 scope=TrackingScope("global", 1, num_timepoints),
             )
             typer.echo(

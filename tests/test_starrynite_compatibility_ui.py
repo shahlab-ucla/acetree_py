@@ -303,11 +303,13 @@ def test_auto_forward_restores_editable_parameter_session_without_losing_tuning(
     assert restored._starrynite_save_button.isEnabled()
 
     restored._restore_defaults()
-    assert restored._starrynite_profile is None
-    assert restored._starrynite_compatibility_report is None
-    assert not restored._starrynite_neutral_button.isEnabled()
-    assert not restored._starrynite_report_button.isEnabled()
-    assert not restored._starrynite_save_button.isEnabled()
+    assert restored._workflow_combo.currentData() == "modern_starrynite"
+    assert restored._starrynite_profile is not None
+    assert restored._starrynite_compatibility_report is not None
+    assert restored._starrynite_neutral_button.isEnabled()
+    assert restored._starrynite_report_button.isEnabled()
+    assert restored._starrynite_save_button.isEnabled()
+    assert "Preset ready" in restored._starrynite_file_label.text()
 
 
 def test_auto_forward_rebases_source_metadata_but_keeps_visible_tuning(

@@ -8,6 +8,7 @@ the main image viewer, and rerun as often as needed before one explicit commit.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import re
 from pathlib import Path
@@ -31,6 +32,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -59,7 +61,10 @@ class AutoTrackForwardDialog(QDialog):
     STALE = "stale"
     EMPTY = "empty"
     FAILED = "failed"
+    APPLIED = "applied"
     _RECENT_PARAMETERS_KEY = "tracking/starrynite/recent_parameter_file"
+    _PERSISTED_SETTINGS_KEY = "tracking/selected_forward/settings_v1"
+    _DEFAULT_FORWARD_HORIZON = 10
     _NEUTRAL_CLASSIFIER_KEY_PREFIX = (
         "tracking/starrynite/neutral_classifier_by_model"
     )
@@ -91,6 +96,7 @@ class AutoTrackForwardDialog(QDialog):
         self._cancel_requested = False
         self._accepting = False
         self._accepted = False
+        self._committed_proposal: TrackingResult | None = None
         self._cleaned_up = False
         self._state = self.CONFIGURING
         self._stop_frame: int | None = None
@@ -101,6 +107,9 @@ class AutoTrackForwardDialog(QDialog):
         self._close_after_run = False
         self._deferred_result = QDialog.Rejected
         self._rerun_after_thread = False
+        self._rerun_quick_after_thread = False
+        self._analysis_is_quick = False
+        self._last_preview_was_quick = False
         self._run_started_at = 0.0
         self._generated_settings: dict[str, Any] | None = None
         self._generated_html = ""
@@ -115,6 +124,7 @@ class AutoTrackForwardDialog(QDialog):
         self._starrynite_session_note_html = ""
         self._starrynite_classifier_note_html = ""
         self._workflow_change_in_progress = False
+        self._stage_change_in_progress = False
         self._solo_channel_visibility: list[tuple[object, bool]] | None = None
         self._review_timer = QTimer(self)
         self._review_timer.setInterval(350)
@@ -210,9 +220,32 @@ class AutoTrackForwardDialog(QDialog):
             self._starrynite_preset_combo
         )
 
+        self._starrynite_stage_combo = QComboBox()
+        self._starrynite_stage_combo.addItem("Automatic from annotated cells", None)
+        self._starrynite_stage_combo.setToolTip(
+            "StarryNite thresholds change with developmental stage. Sparse datasets "
+            "usually need an explicit stage because their annotated-cell count is low."
+        )
+        form.addRow("Developmental stage:", self._starrynite_stage_combo)
+        self._starrynite_stage_label = form.labelForField(
+            self._starrynite_stage_combo
+        )
+        self._starrynite_stage_hint = QLabel(
+            "Sparse tracking may include only a few annotated cells. Verify the embryo "
+            "stage instead of assuming that count represents the whole embryo."
+        )
+        self._starrynite_stage_hint.setWordWrap(True)
+        self._starrynite_stage_hint.setStyleSheet("QLabel { color: #9a6b16; }")
+        form.addRow("", self._starrynite_stage_hint)
+
         self._end_spin = QSpinBox()
         self._end_spin.setRange(self._start_time + 1, max(self._start_time + 1, self._end_time))
-        self._end_spin.setValue(max(self._start_time + 1, self._end_time))
+        self._end_spin.setValue(
+            min(
+                max(self._start_time + 1, self._end_time),
+                self._start_time + self._DEFAULT_FORWARD_HORIZON,
+            )
+        )
         self._end_spin.setToolTip("Last timepoint selected-cell tracking should attempt")
         form.addRow("Track through:", self._end_spin)
 
@@ -270,6 +303,7 @@ class AutoTrackForwardDialog(QDialog):
         self._roi_spin.setSuffix(" µm")
         self._roi_spin.setToolTip("Radius searched around the predicted cell position")
         form.addRow("Search area:", self._roi_spin)
+        self._roi_label = form.labelForField(self._roi_spin)
 
         self._distance_spin = QDoubleSpinBox()
         self._distance_spin.setRange(0.05, 1_000.0)
@@ -278,12 +312,14 @@ class AutoTrackForwardDialog(QDialog):
         self._distance_spin.setSuffix(" µm")
         self._distance_spin.setToolTip("Largest plausible movement between linked frames")
         form.addRow("Maximum movement:", self._distance_spin)
+        self._distance_label = form.labelForField(self._distance_spin)
 
         self._gap_spin = QSpinBox()
         self._gap_spin.setRange(0, 20)
         self._gap_spin.setValue(1)
         self._gap_spin.setToolTip("How many missing frames may be bridged by interpolation")
         form.addRow("Missing frames:", self._gap_spin)
+        self._gap_label = form.labelForField(self._gap_spin)
 
         self._ambiguity_spin = QDoubleSpinBox()
         self._ambiguity_spin.setRange(1.01, 10.0)
@@ -294,6 +330,7 @@ class AutoTrackForwardDialog(QDialog):
             "Higher values stop more cautiously when two candidates are similarly likely"
         )
         form.addRow("Caution for close choices:", self._ambiguity_spin)
+        self._ambiguity_label = form.labelForField(self._ambiguity_spin)
 
         self._branch_policy_combo = QComboBox()
         self._branch_policy_combo.addItem(
@@ -404,15 +441,37 @@ class AutoTrackForwardDialog(QDialog):
         self._reset_button = QPushButton("Restore defaults")
         self._reset_button.setToolTip("Restore recommended starting values")
         self._reset_button.clicked.connect(self._restore_defaults)
+        self._quick_preview_button = QPushButton("Test &Next Frame")
+        self._quick_preview_button.setToolTip(
+            "Run a fast local one-frame tracking test. The result is review-only and "
+            "cannot be accepted until the requested range is built."
+        )
+        self._quick_preview_button.clicked.connect(
+            lambda: self._run_preview(quick=True)
+        )
         self._preview_button = QPushButton("&Build Preview")
         self._preview_button.setDefault(True)
         self._preview_button.setToolTip("Analyze images without changing the dataset")
-        self._preview_button.clicked.connect(self._run_preview)
+        self._preview_button.clicked.connect(lambda: self._run_preview(quick=False))
         configure_actions.addWidget(self._reset_button)
+        configure_actions.addWidget(self._quick_preview_button)
         configure_actions.addStretch()
         configure_actions.addWidget(self._preview_button)
-        configure_layout.addLayout(configure_actions)
-        columns.addWidget(configure_group, stretch=0)
+        configure_scroll = QScrollArea()
+        configure_scroll.setWidgetResizable(True)
+        configure_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        configure_scroll.setMinimumWidth(330)
+        configure_scroll.setAccessibleName("Selected-cell tracking settings")
+        configure_scroll.setWidget(configure_group)
+        self._configure_scroll = configure_scroll
+        configure_column = QWidget()
+        configure_column_layout = QVBoxLayout(configure_column)
+        configure_column_layout.setContentsMargins(0, 0, 0, 0)
+        configure_column_layout.setSpacing(6)
+        configure_column_layout.addWidget(configure_scroll, stretch=1)
+        configure_column_layout.addLayout(configure_actions)
+        self._configure_column = configure_column
+        columns.addWidget(configure_column, stretch=0)
 
         # ── Review column ─────────────────────────────────────────────
         review_group = QGroupBox("2. Review")
@@ -445,6 +504,18 @@ class AutoTrackForwardDialog(QDialog):
         self._warning_label.setAccessibleName("Tracking stop explanation")
         self._warning_label.hide()
         review_layout.addWidget(self._warning_label)
+
+        self._follow_both_rerun_button = QPushButton(
+            "Rerun Following Both Daughters"
+        )
+        self._follow_both_rerun_button.setToolTip(
+            "Change division behavior to Follow both daughters and rebuild the draft."
+        )
+        self._follow_both_rerun_button.clicked.connect(
+            self._rerun_following_both_daughters
+        )
+        self._follow_both_rerun_button.hide()
+        review_layout.addWidget(self._follow_both_rerun_button)
 
         self._legend_label = QLabel(
             "○ Proposed position   ◇ Interpolated gap   □/× Review candidate only   "
@@ -527,9 +598,26 @@ class AutoTrackForwardDialog(QDialog):
         self._accept_button.setEnabled(False)
         self._accept_button.setToolTip("Apply the visible draft as one undoable edit")
         self._accept_button.clicked.connect(self._accept_draft)
+        self._accept_through_button = QPushButton("Accept through selected frame")
+        self._accept_through_button.setEnabled(False)
+        self._accept_through_button.setToolTip(
+            "Accept only the reliable draft prefix ending at the selected proposed position."
+        )
+        self._accept_through_button.clicked.connect(
+            self._accept_through_selected_frame
+        )
+        self._undo_applied_button = QPushButton("Undo Accepted Draft")
+        self._undo_applied_button.clicked.connect(self._undo_accepted_draft)
+        self._undo_applied_button.hide()
+        self._save_dataset_button = QPushButton("Save Dataset")
+        self._save_dataset_button.clicked.connect(self._save_after_acceptance)
+        self._save_dataset_button.hide()
         footer.addWidget(self._cancel_run_button)
         footer.addStretch()
+        footer.addWidget(self._undo_applied_button)
+        footer.addWidget(self._save_dataset_button)
         footer.addWidget(self._discard_button)
+        footer.addWidget(self._accept_through_button)
         footer.addWidget(self._accept_button)
         outer.addLayout(footer)
 
@@ -539,6 +627,9 @@ class AutoTrackForwardDialog(QDialog):
         )
         self._starrynite_preset_combo.currentIndexChanged.connect(
             self._bundled_starrynite_preset_changed
+        )
+        self._starrynite_stage_combo.currentIndexChanged.connect(
+            self._starrynite_stage_changed
         )
         for widget in (
             self._end_spin,
@@ -567,6 +658,7 @@ class AutoTrackForwardDialog(QDialog):
             self._end_spin,
             self._workflow_combo,
             self._starrynite_preset_combo,
+            self._starrynite_stage_combo,
             self._detector_combo,
             self._tracker_combo,
             self._channel_spin,
@@ -577,6 +669,7 @@ class AutoTrackForwardDialog(QDialog):
             self._gap_spin,
             self._ambiguity_spin,
             self._branch_policy_combo,
+            self._quick_preview_button,
             self._starrynite_file_button,
             self._starrynite_recent_button,
             self._starrynite_save_button,
@@ -589,6 +682,9 @@ class AutoTrackForwardDialog(QDialog):
             self._solo_channel_check,
             self._discard_button,
             self._accept_button,
+            self._accept_through_button,
+            self._undo_applied_button,
+            self._save_dataset_button,
         ):
             description = widget.toolTip()
             if description:
@@ -661,6 +757,71 @@ class AutoTrackForwardDialog(QDialog):
         self._update_workflow_visibility()
         self._parameters_changed()
 
+    def _populate_starrynite_stage_choices(
+        self,
+        profile,
+        *,
+        selected_stage: int | None,
+    ) -> None:
+        """Expose legacy staged parameters without trusting sparse annotation counts."""
+
+        from ..tracking.starrynite import legacy_stage_index
+
+        annotated_count = self._alive_cell_count_at_start()
+        inferred_count = profile.cell_count if annotated_count is None else annotated_count
+        inferred_stage = legacy_stage_index(profile.parameters, inferred_count)
+        staging = profile.parameters.normalized_settings.get("parameters.staging", ())
+        boundaries = tuple(staging) if isinstance(staging, tuple) else ()
+        self._stage_change_in_progress = True
+        try:
+            self._starrynite_stage_combo.clear()
+            auto_text = (
+                f"Automatic: stage {inferred_stage + 1} from "
+                f"{inferred_count} annotated cell"
+                f"{'s' if inferred_count != 1 else ''}"
+            )
+            self._starrynite_stage_combo.addItem(auto_text, None)
+            lower = 0
+            for stage in range(len(boundaries) + 1):
+                if not boundaries:
+                    range_text = "preset values"
+                elif stage == 0:
+                    range_text = f"up to {int(boundaries[0])} cells"
+                elif stage < len(boundaries):
+                    range_text = (
+                        f"{int(boundaries[stage - 1]) + 1}–"
+                        f"{int(boundaries[stage])} cells"
+                    )
+                else:
+                    lower = int(boundaries[-1]) + 1
+                    range_text = f"{lower}+ cells"
+                self._starrynite_stage_combo.addItem(
+                    f"Stage {stage + 1}: {range_text}",
+                    stage,
+                )
+            selected_index = self._starrynite_stage_combo.findData(selected_stage)
+            self._starrynite_stage_combo.setCurrentIndex(max(0, selected_index))
+        finally:
+            self._stage_change_in_progress = False
+
+    def _starrynite_stage_changed(self, *_args) -> None:
+        if self._stage_change_in_progress or self._starrynite_profile is None:
+            return
+        source = self._starrynite_parameter_path
+        if source is None:
+            return
+        selected = self._starrynite_stage_combo.currentData()
+        try:
+            self.load_starrynite_parameter_file(
+                str(source),
+                cell_count=self._alive_cell_count_at_start(),
+                stage_index=None if selected is None else int(selected),
+                neutral_classifier_path=self._starrynite_neutral_classifier_path,
+            )
+        except Exception as exc:
+            logger.exception("Could not apply the selected StarryNite stage")
+            self._show_failure("That developmental stage could not be applied.", exc)
+
     def _sync_tracking_workflow_from_components(self) -> None:
         from ..tracking.workflows import workflow_for_components
 
@@ -708,7 +869,9 @@ class AutoTrackForwardDialog(QDialog):
         uses_starrynite = self._workflow_combo.currentData() == "modern_starrynite"
         self._starrynite_preset_combo.setVisible(uses_starrynite)
         self._starrynite_preset_label.setVisible(uses_starrynite)
-        self._starrynite_report_button.setVisible(uses_starrynite)
+        self._starrynite_stage_combo.setVisible(uses_starrynite)
+        self._starrynite_stage_label.setVisible(uses_starrynite)
+        self._starrynite_stage_hint.setVisible(uses_starrynite)
         self._starrynite_file_label.setVisible(
             uses_starrynite and self._starrynite_profile is not None
         )
@@ -725,11 +888,28 @@ class AutoTrackForwardDialog(QDialog):
             self._starrynite_save_button,
             self._starrynite_neutral_button,
             self._starrynite_save_explanation,
+            self._starrynite_report_button,
         ):
             widget.setVisible(advanced and uses_starrynite)
+        for widget in (
+            self._roi_spin,
+            self._roi_label,
+            self._distance_spin,
+            self._distance_label,
+            self._gap_spin,
+            self._gap_label,
+            self._ambiguity_spin,
+            self._ambiguity_label,
+        ):
+            widget.setVisible(advanced)
         self._refresh_recent_parameter_button()
+        self._render_starrynite_file_summary()
 
     def _apply_initial_settings(self, settings: Mapping[str, Any]) -> None:
+        self._select_combo_value(
+            self._starrynite_preset_combo,
+            settings.get("bundled_starrynite_preset_id"),
+        )
         detector_preset = settings.get("starrynite_detector_settings", {})
         tracker_preset = settings.get("starrynite_tracker_settings", {})
         saved_detector = (
@@ -761,11 +941,17 @@ class AutoTrackForwardDialog(QDialog):
             or saved_tracker.get("STARRYNITE_PARAMETER_FILE")
         )
         neutral_path = settings.get("starrynite_neutral_classifier_file")
+        requested_stage = settings.get("starrynite_stage_index")
+        if requested_stage in ("", "auto"):
+            requested_stage = None
+        elif requested_stage is not None:
+            requested_stage = int(requested_stage)
         if parameter_path:
             try:
                 self.load_starrynite_parameter_file(
                     str(parameter_path),
                     cell_count=self._alive_cell_count_at_start(),
+                    stage_index=requested_stage,
                     neutral_classifier_path=(neutral_path or None),
                 )
             except Exception as exc:
@@ -817,8 +1003,12 @@ class AutoTrackForwardDialog(QDialog):
         # stage, hash, and model metadata from disk.
         self._select_combo_value(self._detector_combo, settings.get("detector_id"))
         self._select_combo_value(self._tracker_combo, settings.get("tracker_id"))
+        if "horizon_frames" in settings:
+            horizon = max(1, int(settings["horizon_frames"]))
+            self._end_spin.setValue(min(self._end_time, self._start_time + horizon))
+        elif "end_time" in settings:
+            self._end_spin.setValue(settings["end_time"])
         values = (
-            (self._end_spin, "end_time"),
             (self._channel_spin, "channel"),
             (self._radius_spin, "radius_um"),
             (self._threshold_spin, "threshold"),
@@ -836,6 +1026,8 @@ class AutoTrackForwardDialog(QDialog):
             self._median_check.setChecked(bool(settings["median_filter"]))
         if "show_overlay" in settings:
             self._overlay_check.setChecked(bool(settings["show_overlay"]))
+        if "advanced_visible" in settings:
+            self._advanced_toggle.setChecked(bool(settings["advanced_visible"]))
         branch_policy = str(settings.get("branch_policy", "stop"))
         branch_index = self._branch_policy_combo.findData(branch_policy)
         if branch_index >= 0:
@@ -939,6 +1131,7 @@ class AutoTrackForwardDialog(QDialog):
             "detector_id": self._detector_combo.currentData(),
             "tracker_id": self._tracker_combo.currentData(),
             "end_time": self._end_spin.value(),
+            "horizon_frames": self._end_spin.value() - self._start_time,
             "channel": self._channel_spin.value(),
             "radius_um": self._radius_spin.value(),
             "threshold": self._threshold_spin.value(),
@@ -947,9 +1140,11 @@ class AutoTrackForwardDialog(QDialog):
             "missing_frames": self._gap_spin.value(),
             "ambiguity_ratio": self._ambiguity_spin.value(),
             "branch_policy": str(self._branch_policy_combo.currentData()),
+            "starrynite_stage_index": self._starrynite_stage_combo.currentData(),
             "subpixel": self._subpixel_check.isChecked(),
             "median_filter": self._median_check.isChecked(),
             "show_overlay": self._overlay_check.isChecked(),
+            "advanced_visible": self._advanced_toggle.isChecked(),
             "starrynite_parameter_file": (
                 ""
                 if self._starrynite_parameter_path is None
@@ -970,7 +1165,12 @@ class AutoTrackForwardDialog(QDialog):
             "starrynite_tracker_settings": dict(self._starrynite_tracker_settings),
         }
 
-    def get_request(self, seed_anchor: tuple[int, int] | None = None):
+    def get_request(
+        self,
+        seed_anchor: tuple[int, int] | None = None,
+        *,
+        end_frame: int | None = None,
+    ):
         """Build the immutable selected-forward request represented by the form."""
 
         self._refresh_starrynite_compatibility()
@@ -1039,7 +1239,7 @@ class AutoTrackForwardDialog(QDialog):
             scope=TrackingScope(
                 kind="selected_forward",
                 start_frame=self._start_time,
-                end_frame=self._end_spin.value(),
+                end_frame=(self._end_spin.value() if end_frame is None else end_frame),
                 seed_anchors=(anchor,),
                 roi_radius_um=self._roi_spin.value(),
                 ambiguity_ratio=self._ambiguity_spin.value(),
@@ -1050,6 +1250,56 @@ class AutoTrackForwardDialog(QDialog):
     @staticmethod
     def _settings_store() -> QSettings:
         return QSettings("AceTree", "AceTreePy")
+
+    @classmethod
+    def persisted_native_settings(cls) -> dict[str, Any]:
+        """Return durable selected-cell choices without dataset-specific end times."""
+
+        try:
+            raw = cls._settings_store().value(cls._PERSISTED_SETTINGS_KEY, "")
+            if raw is None or not str(raw).strip():
+                return {}
+            decoded = json.loads(str(raw))
+            return dict(decoded) if isinstance(decoded, Mapping) else {}
+        except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
+            logger.debug("Could not restore selected-cell tracking settings", exc_info=True)
+            return {}
+
+    @classmethod
+    def persist_native_settings(cls, settings: Mapping[str, Any]) -> None:
+        """Persist every user-facing native tuning choice across app sessions."""
+
+        keys = (
+            "workflow_id",
+            "bundled_starrynite_preset_id",
+            "detector_id",
+            "tracker_id",
+            "horizon_frames",
+            "channel",
+            "radius_um",
+            "threshold",
+            "roi_radius_um",
+            "max_distance_um",
+            "missing_frames",
+            "ambiguity_ratio",
+            "branch_policy",
+            "starrynite_stage_index",
+            "subpixel",
+            "median_filter",
+            "show_overlay",
+            "advanced_visible",
+            "starrynite_parameter_file",
+        )
+        payload = {key: settings.get(key) for key in keys if key in settings}
+        try:
+            store = cls._settings_store()
+            store.setValue(
+                cls._PERSISTED_SETTINGS_KEY,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            )
+            store.sync()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            logger.debug("Could not persist selected-cell tracking settings", exc_info=True)
 
     def _starrynite_components_active(self) -> bool:
         return (
@@ -1063,17 +1313,31 @@ class AutoTrackForwardDialog(QDialog):
             return
         source = profile.parameters.source_path or self._starrynite_parameter_path
         source_name = "in-memory parameters" if source is None else source.name
+        advanced = self._advanced_toggle.isChecked()
         tracker_is_starrynite = (
             self._tracker_combo.currentData() == "acetree.starrynite_division"
         )
         detector_is_starrynite = (
             self._detector_combo.currentData() == "acetree.starrynite_detector"
         )
-        parts = [
-            f"Loaded {html.escape(source_name)} (stage {profile.stage_index + 1}, "
-            f"{profile.cell_count} cells). Tune the values above, then preview."
-        ]
-        if profile.model_path is not None:
+        if not advanced:
+            stage_source = (
+                "automatic from annotated cells"
+                if self._starrynite_stage_combo.currentData() is None
+                else "selected explicitly"
+            )
+            parts = [
+                f"<b>Preset ready:</b> {html.escape(source_name)} · "
+                f"stage {profile.stage_index + 1} ({stage_source}). "
+                "Tune cell size or threshold, test the next frame, then build the draft."
+            ]
+        else:
+            parts = [
+                f"Loaded {html.escape(source_name)} (stage {profile.stage_index + 1}, "
+                f"{profile.cell_count} annotated cells). Tune the values above, then "
+                "preview."
+            ]
+        if advanced and profile.model_path is not None:
             if tracker_is_starrynite:
                 parts.append(
                     "<b>Model compatibility:</b> The legacy tracking model is "
@@ -1084,12 +1348,6 @@ class AutoTrackForwardDialog(QDialog):
                 parts.append(
                     "<b>Model compatibility:</b> The loaded model is reporting-only; "
                     "the selected non-StarryNite tracker does not consume it."
-                )
-            else:
-                parts.append(
-                    "<b>Inactive preset:</b> The selected detector and tracker are not "
-                    "StarryNite, so this loaded model and its parameter overrides are "
-                    "not used by the draft."
                 )
         report = self._starrynite_compatibility_report
         neutral_path = self._starrynite_neutral_classifier_path
@@ -1114,17 +1372,17 @@ class AutoTrackForwardDialog(QDialog):
             parts.append(self._starrynite_classifier_note_html)
         if self._starrynite_session_note_html:
             parts.append(self._starrynite_session_note_html)
-        if not self._starrynite_components_active() and profile.model_path is None:
+        if not self._starrynite_components_active():
             parts.append(
                 "<b>Inactive preset:</b> The selected detector and tracker are not "
-                "StarryNite, so the loaded parameter overrides are not used by this "
-                "draft."
+                "StarryNite, so the loaded parameter/model overrides are not used by "
+                "this draft."
             )
         presentation_warnings = [
             *profile.warnings,
             *self._starrynite_calibration_warnings(profile),
         ]
-        if presentation_warnings:
+        if advanced and presentation_warnings:
             parts.append(
                 f"{len(presentation_warnings)} parameter/calibration note(s); hover "
                 "for details."
@@ -1293,6 +1551,7 @@ class AutoTrackForwardDialog(QDialog):
         path: str,
         *,
         cell_count: int | None = None,
+        stage_index: int | None = None,
         neutral_classifier_path: str | Path | None = None,
     ) -> None:
         """Apply a legacy parameter file as editable sparse-tracking defaults."""
@@ -1310,6 +1569,7 @@ class AutoTrackForwardDialog(QDialog):
                 if cell_count is None
                 else cell_count
             ),
+            stage_index=stage_index,
             fallback_radius_um=self._radius_spin.value(),
         )
         self._starrynite_session_note_html = ""
@@ -1319,6 +1579,10 @@ class AutoTrackForwardDialog(QDialog):
         source = profile.parameters.source_path or Path(path)
         self._starrynite_parameter_path = source.resolve(strict=False)
         self._starrynite_profile = profile
+        self._populate_starrynite_stage_choices(
+            profile,
+            selected_stage=stage_index,
+        )
         self._sync_bundled_preset_for_path(self._starrynite_parameter_path)
         restored_from_settings = neutral_classifier_path is None
         requested_neutral = (
@@ -1588,11 +1852,13 @@ class AutoTrackForwardDialog(QDialog):
             "distance": self._distance_spin.value(),
             "ambiguity": self._ambiguity_spin.value(),
             "branch_policy": self._branch_policy_combo.currentData(),
+            "stage_index": self._starrynite_stage_combo.currentData(),
             "subpixel": self._subpixel_check.isChecked(),
             "median": self._median_check.isChecked(),
         }
         self.load_starrynite_parameter_file(
             str(destination),
+            stage_index=session_choices["stage_index"],
             neutral_classifier_path=self._starrynite_neutral_classifier_path,
         )
         self._select_combo_value(self._detector_combo, session_choices["detector"])
@@ -1654,7 +1920,7 @@ class AutoTrackForwardDialog(QDialog):
             )
         return tuple(warnings)
 
-    def _run_preview(self) -> None:
+    def _run_preview(self, *, quick: bool = False) -> None:
         if self._analysis_thread is not None:
             # A worker can have delivered its result while its QThread is
             # still draining the final ``finished`` event.  Preserve a fast
@@ -1662,6 +1928,7 @@ class AutoTrackForwardDialog(QDialog):
             # completes instead of silently ignoring the click.
             if self._state != self.RUNNING:
                 self._rerun_after_thread = True
+                self._rerun_quick_after_thread = bool(quick)
                 self._preview_button.setEnabled(False)
             return
         if self.app is None or self._seed_anchor is None:
@@ -1671,7 +1938,9 @@ class AutoTrackForwardDialog(QDialog):
             )
             return
         try:
-            request = self.get_request()
+            request = self.get_request(
+                end_frame=(self._start_time + 1 if quick else None),
+            )
         except Exception as exc:
             self._show_failure("Check the tracking settings and try again.", exc)
             return
@@ -1706,11 +1975,19 @@ class AutoTrackForwardDialog(QDialog):
             return
 
         self._cancel_requested = False
+        self._analysis_is_quick = bool(quick)
         self._cancel_event = Event()
         self._pending_analysis_outcome = None
         self._run_started_at = perf_counter()
         self._set_running(True)
-        self._set_state(self.RUNNING, f"Analyzing {self._seed_label}…")
+        self._set_state(
+            self.RUNNING,
+            (
+                f"Testing the next frame for {self._seed_label}…"
+                if quick
+                else f"Analyzing {self._seed_label}…"
+            ),
+        )
         self._warning_label.hide()
         self._progress_bar.setRange(0, max(1, request.scope.end_frame - self._start_time))
         self._progress_bar.setValue(0)
@@ -1765,12 +2042,35 @@ class AutoTrackForwardDialog(QDialog):
         self._proposal_change_counter = int(change_counter)
         self._generated_settings = self.export_settings()
         self._generated_duration = max(0.0, perf_counter() - self._run_started_at)
+        self._last_preview_was_quick = self._analysis_is_quick
         self._populate_review()
         self._show_viewer_preview(stale=False)
-        self._preview_button.setText("&Update Preview")
 
         count = self._expanded_preview.proposed_count
         split_count = self._expanded_preview.split_count
+        if self._last_preview_was_quick:
+            self._preview_button.setText("&Build Preview")
+            self._accept_button.setEnabled(False)
+            self._accept_through_button.setEnabled(False)
+            if count:
+                self._set_state(
+                    self.CONFIGURING,
+                    "Next-frame test ready. Inspect the local result, tune if needed, "
+                    "then build the requested range before accepting.",
+                    success=True,
+                )
+            else:
+                self._set_state(
+                    self.CONFIGURING,
+                    "No next-frame continuation was found. Lower the threshold or "
+                    "open Advanced settings to widen the search.",
+                    warning=True,
+                )
+            self._play_button.setEnabled(bool(self._expanded_preview.spots))
+            self._update_review_navigation_buttons()
+            return
+
+        self._preview_button.setText("&Update Preview")
         if count <= 0:
             self._set_state(
                 self.EMPTY,
@@ -1812,6 +2112,7 @@ class AutoTrackForwardDialog(QDialog):
 
         self._accept_button.setText(f"&Accept {count} Position{'s' if count != 1 else ''}")
         self._play_button.setEnabled(bool(self._expanded_preview.spots))
+        self._update_review_navigation_buttons()
 
     def _on_analysis_failed(self, exc: object) -> None:
         self._pending_analysis_outcome = ("failed", exc)
@@ -1897,8 +2198,10 @@ class AutoTrackForwardDialog(QDialog):
         self._cancel_event = None
 
         if self._rerun_after_thread:
+            quick = self._rerun_quick_after_thread
             self._rerun_after_thread = False
-            QTimer.singleShot(0, self._run_preview)
+            self._rerun_quick_after_thread = False
+            QTimer.singleShot(0, lambda: self._run_preview(quick=quick))
 
     def _populate_review(self) -> None:
         assert self._proposal is not None
@@ -1930,10 +2233,39 @@ class AutoTrackForwardDialog(QDialog):
         request = self._proposal.request
         detector = request.detector.plugin_id
         tracker = request.tracker.plugin_id
+        try:
+            from ..tracking.workflows import workflow_for_components
+
+            method_name = workflow_for_components(
+                detector,
+                tracker,
+                forward=True,
+            ).display_name
+        except (KeyError, ValueError):
+            detector_name = self._registry.get_descriptor(detector).display_name
+            tracker_name = self._registry.get_descriptor(tracker).display_name
+            method_name = f"{detector_name} + {tracker_name}"
         channel = request.detector.settings.get("TARGET_CHANNEL", "?")
+        radius = request.detector.settings.get("RADIUS", "?")
+        threshold = request.detector.settings.get(
+            "INTENSITY_THRESHOLD",
+            request.detector.settings.get("THRESHOLD", "?"),
+        )
+        movement = request.tracker.settings.get("LINKING_MAX_DISTANCE", "?")
+        division = {
+            "stop": "stop at divisions",
+            "follow_best": "follow one daughter",
+            "follow_both": "follow both daughters",
+        }.get(request.scope.branch_policy, str(request.scope.branch_policy))
+        radius_text = _friendly_number(radius)
+        threshold_text = _friendly_number(threshold)
+        search_text = _friendly_number(request.scope.roi_radius_um)
+        movement_text = _friendly_number(movement)
         self._generated_html = (
             "<b>Generated with</b> "
-            f"{html.escape(detector)} + {html.escape(tracker)} · channel {channel} · "
+            f"{html.escape(method_name)} · channel {channel} · radius {radius_text} µm · "
+            f"threshold {threshold_text} · search {search_text} µm · "
+            f"movement {movement_text} µm · {html.escape(division)} · "
             f"t={request.scope.start_frame}–{request.scope.end_frame} · "
             f"document revision {self._proposal_revision} · {self._generated_duration:.2f} s"
         )
@@ -2012,18 +2344,40 @@ class AutoTrackForwardDialog(QDialog):
             self._warning_label.show()
         else:
             self._warning_label.setText(
-                f"Reached the requested end time, t={self._end_spin.value()}."
+                f"Reached the requested end time, t={request.scope.end_frame}."
             )
             self._warning_label.show()
+        can_offer_follow_both = (
+            outcome is not None
+            and getattr(outcome, "code", "completed") == "division"
+            and self._tracker_supports_splitting()
+            and self._branch_policy_combo.currentData() != "follow_both"
+            and not self._analysis_is_quick
+        )
+        self._follow_both_rerun_button.setVisible(can_offer_follow_both)
+        self._follow_both_rerun_button.setEnabled(can_offer_follow_both)
         if review_spots:
             self._table.selectRow(0)
         self._update_review_navigation_buttons()
+
+    def _rerun_following_both_daughters(self) -> None:
+        """Turn a reviewed division stop into an explicit two-daughter rerun."""
+
+        if not self._tracker_supports_splitting():
+            return
+        index = self._branch_policy_combo.findData("follow_both")
+        if index < 0:
+            return
+        self._branch_policy_combo.setCurrentIndex(index)
+        self._run_preview(quick=False)
 
     def _parameters_changed(self, *_args) -> None:
         if self._state == self.RUNNING or self._proposal is None:
             return
         self._stop_review_playback()
         self._accept_button.setEnabled(False)
+        self._accept_through_button.setEnabled(False)
+        self._follow_both_rerun_button.hide()
         self._set_state(
             self.OUTDATED,
             "Settings changed. The visible preview uses the previous settings; "
@@ -2042,6 +2396,22 @@ class AutoTrackForwardDialog(QDialog):
     def sync_document_revision(self) -> None:
         """Invalidate a visible draft after any edit, undo, or redo event."""
 
+        if self._state == self.APPLIED:
+            if self._accepting:
+                return
+            history = getattr(self.app, "edit_history", None)
+            command = getattr(history, "last_command", None)
+            if getattr(command, "result", None) is self._committed_proposal:
+                try:
+                    command.detection_mapping
+                except (AttributeError, RuntimeError):
+                    self._reset_after_applied_undo(
+                        "Accepted draft was undone from the main Edit history. "
+                        "Adjust settings or build a new preview."
+                    )
+                    return
+            self._refresh_post_acceptance_actions()
+            return
         if (
             self.app is None
             or self._proposal is None
@@ -2056,6 +2426,8 @@ class AutoTrackForwardDialog(QDialog):
             or current_counter != self._proposal_change_counter
         ):
             self._accept_button.setEnabled(False)
+            self._accept_through_button.setEnabled(False)
+            self._follow_both_rerun_button.hide()
             self._set_state(
                 self.STALE,
                 "The dataset changed while this draft was open. Update Preview before accepting.",
@@ -2071,13 +2443,38 @@ class AutoTrackForwardDialog(QDialog):
             or self._state != self.READY
         ):
             return
+        self._commit_proposal(self._proposal)
+
+    def _accept_through_selected_frame(self) -> None:
+        """Commit only the reviewed prefix ending at the selected detection."""
+
+        spot = self._selected_review_spot()
+        if spot is None or spot.kind != "detection" or self._proposal is None:
+            return
+        try:
+            from ..tracking import trim_selected_forward_result
+
+            proposal = trim_selected_forward_result(self._proposal, spot.frame)
+        except (TypeError, ValueError) as exc:
+            self._show_failure(
+                "That row cannot be used as a safe acceptance endpoint.",
+                exc,
+            )
+            return
+        self._commit_proposal(proposal)
+
+    def _commit_proposal(self, proposal: TrackingResult) -> None:
+        """Apply one full or reviewer-trimmed proposal without closing review."""
+
+        if self.app is None or self._state != self.READY:
+            return
         self.sync_document_revision()
         if self._state != self.READY:
             return
         self._accepting = True
         try:
             mapping = self.app.accept_tracking_proposal(
-                self._proposal,
+                proposal,
                 expected_revision=int(self._proposal_revision),
             )
         except Exception as exc:
@@ -2089,17 +2486,247 @@ class AutoTrackForwardDialog(QDialog):
             )
             return
 
-        count = self._expanded_preview.proposed_count
+        committed_preview = expand_tracking_preview(proposal)
+        count = committed_preview.proposed_count
+        self._proposal = proposal
+        self._expanded_preview = committed_preview
+        self._committed_proposal = proposal
         self._accepted = True
-        self._navigate_to_accepted_endpoint(mapping)
-        self.draftApplied.emit(count)
         self._accepting = False
-        self.accept()
+        self._navigate_to_accepted_endpoint(mapping, proposal=proposal)
+        self._clear_viewer_preview()
+        self._set_state(
+            self.APPLIED,
+            f"Accepted {count} position{'s' if count != 1 else ''} as one undoable "
+            "edit. Save Dataset to keep the change on disk.",
+            success=True,
+        )
+        self._set_post_acceptance_mode(True)
+        self.draftApplied.emit(count)
 
-    def _navigate_to_accepted_endpoint(self, mapping: Mapping[str, tuple[int, int]]) -> None:
-        if self.app is None or self._proposal is None:
+    def _set_post_acceptance_mode(self, applied: bool) -> None:
+        """Switch between draft controls and the explicit post-commit actions."""
+
+        self._settings_widget.setEnabled(not applied)
+        self._advanced_toggle.setEnabled(not applied)
+        self._advanced_widget.setEnabled(not applied)
+        for button in (
+            self._starrynite_file_button,
+            self._starrynite_recent_button,
+            self._starrynite_save_button,
+            self._starrynite_neutral_button,
+            self._starrynite_report_button,
+            self._preview_button,
+            self._quick_preview_button,
+            self._reset_button,
+        ):
+            button.setEnabled(not applied)
+        self._accept_button.setVisible(not applied)
+        self._accept_through_button.setVisible(not applied)
+        self._follow_both_rerun_button.hide()
+        self._discard_button.setText("&Close" if applied else "&Discard Draft")
+        self._discard_button.setToolTip(
+            "Close this workbench; the accepted edit remains in the dataset"
+            if applied
+            else "Close without changing the dataset"
+        )
+        self._undo_applied_button.setVisible(applied)
+        self._save_dataset_button.setVisible(applied)
+        if applied:
+            self._accept_button.setEnabled(False)
+            self._accept_through_button.setEnabled(False)
+            self._refresh_post_acceptance_actions()
+        else:
+            self._undo_applied_button.setEnabled(False)
+            self._save_dataset_button.setEnabled(False)
+            self._preview_button.setText("&Build Preview")
+            self._preview_button.setEnabled(True)
+            self._quick_preview_button.setEnabled(True)
+            self._reset_button.setEnabled(True)
+            self._starrynite_save_button.setEnabled(
+                self._starrynite_profile is not None
+            )
+            self._starrynite_neutral_button.setEnabled(
+                self._starrynite_profile is not None
+            )
+            self._starrynite_report_button.setEnabled(
+                self._starrynite_compatibility_report is not None
+            )
+
+    def _refresh_post_acceptance_actions(self) -> None:
+        if self._state != self.APPLIED or self.app is None:
             return
-        endpoint = _unique_new_terminal(self._proposal)
+        history = getattr(self.app, "edit_history", None)
+        unavailable = object()
+        command = getattr(history, "next_undo_command", unavailable)
+        if command is unavailable:
+            # Compatibility for small host integrations that implement only
+            # the older EditHistory surface.
+            command = getattr(history, "last_command", None)
+        command_is_applied = False
+        if getattr(command, "result", None) is self._committed_proposal:
+            try:
+                command.detection_mapping
+            except (AttributeError, RuntimeError):
+                command_is_applied = False
+            else:
+                command_is_applied = True
+        can_undo = bool(
+            self._committed_proposal is not None
+            and command_is_applied
+            and bool(getattr(history, "can_undo", False))
+        )
+        self._undo_applied_button.setEnabled(can_undo)
+        self._undo_applied_button.setToolTip(
+            "Undo this accepted tracking draft"
+            if can_undo
+            else "Undo is unavailable because another edit is now at the top of history"
+        )
+        self._save_dataset_button.setEnabled(callable(getattr(self.app, "save", None)))
+
+    def _undo_accepted_draft(self) -> None:
+        """Undo only when this dialog's proposal is still the latest edit."""
+
+        if self.app is None or self._state != self.APPLIED:
+            return
+        self._refresh_post_acceptance_actions()
+        if not self._undo_applied_button.isEnabled():
+            return
+        history = self.app.edit_history
+        runner = getattr(self.app, "_run_edit_action", None)
+        self._accepting = True
+        try:
+            command = (
+                runner(history.undo)
+                if callable(runner)
+                else history.undo()
+            )
+        except Exception as exc:
+            logger.exception("Could not undo the accepted selected-forward draft")
+            self._set_state(
+                self.APPLIED,
+                "The accepted draft could not be undone here. It remains in the "
+                "dataset; use the main Edit history if appropriate.",
+                warning=True,
+            )
+            self._warning_label.setText(
+                f"<b>Undo details</b><br>{html.escape(type(exc).__name__)}: "
+                f"{html.escape(str(exc) or 'Unknown error')}"
+            )
+            self._warning_label.show()
+            return
+        finally:
+            self._accepting = False
+        if getattr(command, "result", None) is not self._committed_proposal:
+            self._set_state(
+                self.APPLIED,
+                "Another edit is now ahead of this tracking draft. Use the main Undo "
+                "history so edits are reversed in order.",
+                warning=True,
+            )
+            return
+
+        self._reset_after_applied_undo(
+            "Accepted draft undone. Adjust settings or build a new preview."
+        )
+
+    def _reset_after_applied_undo(self, message: str) -> None:
+        """Return an open workbench to a truthful pre-preview state after Undo."""
+
+        self._accepted = False
+        self._committed_proposal = None
+        self._proposal = None
+        self._expanded_preview = None
+        self._proposal_revision = None
+        self._proposal_change_counter = None
+        self._generated_settings = None
+        self._generated_html = ""
+        self._last_preview_was_quick = False
+        self._stop_frame = None
+        self._table.setRowCount(0)
+        self._summary_label.setText("No preview has been built yet.")
+        self._generated_label.hide()
+        self._warning_label.hide()
+        self._stop_button.setEnabled(False)
+        self._clear_viewer_preview()
+        self._set_post_acceptance_mode(False)
+        self._accept_button.setText("&Accept Draft")
+        self._accept_button.setEnabled(False)
+        self._accept_through_button.setText("Accept through selected frame")
+        self._accept_through_button.setEnabled(False)
+        self._set_state(
+            self.CONFIGURING,
+            message,
+            success=True,
+        )
+
+    def _save_after_acceptance(self) -> None:
+        """Save the in-memory dataset through AceTree's ordinary save boundary."""
+
+        if self.app is None or self._state != self.APPLIED:
+            return
+        save = getattr(self.app, "save", None)
+        if not callable(save):
+            return
+        try:
+            path = save()
+        except Exception as exc:
+            logger.exception("Could not save after selected-forward acceptance")
+            self._set_state(
+                self.APPLIED,
+                "The accepted edit remains in memory, but the dataset could not be saved.",
+                warning=True,
+            )
+            self._warning_label.setText(
+                f"<b>Save details</b><br>{html.escape(type(exc).__name__)}: "
+                f"{html.escape(str(exc) or 'Unknown error')}"
+            )
+            self._warning_label.show()
+            return
+        if path is None:
+            self._set_state(
+                self.APPLIED,
+                "Save was cancelled or failed. The accepted edit remains in memory and "
+                "can still be saved from the main window.",
+                warning=True,
+            )
+            return
+        name = getattr(path, "name", str(path))
+        self._set_state(
+            self.APPLIED,
+            f"Dataset saved to {name}. You can close this workbench.",
+            success=True,
+        )
+
+    def _selected_review_spot(self) -> PreviewSpot | None:
+        if self._expanded_preview is None:
+            return None
+        row = self._table.currentRow()
+        if row < 0:
+            return None
+        item = self._table.item(row, 0)
+        if item is None:
+            return None
+        preview_id = str(item.data(Qt.UserRole))
+        return next(
+            (
+                spot
+                for spot in self._expanded_preview.review_spots
+                if spot.preview_id == preview_id
+            ),
+            None,
+        )
+
+    def _navigate_to_accepted_endpoint(
+        self,
+        mapping: Mapping[str, tuple[int, int]],
+        *,
+        proposal: TrackingResult | None = None,
+    ) -> None:
+        proposal = self._proposal if proposal is None else proposal
+        if self.app is None or proposal is None:
+            return
+        endpoint = _unique_new_terminal(proposal)
         if endpoint is None:
             return
         location = mapping.get(endpoint.detection_id)
@@ -2123,6 +2750,8 @@ class AutoTrackForwardDialog(QDialog):
 
     def _show_failure(self, message: str, exc: Exception) -> None:
         self._accept_button.setEnabled(False)
+        self._accept_through_button.setEnabled(False)
+        self._follow_both_rerun_button.hide()
         self._set_state(self.FAILED, message, warning=True)
         self._warning_label.setText(
             f"<b>Details</b><br>{html.escape(type(exc).__name__)}: "
@@ -2148,9 +2777,14 @@ class AutoTrackForwardDialog(QDialog):
             not running and self._starrynite_compatibility_report is not None
         )
         self._preview_button.setEnabled(not running)
+        self._quick_preview_button.setEnabled(not running)
         self._reset_button.setEnabled(not running)
         self._discard_button.setEnabled(not running)
         self._accept_button.setEnabled(False if running else self._accept_button.isEnabled())
+        self._accept_through_button.setEnabled(
+            False if running else self._accept_through_button.isEnabled()
+        )
+        self._follow_both_rerun_button.setEnabled(not running)
         self._table.setEnabled(not running)
         self._previous_button.setEnabled(False if running else self._table.currentRow() > 0)
         self._next_button.setEnabled(
@@ -2201,6 +2835,9 @@ class AutoTrackForwardDialog(QDialog):
         self._banner.setToolTip(message)
 
     def _restore_defaults(self) -> None:
+        from ..tracking.starrynite import DEFAULT_BUNDLED_PRESET_ID
+
+        had_proposal = self._proposal is not None
         self._starrynite_detector_settings = {}
         self._starrynite_tracker_settings = {}
         self._starrynite_parameter_path = None
@@ -2216,32 +2853,35 @@ class AutoTrackForwardDialog(QDialog):
         self._starrynite_file_label.setToolTip("")
         self._starrynite_file_label.setAccessibleDescription("")
         self._starrynite_file_label.hide()
-        self._refresh_recent_parameter_button()
-        self._end_spin.setValue(max(self._start_time + 1, self._end_time))
+        self._end_spin.setValue(
+            min(self._end_time, self._start_time + self._DEFAULT_FORWARD_HORIZON)
+        )
         self._channel_spin.setValue(1)
-        self._radius_spin.setValue(max(0.05, self._seed_radius_um))
-        self._threshold_spin.setValue(5.0)
-        self._roi_spin.setValue(max(12.0, self._seed_radius_um * 3.0))
-        self._distance_spin.setValue(max(8.0, self._seed_radius_um * 2.0))
-        self._gap_spin.setValue(1)
         self._ambiguity_spin.setValue(1.20)
-        stop_index = self._branch_policy_combo.findData("stop")
-        if stop_index >= 0:
-            self._branch_policy_combo.setCurrentIndex(stop_index)
-        detector_id = self._detector_combo.currentData()
-        default_subpixel = True
-        if detector_id is not None:
-            try:
-                default_subpixel = bool(
-                    self._registry.default_settings(str(detector_id)).get(
-                        "DO_SUBPIXEL_LOCALIZATION",
-                        True,
-                    )
-                )
-            except (KeyError, ValueError):
-                pass
-        self._subpixel_check.setChecked(default_subpixel)
         self._median_check.setChecked(False)
+        self._advanced_toggle.setChecked(False)
+        self._workflow_change_in_progress = True
+        try:
+            preset_index = self._starrynite_preset_combo.findData(
+                DEFAULT_BUNDLED_PRESET_ID
+            )
+            if preset_index >= 0:
+                self._starrynite_preset_combo.setCurrentIndex(preset_index)
+            workflow_index = self._workflow_combo.findData("modern_starrynite")
+            if workflow_index >= 0:
+                self._workflow_combo.setCurrentIndex(workflow_index)
+        finally:
+            self._workflow_change_in_progress = False
+        self._apply_tracking_workflow("modern_starrynite")
+        self._refresh_recent_parameter_button()
+        self._parameters_changed()
+        if not had_proposal:
+            self._warning_label.hide()
+            self._set_state(
+                self.CONFIGURING,
+                "Recommended defaults restored. Test the next frame or build a preview.",
+                success=True,
+            )
 
     def _set_advanced_visible(self, visible: bool) -> None:
         self._advanced_widget.setVisible(visible)
@@ -2380,6 +3020,31 @@ class AutoTrackForwardDialog(QDialog):
         self._previous_button.setEnabled(count > 0 and row > 0)
         self._next_button.setEnabled(count > 0 and 0 <= row < count - 1)
         self._play_button.setEnabled(count > 1 and self._state != self.RUNNING)
+        selected = self._selected_review_spot()
+        detection_frames = (
+            tuple(
+                spot.frame
+                for spot in self._expanded_preview.spots
+                if spot.kind == "detection"
+            )
+            if self._expanded_preview is not None
+            else ()
+        )
+        can_accept_prefix = bool(
+            self._state == self.READY
+            and not self._last_preview_was_quick
+            and selected is not None
+            and selected.kind == "detection"
+            and detection_frames
+            and selected.frame < max(detection_frames)
+        )
+        self._accept_through_button.setEnabled(can_accept_prefix)
+        if can_accept_prefix and selected is not None:
+            self._accept_through_button.setText(
+                f"Accept through t={selected.frame}"
+            )
+        else:
+            self._accept_through_button.setText("Accept through selected frame")
 
     def _toggle_review_playback(self, playing: bool) -> None:
         if playing and self._table.rowCount() > 1:
@@ -2511,6 +3176,7 @@ class AutoTrackForwardDialog(QDialog):
             "missing_frames": "missing frames",
             "ambiguity_ratio": "caution",
             "branch_policy": "division behavior",
+            "starrynite_stage_index": "developmental stage",
             "subpixel": "subpixel refinement",
             "median_filter": "median filter",
             "starrynite_parameter_file": "StarryNite parameter file",
@@ -2646,6 +3312,13 @@ def _first_warning_frame(warnings: tuple[str, ...]) -> int | None:
     return None
 
 
+def _friendly_number(value: object) -> str:
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return html.escape(str(value))
+
+
 def _unique_new_terminal(proposal):
     """Return one unambiguous new graph endpoint, or ``None`` for branches."""
 
@@ -2688,7 +3361,10 @@ def _friendly_warning(warning: str) -> str:
 def _warning_guidance(warnings: tuple[str, ...]) -> str:
     joined = " ".join(warnings).lower()
     if "division" in joined:
-        return "Accept the continuation, then use Manual Track for each daughter."
+        return (
+            "Use Rerun Following Both Daughters when offered, or accept the reliable "
+            "prefix and continue each daughter manually."
+        )
     if "existing curated" in joined:
         return "The existing annotation was protected; inspect that frame before continuing."
     if "similar assignment" in joined:
@@ -2730,7 +3406,10 @@ def _friendly_outcome(outcome: object) -> str:
 def _outcome_guidance(outcome: object) -> str:
     code = str(getattr(outcome, "code", "stopped"))
     if code == "division":
-        return "Accept the reliable prefix, then use Manual Track for each daughter."
+        return (
+            "Use Rerun Following Both Daughters when offered, or accept the reliable "
+            "prefix and continue each daughter manually."
+        )
     if code == "conflict":
         return "Inspect the curated annotation; it will not be changed by this draft."
     if code == "ambiguity":

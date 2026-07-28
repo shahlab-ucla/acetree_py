@@ -177,6 +177,12 @@ class EditHistory:
         return len(self._redo_stack) > 0
 
     @property
+    def next_undo_command(self) -> EditCommand | None:
+        """Command currently at the Undo boundary, or ``None`` when empty."""
+
+        return self._undo_stack[-1].command if self._undo_stack else None
+
+    @property
     def undo_description(self) -> str:
         """Description of the next command to undo, or empty string."""
         if self._undo_stack:

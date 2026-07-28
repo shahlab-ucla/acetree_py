@@ -2,7 +2,7 @@
 
 The normative cross-module naming and edit invariants are collected in [Naming and Manual-Curation Workflows](naming_workflows.md). Detector/tracker contracts, plugin rules, workflows, and the StarryNite migration plan are defined in the [Tracking Pipeline Specification](TRACKING_PIPELINE_SPEC.md).
 
-**Version 0.1.0** | Python reimplementation of AceTree for *C. elegans* embryogenesis
+**Version 0.2.0** | Python reimplementation of AceTree for *C. elegans* embryogenesis
 
 ---
 
@@ -13,7 +13,7 @@ AceTree-Py is a from-scratch Python rewrite of the Java AceTree application, whi
 ### Package Structure
 
 ```
-acetree_py/                    # Root package (__version__ = "0.1.0")
+acetree_py/                    # Root package (__version__ = "0.2.0")
   __main__.py                  # CLI entry point (typer)
   core/                        # Data model — no GUI dependencies
     nucleus.py                 # Nucleus dataclass (central record)
@@ -54,7 +54,7 @@ acetree_py/                    # Root package (__version__ = "0.1.0")
   gui/                         # napari GUI — all Qt/napari deps isolated here
     app.py                     # AceTreeApp (main application)
     viewer_integration.py      # ViewerIntegration (nucleus overlay)
-    auto_tracking_dialog.py    # Modeless Auto Forward configure/review workbench
+    auto_tracking_dialog.py    # Modeless selected-cell configure/review workbench
     global_tracking_dialog.py  # Modeless whole-dataset draft workbench
     tracking_worker.py         # Cancellable Qt-thread analysis adapter
     tracking_preview.py        # Proposal/gap/diagnostic expansion for review
@@ -451,7 +451,7 @@ Draws nucleus circles as a napari Shapes layer (polygon approximation with 32 ve
 
 **Division line overlay:** When the selected cell has just divided (current_time == cell.end_time + 1), a yellow line connects the two daughter cell positions. Disappears on any navigation or selection change.
 
-**Ghost trail layer:** When enabled (via the Trails button in Edit Tools), a semi-transparent trail of the selected cell's past positions is drawn as shapes connected by lines. Trail length is configurable (default 10 timepoints). Works in both 2D (shapes) and 3D (points).
+**Ghost trail layer:** When enabled (via the Trails button in **Edit & Tracking Tools**), a semi-transparent trail of the selected cell's past positions is drawn as shapes connected by lines. Trail length is configurable (default 10 timepoints). Works in both 2D (shapes) and 3D (points).
 
 **Hover tooltip:** A floating tooltip appears when hovering over a nucleus, showing the cell name and basic info. Uses a delay (`_hover_delay_ms = 300ms`) to avoid flicker.
 
@@ -522,8 +522,9 @@ Pure computational layout engine (no Qt dependency):
 2. Navigate to later timepoints, **right-click** to place.
 3. Mode stays active until Esc or re-click Manual Track.
 
-**Auto Forward** — A semiautomated, selected-cell proposal:
-1. Select a live nucleus and choose **Edit Tools > Auto Forward**.
+**Track Selected Cell Forward** — A semiautomated, selected-cell proposal:
+1. Select a live nucleus and choose **Tracking > Track Selected Cell Forward…**
+   or the same action in the scrollable **Edit & Tracking Tools** dock.
 2. The modeless workbench builds a `selected_forward` request using DoG or LoG, Simple LAP, a moving local ROI, and an ambiguity threshold. Common settings, advanced filtering, and session-preserved refinements remain editable.
 3. Analysis reports per-frame progress and supports cancellation. The pipeline follows only the seeded continuation and stops rather than guessing at ambiguity or a likely division.
 4. `tracking_preview.py` expands gap links into the same interpolated positions acceptance will create and retains diagnostic candidates/search regions separately. `ViewerIntegration` renders them in dedicated read-only napari layers with redundant color and circle/diamond/cross/path/ring symbols that never share callbacks or selection with curated `Nuclei`.
@@ -585,7 +586,7 @@ Multiple 3D windows can be open simultaneously. Each is tracked in `app._3d_wind
 
 `AceTreeApp.from_dialog()` shows the five-page `DatasetCreationDialog`. Step 4 defaults to **Manual annotation** or can request a global draft from any installed detector/tracker pair for pre-commit review after the viewer opens. The division option is capability-driven: it stays disabled for Simple LAP and follows the advertised default for StarryNite's division-aware tracker. Image-layout changes update the valid channel range immediately and block invalid automated configurations. The non-interactive `create` path also defaults to manual and accepts `--tracking dog-lap` or `--tracking log-lap` plus detector/linker settings.
 
-Both the global workbench and selected-cell Auto Forward workbench share one recent-StarryNite-parameter setting. They map compatible legacy values into component settings, preserve source text and unsupported statements when writing tuned copies, and keep parameter/model paths plus hashes in request provenance. The global workbench can explicitly select either native geometry scoring or the registered legacy-exact whole-movie tracker. Exact selection additionally requires a source-bound neutral classifier export and distribution MAT file; it never deserializes or executes a MATLAB classifier object and never falls back to native behavior.
+Both the global workbench and selected-cell forward workbench share one recent-StarryNite-parameter setting. They map compatible legacy values into component settings, preserve source text and unsupported statements when writing tuned copies, and keep parameter/model paths plus hashes in request provenance. The global workbench can explicitly select either native geometry scoring or the registered legacy-exact whole-movie tracker. Exact selection additionally requires a source-bound neutral classifier export and distribution MAT file; it never deserializes or executes a MATLAB classifier object and never falls back to native behavior.
 
 ### 6.11 Tracking Pipeline Integration
 
@@ -683,7 +684,7 @@ run it with `pytest tests/`. Live MATLAB-oracle status is reported separately in
 # pyproject.toml
 [project]
 name = "acetree-py"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24", "scipy>=1.10", "tifffile>=2023.1",
