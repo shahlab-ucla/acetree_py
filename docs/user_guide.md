@@ -376,6 +376,11 @@ The default imaging preset is bundled and needs no conversion. Under **Show adva
 
 Selected-cell tracking always uses the native StarryNite division tracker; the global
 legacy-exact backend is intentionally unavailable for a selected-cell scope.
+Its moving **Search ROI** is distinct from the fixed, one-based camera ROI in a
+legacy parameter file. The fixed ROI and distribution-backed exact detector are
+reserved for whole-movie replay; sparse tracking keeps the preset's staged native
+detector values without activating those global exact inputs.
+
 **Validate classifier export (report only)…** can confirm that a numeric export
 belongs to the referenced MAT model, but does not execute that classifier or
 change the sparse draft. Choose **Stop and review likely divisions**, **Follow
@@ -491,7 +496,7 @@ corpus and an older MATLAB release that reconstructs those objects. Noisy,
 representative whole-embryo performance and import/export conformance remain
 real-world release-validation work.
 
-As of 2026-07-29, the complete non-live repository suite passed with `1347
+As of 2026-07-29, the complete non-live repository suite passed with `1351
 passed, 71 skipped`. The latest opt-in MATLAB-oracle suite, run on 2026-07-16,
 passed with `19 passed, 1 skipped` in 11 minutes 37 seconds. The expected skip is
 the historical-object export boundary above. See [StarryNite Differential Testing](STARRYNITE_DIFFERENTIAL_TESTING.md#running-locally)

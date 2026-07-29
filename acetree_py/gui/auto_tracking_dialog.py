@@ -1202,7 +1202,11 @@ class AutoTrackForwardDialog(QDialog):
         detector_settings = registry.default_settings(detector_id)
         tracker_settings = registry.default_settings(tracker_id)
         if detector_id == "acetree.starrynite_detector":
-            detector_settings.update(self._starrynite_detector_settings)
+            from ..tracking.starrynite import native_sparse_detector_settings
+
+            detector_settings.update(
+                native_sparse_detector_settings(self._starrynite_detector_settings)
+            )
         if tracker_id == "acetree.starrynite_division":
             tracker_settings.update(self._starrynite_tracker_settings)
         detector_common = {
@@ -1349,6 +1353,13 @@ class AutoTrackForwardDialog(QDialog):
                     "<b>Model compatibility:</b> The loaded model is reporting-only; "
                     "the selected non-StarryNite tracker does not consume it."
                 )
+        if advanced and detector_is_starrynite:
+            parts.append(
+                "<b>Sparse detector scope:</b> The fixed legacy camera ROI and "
+                "distribution-backed exact detector are reserved for whole-movie "
+                "replay. This draft uses the moving Search ROI around the selected "
+                "lineage with the preset's staged native detector values."
+            )
         report = self._starrynite_compatibility_report
         neutral_path = self._starrynite_neutral_classifier_path
         if (

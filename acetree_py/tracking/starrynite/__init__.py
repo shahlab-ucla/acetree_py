@@ -203,6 +203,7 @@ from .presets import (
     build_tuning_save_plan,
     legacy_stage_index,
     load_tuning_profile,
+    native_sparse_detector_settings,
     select_stage_value,
     tuning_profile_from_parameters,
 )
@@ -407,6 +408,7 @@ __all__ = [
     "load_neutral_classifier",
     "load_parameter_file",
     "load_tuning_profile",
+    "native_sparse_detector_settings",
     "load_legacy_disk_distributions",
     "matlab_round",
     "legacy_adapt_cell_diameter",

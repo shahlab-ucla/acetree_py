@@ -672,7 +672,7 @@ acetree-py info <config.xml> -c ABala           # Query cell details
 The 81 test modules in `tests/` cover the data model, I/O (including
 interleaved multichannel TIFFs), naming, editing, GUI widgets, color rules,
 CLI, analysis (including pixel measurement), tracking, and integration. The
-2026-07-29 non-live verification completed with `1347 passed` and `71 skipped`;
+2026-07-29 non-live verification completed with `1351 passed` and `71 skipped`;
 run it with `pytest tests/`. Live MATLAB-oracle status is reported separately in
 [StarryNite Differential Testing](STARRYNITE_DIFFERENTIAL_TESTING.md).
 

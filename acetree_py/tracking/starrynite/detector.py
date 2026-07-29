@@ -1275,7 +1275,7 @@ class StarryNiteDetector:
         else:
             self._reset_exact_movie_state()
 
-        if parameter_path is not None:
+        if exact_requested and parameter_path is not None:
             from .parameter_view import (
                 build_legacy_region_table,
                 resolve_legacy_parameter,

@@ -521,7 +521,7 @@ redistribution licensing is reviewed. Until then, local/nightly MATLAB runs and
 fully reproducible manifests are the authoritative oracle.
 
 The latest non-live repository verification, on 2026-07-29, completed with
-`1347 passed` and `71 skipped`. The latest complete local MATLAB verification,
+`1351 passed` and `71 skipped`. The latest complete local MATLAB verification,
 on 2026-07-16, used the pinned upstream revision and MATLAB R2025a; its opt-in
 oracle gate completed with `19 passed` and `1 skipped` in 11 minutes 37 seconds.
 The skipped case is the expected historical-object export boundary that

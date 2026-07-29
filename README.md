@@ -130,7 +130,7 @@ See the [real-world StarryNite checklist](docs/user_guide.md#real-world-starryni
 for the complete UI sequence, prerequisites, failure guidance, current
 boundaries, and dated validation status. The opt-in MATLAB commands and parity
 method are in [StarryNite Differential Testing](docs/STARRYNITE_DIFFERENTIAL_TESTING.md#running-locally).
-The 2026-07-29 non-live release gate completed with `1347 passed, 71 skipped`.
+The 2026-07-29 non-live release gate completed with `1351 passed, 71 skipped`.
 The latest complete MATLAB-oracle gate, run with R2025a on 2026-07-16, completed
 with `19 passed, 1 skipped`; the one expected skip is the historical four-model
 export boundary.

@@ -237,6 +237,12 @@ def test_global_wizard_builds_source_bound_exact_request_and_hides_it_from_auto(
     request = dialog.get_request()
     assert request.detector.plugin_id == "acetree.starrynite_detector"
     assert request.tracker.plugin_id == "acetree.starrynite_legacy_exact"
+    assert request.detector.settings["STARRYNITE_DISTRIBUTION_FILE"] == (
+        profile.detector_settings["STARRYNITE_DISTRIBUTION_FILE"]
+    )
+    assert request.detector.settings["STARRYNITE_DISTRIBUTION_SOURCE_SHA256"] == (
+        profile.detector_settings["STARRYNITE_DISTRIBUTION_SOURCE_SHA256"]
+    )
     assert (
         request.tracker.settings["STARRYNITE_COMPATIBILITY_MODE"]
         == LEGACY_EXACT_REFINEMENT_BACKEND

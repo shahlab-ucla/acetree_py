@@ -10,6 +10,7 @@ from acetree_py.tracking.starrynite import (
     bundled_tracking_models,
     legacy_model_export_script,
     load_tuning_profile,
+    native_sparse_detector_settings,
     sha256_file,
     validate_bundled_assets,
 )
@@ -49,6 +50,13 @@ def test_all_upstream_newmatlab_presets_are_install_ready() -> None:
             profile.detector_settings["STARRYNITE_DISTRIBUTION_FILE"]
         )
         assert distribution.is_file()
+        sparse_settings = native_sparse_detector_settings(profile.detector_settings)
+        assert sparse_settings["STARRYNITE_DISTRIBUTION_FILE"] == ""
+        assert sparse_settings["STARRYNITE_DISTRIBUTION_SOURCE_SHA256"] == ""
+        assert sparse_settings["STARRYNITE_PARAMETER_FILE"] == str(
+            preset.parameter_file.resolve()
+        )
+        assert sparse_settings["STARRYNITE_PARAMETER_SHA256"]
 
         runtime_model = bundled_classifier_for_profile(profile)
         assert runtime_model is not None and runtime_model.suffix == ".atpy-model"

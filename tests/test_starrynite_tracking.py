@@ -26,6 +26,7 @@ from acetree_py.tracking.starrynite.detector import (
     _xy_principal_variances,
     legacy_dog_filter_parameters,
 )
+from acetree_py.tracking.starrynite.models import sha256_file
 from acetree_py.tracking.starrynite.tracker import StarryNiteDivisionTracker
 from acetree_py.tracking.starrynite.oracle.synthetic import (
     default_synthetic_suite,
@@ -141,6 +142,48 @@ def test_starrynite_detector_finds_an_anisotropic_gaussian_blob():
     assert abs(found.y_um - 7.5) < 0.6
     assert abs(found.z_um - 4.0) < 0.8
     assert found.features["SUPPORT_VOXELS"] > 0
+
+
+def test_native_detector_uses_materialized_threshold_with_parameter_provenance(
+    tmp_path,
+):
+    parameter_file = tmp_path / "high-source-threshold.m"
+    parameter_file.write_text(
+        "parameters.sigma=1;\n"
+        "parameters.intensitythreshold=1000;\n",
+        encoding="utf-8",
+    )
+    parameter_digest = sha256_file(parameter_file)
+    z, y, x = np.indices((9, 31, 31), dtype=float)
+    image = 100.0 * np.exp(
+        -(
+            ((z - 4.0) / 1.0) ** 2
+            + ((y - 15.0) / 2.0) ** 2
+            + ((x - 16.0) / 2.0) ** 2
+        )
+        / 2.0
+    )
+
+    detections = StarryNiteDetector().detect(
+        image.astype(np.float32),
+        3,
+        Calibration(0.5, 1.0),
+        {
+            "RADIUS": 2.0,
+            "SIGMA": 1.0,
+            "INTENSITY_THRESHOLD": 1.0,
+            "BOUNDARY_PERCENT": 0.3,
+            "STARRYNITE_PARAMETER_FILE": str(parameter_file),
+            "STARRYNITE_PARAMETER_SHA256": parameter_digest,
+        },
+        offset_zyx=(0, 2, 3),
+    )
+
+    assert len(detections) == 1
+    assert detections[0].features["STARRYNITE_PARAMETER_FILE"] == str(
+        parameter_file.resolve()
+    )
+    assert detections[0].features["STARRYNITE_PARAMETER_SHA256"] == parameter_digest
 
 
 def test_legacy_dog_kernel_uses_cell_diameter_and_absolute_threshold():

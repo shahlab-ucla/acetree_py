@@ -503,6 +503,40 @@ def test_selected_forward_uses_existing_anchor_and_local_roi():
     assert record[1:] == [[], []]
 
 
+@pytest.mark.parametrize("branch_policy", ["stop", "follow_both"])
+def test_selected_forward_rejects_movie_global_exact_starrynite_detector(
+    branch_policy,
+):
+    movie = np.zeros((2, 7, 25, 25), dtype=np.float32)
+    record = [
+        [Nucleus(index=1, x=10, y=10, z=4.0, size=4, status=1)],
+        [],
+    ]
+    request = TrackingRequest(
+        detector=ComponentSpec(
+            "acetree.starrynite_detector",
+            {"STARRYNITE_DISTRIBUTION_FILE": "legacy-distribution.mat"},
+        ),
+        tracker=ComponentSpec("acetree.starrynite_division", {}),
+        scope=TrackingScope(
+            "selected_forward",
+            1,
+            2,
+            seed_anchors=((1, 1),),
+            roi_radius_um=4.0,
+            branch_policy=branch_policy,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="movie-global exact StarryNite detector"):
+        _pipeline().run(
+            NumpyProvider(movie),
+            Calibration(1.0, 1.0),
+            request,
+            nuclei_record=record,
+        )
+
+
 def test_selected_forward_reports_ambiguity_with_review_candidates(monkeypatch):
     candidates = (
         _review_candidate("left", x_um=7.0),

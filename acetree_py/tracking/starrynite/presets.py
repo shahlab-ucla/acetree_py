@@ -24,6 +24,29 @@ class StarryNitePresetError(ValueError):
     """Raised when a recognized legacy value cannot be translated safely."""
 
 
+_EXACT_DETECTOR_BINDING_KEYS = (
+    "STARRYNITE_DISTRIBUTION_FILE",
+    "STARRYNITE_DISTRIBUTION_SOURCE_SHA256",
+)
+
+
+def native_sparse_detector_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Materialize StarryNite settings for a moving selected-cell ROI.
+
+    A distribution-file binding is the detector's explicit switch into the
+    sequential, movie-global exact tail.  Sparse forward tracking starts at an
+    arbitrary frame and evaluates moving local crops, so that tail and its fixed
+    one-based legacy ROI are not valid there.  Parameter identity and staged
+    native values remain intact; only the exact detector source binding is
+    neutralized.
+    """
+
+    materialized = dict(settings)
+    for key in _EXACT_DETECTOR_BINDING_KEYS:
+        materialized[key] = ""
+    return materialized
+
+
 @dataclass(frozen=True, slots=True)
 class StarryNiteTuningProfile:
     """Native starting settings and provenance derived from one parameter file."""

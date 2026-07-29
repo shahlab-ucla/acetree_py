@@ -33,7 +33,12 @@ from acetree_py.tracking.api import (
     TrackingResult,
     TrackingScope,
 )
-from acetree_py.tracking.registry import ComponentDescriptor, TrackingRegistry
+from acetree_py.tracking.pipeline import TrackingPipeline
+from acetree_py.tracking.registry import (
+    ComponentDescriptor,
+    TrackingRegistry,
+    build_default_registry,
+)
 from acetree_py.tracking.starrynite import read_parameter_file
 
 
@@ -748,6 +753,68 @@ def test_selected_forward_defaults_to_short_basic_tuning_and_next_frame_test(qtb
     assert "Modern StarryNite" in dialog._generated_label.text()
     assert "acetree.starrynite_detector" not in dialog._generated_label.text()
     dialog.reject()
+
+
+def test_selected_forward_default_starrynite_runs_native_moving_roi(qtbot):
+    app = _TrackingDialogApp()
+    app.manager.nuclei_record[0][0] = Nucleus(
+        index=1,
+        x=10,
+        y=10,
+        z=4.0,
+        size=4,
+        status=1,
+    )
+    dialog = AutoTrackForwardDialog(1, 2, app=app, seed_anchor=(1, 1))
+    qtbot.addWidget(dialog)
+    dialog._roi_spin.setValue(4.0)
+
+    source_settings = dict(dialog._starrynite_detector_settings)
+    assert source_settings["STARRYNITE_DISTRIBUTION_FILE"]
+    request = dialog.get_request()
+
+    assert request.detector.settings["STARRYNITE_DISTRIBUTION_FILE"] == ""
+    assert request.detector.settings["STARRYNITE_DISTRIBUTION_SOURCE_SHA256"] == ""
+    assert request.detector.settings["STARRYNITE_PARAMETER_FILE"] == source_settings[
+        "STARRYNITE_PARAMETER_FILE"
+    ]
+    assert request.detector.settings["STARRYNITE_PARAMETER_SHA256"] == source_settings[
+        "STARRYNITE_PARAMETER_SHA256"
+    ]
+    assert request.tracker.settings["STARRYNITE_COMPATIBILITY_MODE"] == "native_fast"
+
+    movie = np.zeros((2, 7, 25, 25), dtype=np.float32)
+    result = TrackingPipeline(
+        build_default_registry(discover_plugins=False)
+    ).run(
+        NumpyProvider(movie),
+        Calibration(1.0, 1.0),
+        request,
+        nuclei_record=app.manager.nuclei_record,
+    )
+
+    assert result.outcome is not None
+    assert result.outcome.code == "lost"
+    assert app.manager.nuclei_record[1] == []
+
+    restored = AutoTrackForwardDialog(
+        1,
+        2,
+        app=app,
+        seed_anchor=(1, 1),
+        initial_settings=dialog.export_settings(),
+    )
+    qtbot.addWidget(restored)
+    restored_request = restored.get_request()
+    assert restored_request.detector.settings["STARRYNITE_DISTRIBUTION_FILE"] == ""
+    assert (
+        restored_request.detector.settings[
+            "STARRYNITE_DISTRIBUTION_SOURCE_SHA256"
+        ]
+        == ""
+    )
+    restored._advanced_toggle.setChecked(True)
+    assert "fixed legacy camera ROI" in restored._starrynite_file_label.text()
 
 
 def test_sparse_selected_forward_stage_can_be_overridden_explicitly(

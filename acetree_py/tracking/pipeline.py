@@ -290,6 +290,18 @@ class TrackingPipeline:
             raise ValueError("selected_forward scope must start at the seed time")
         if request.scope.end_frame <= seed_time:
             raise ValueError("The ending time must be after the selected nucleus")
+        if (
+            request.detector.plugin_id == "acetree.starrynite_detector"
+            and str(
+                request.detector.settings.get("STARRYNITE_DISTRIBUTION_FILE", "")
+            ).strip()
+        ):
+            raise ValueError(
+                "Selected-forward tracking cannot run the movie-global exact "
+                "StarryNite detector. Use native sparse StarryNite settings without "
+                "STARRYNITE_DISTRIBUTION_FILE, or run Legacy StarryNite exact replay "
+                "over the full movie."
+            )
 
         detector = self.registry.create_detector(request.detector.plugin_id)
         tracker = self.registry.create_tracker(request.tracker.plugin_id)
