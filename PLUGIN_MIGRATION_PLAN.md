@@ -1,21 +1,21 @@
 # AceTree-Py: napari Plugin Migration Plan
 
 **Status:** Planning
-**Branch:** `plugin-variant` (off `main`)
+**Branch:** `plugin-variant` (off `tracking-integration`)
 **Goal:** Repackage AceTree-Py as a napari npe2 plugin so it can be activated from within an existing napari session, while preserving the standalone CLI entry point and all current functionality.
 
 ---
 
 ## 1. Branch Strategy
 
-Create a long-lived branch `plugin-variant` off of `main`. All plugin migration work happens on this branch. `main` continues as the standalone application.
+Create a long-lived branch `plugin-variant` off of `tracking-integration`. All plugin migration work happens on this branch. The tracking branch continues as the standalone application until it is merged into the repository's default branch.
 
 ```
-main (standalone app — acetree-py gui config.xml)
+tracking-integration (standalone app — acetree-py gui config.xml)
   └── plugin-variant (napari plugin — activated from within napari)
 ```
 
-Periodic merges from `main → plugin-variant` keep the plugin branch current with bug fixes and features. The two branches share all non-GUI code identically; only `gui/app.py`, `pyproject.toml`, and a few new files diverge.
+Periodic merges from `tracking-integration → plugin-variant` keep the plugin branch current with bug fixes and features. After tracking integration reaches the default branch, use that branch as the upstream. The two branches share all non-GUI code identically; only `gui/app.py`, `pyproject.toml`, and a few new files diverge.
 
 ---
 
@@ -359,7 +359,7 @@ Both entry points coexist. `pip install -e ".[gui]"` makes AceTree-Py available 
 
 ## 6. Behavioral Differences: Standalone vs Plugin
 
-| Aspect | Standalone (`main`) | Plugin (`plugin-variant`) |
+| Aspect | Standalone (`tracking-integration`) | Plugin (`plugin-variant`) |
 |--------|-------------------|--------------------------|
 | **Launch** | `acetree-py gui config.xml` | napari Plugins menu or File > Open AceTree Config |
 | **Viewer ownership** | AceTreeApp creates `napari.Viewer` | AceTreeApp receives existing `Viewer` |
@@ -404,7 +404,7 @@ Additional plugin-specific tests:
 
 Execute steps in this order to maintain a working codebase at each stage:
 
-1. **Create branch** `plugin-variant` off `main`
+1. **Create branch** `plugin-variant` off `tracking-integration`
 2. **Step 3** — Refactor `AceTreeApp.__init__` (backward-compatible, no breakage)
 3. **Step 4** — Replace `_qt_window` dialog parents (no breakage)
 4. **Step 5** — Delete `_add_panel_menu_actions()` (standalone Window menu entries removed; this is the only intentional behavior change in standalone mode — dock widgets will no longer appear in the Window menu, but they were only recently added and are not critical in standalone mode)

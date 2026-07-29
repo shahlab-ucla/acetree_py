@@ -6,21 +6,56 @@ Built on [napari](https://napari.org) with full undo/redo, topology-based cell n
 
 ## Installation
 
-Requires **Python 3.10+**.
+Requires **Python 3.10+** and Git. The tracking-enabled build currently lives
+on the `tracking-integration` branch; the repository's default branch does not
+yet contain these tools.
+
+### Source install (recommended for testing)
 
 ```bash
-# Clone the repository
-git clone https://github.com/shahlab-ucla/acetree_py.git
+# Select the tracking branch explicitly (a plain clone currently selects main).
+git clone --branch tracking-integration --single-branch https://github.com/shahlab-ucla/acetree_py.git
 cd acetree_py
+```
 
-# Core (CLI only, no GUI):
-pip install -e .
+The branch-aware installers verify the checkout before installing the
+recommended GUI dependencies:
 
-# With napari GUI (recommended):
-pip install -e ".[gui]"
+```powershell
+# Windows PowerShell
+.\scripts\install_tracking_integration.ps1
+```
 
-# Everything (GUI + dev tools):
-pip install -e ".[all]"
+```bash
+# macOS or Linux
+sh scripts/install_tracking_integration.sh
+```
+
+Pass `-Variant core` / `--variant core` for the CLI-only install, or
+`-Variant all` / `--variant all` to include development tools. The equivalent
+manual commands are below. If the Python executable is not named `python`, pass
+it explicitly (for example, `-Python py` or `--python /path/to/python3`).
+
+```bash
+# Core (CLI only, no GUI)
+python -m pip install -e .
+
+# With napari GUI (recommended)
+python -m pip install -e ".[gui]"
+
+# Everything (GUI + dev tools)
+python -m pip install -e ".[all]"
+
+# Confirm that this is the tracking-enabled build
+python -m acetree_py --version
+# AceTree-Py 0.2.0 (tracking integration)
+```
+
+To install without keeping a source checkout, use a branch-pinned VCS
+requirement (not an unqualified PyPI install):
+
+```bash
+python -m pip install "acetree-py[gui] @ git+https://github.com/shahlab-ucla/acetree_py.git@tracking-integration"
 ```
 
 ### Tested versions
@@ -95,9 +130,10 @@ See the [real-world StarryNite checklist](docs/user_guide.md#real-world-starryni
 for the complete UI sequence, prerequisites, failure guidance, current
 boundaries, and dated validation status. The opt-in MATLAB commands and parity
 method are in [StarryNite Differential Testing](docs/STARRYNITE_DIFFERENTIAL_TESTING.md#running-locally).
-The 2026-07-16 release gate completed with `1308 passed, 71 skipped` without
-MATLAB and `19 passed, 1 skipped` in the complete R2025a oracle suite; the one
-expected skip is the historical four-model export boundary.
+The 2026-07-29 non-live release gate completed with `1347 passed, 71 skipped`.
+The latest complete MATLAB-oracle gate, run with R2025a on 2026-07-16, completed
+with `19 passed, 1 skipped`; the one expected skip is the historical four-model
+export boundary.
 
 ### CLI
 

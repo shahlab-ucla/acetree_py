@@ -669,10 +669,10 @@ acetree-py info <config.xml> -c ABala           # Query cell details
 
 ## 9. Testing
 
-The 77 test modules in `tests/` cover the data model, I/O (including
+The 81 test modules in `tests/` cover the data model, I/O (including
 interleaved multichannel TIFFs), naming, editing, GUI widgets, color rules,
 CLI, analysis (including pixel measurement), tracking, and integration. The
-2026-07-16 non-live verification completed with `1308 passed` and `71 skipped`;
+2026-07-29 non-live verification completed with `1347 passed` and `71 skipped`;
 run it with `pytest tests/`. Live MATLAB-oracle status is reported separately in
 [StarryNite Differential Testing](STARRYNITE_DIFFERENTIAL_TESTING.md).
 
@@ -699,6 +699,11 @@ dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.1"]
 acetree-py = "acetree_py.__main__:app"
 ```
 
-Install: `pip install -e .` (core) or `pip install -e ".[gui]"` (with GUI) or `pip install -e ".[all]"` (everything).
+These commands install the current checkout. For the tracking-enabled build,
+first use the branch-pinned clone and guarded installer in the
+[Installation guide](../README.md#installation); a plain clone currently
+selects the non-tracking default branch. Manual installs are
+`python -m pip install -e .` (core), `python -m pip install -e ".[gui]"` (with
+GUI), or `python -m pip install -e ".[all]"` (everything).
 
 **napari version note:** The GUI uses napari's `Window.add_dock_widget()` and `Window._dock_widgets` APIs for panel management. These were tested against napari 0.5.x–0.6.x. The upper bound (`<0.7`) guards against breaking changes to these internal APIs.

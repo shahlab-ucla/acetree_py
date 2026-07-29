@@ -2,10 +2,10 @@
 
 - **Status:** registered native and strict whole-movie compatibility backends; compatibility corpus expansion remains in progress
 - **Plan version:** 1.0
-- **Last updated:** 2026-07-16
+- **Last updated:** 2026-07-29
 - **Upstream reference:** [zhirongbaolab/StarryNite](https://github.com/zhirongbaolab/StarryNite), audited at commit [`e3d5ddc`](https://github.com/zhirongbaolab/StarryNite/tree/e3d5ddc381223ae8ce031f64947ffbd944a11593)
 - **Host contract:** [AceTree tracking pipeline specification](TRACKING_PIPELINE_SPEC.md)
-- **Latest verification:** `1308 passed, 71 skipped` without MATLAB; `19 passed, 1 skipped` in the complete opt-in R2025a oracle gate
+- **Latest verification:** `1347 passed, 71 skipped` without MATLAB on 2026-07-29; `19 passed, 1 skipped` in the complete opt-in R2025a oracle gate on 2026-07-16
 
 ## 1. Purpose and scope
 

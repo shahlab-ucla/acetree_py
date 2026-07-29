@@ -520,8 +520,9 @@ Frozen MATLAB outputs may be added to ordinary CI only after fixture and model
 redistribution licensing is reviewed. Until then, local/nightly MATLAB runs and
 fully reproducible manifests are the authoritative oracle.
 
-Latest local verification on 2026-07-16 used the pinned upstream revision and
-MATLAB R2025a. The non-live repository run completed with `1308 passed` and `71
-skipped`. The complete opt-in MATLAB-oracle gate then completed with `19 passed`
-and `1 skipped` in 11 minutes 37 seconds; the skipped case is the expected
-historical-object export boundary that requires an older MATLAB release.
+The latest non-live repository verification, on 2026-07-29, completed with
+`1347 passed` and `71 skipped`. The latest complete local MATLAB verification,
+on 2026-07-16, used the pinned upstream revision and MATLAB R2025a; its opt-in
+oracle gate completed with `19 passed` and `1 skipped` in 11 minutes 37 seconds.
+The skipped case is the expected historical-object export boundary that
+requires an older MATLAB release.

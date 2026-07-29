@@ -8,18 +8,47 @@ For automatic-versus-forced names and the complete correction contract, see [Nam
 
 ## 1. Installation
 
+The tracking-enabled build is currently on `tracking-integration`, while the
+repository default is still `main`. Select the branch explicitly before using
+an editable install:
+
 ```bash
-# Core (CLI only, no GUI):
-pip install -e .
-
-# With napari GUI:
-pip install -e ".[gui]"
-
-# Everything (GUI + dev tools):
-pip install -e ".[all]"
+git clone --branch tracking-integration --single-branch https://github.com/shahlab-ucla/acetree_py.git
+cd acetree_py
 ```
 
-**Requirements:** Python 3.10+, numpy, scipy, tifffile, typer, matplotlib. GUI additionally requires napari (0.5–0.6.x) and qtpy.
+For the recommended GUI install, run the branch guard for your platform:
+
+```powershell
+# Windows PowerShell
+.\scripts\install_tracking_integration.ps1
+```
+
+```bash
+# macOS or Linux
+sh scripts/install_tracking_integration.sh
+```
+
+The scripts accept `core`, `gui` (the default), or `all` through
+`-Variant` on PowerShell and `--variant` on macOS/Linux. To install manually
+from the checked-out branch instead, use the commands below. If needed, select
+the interpreter with `-Python py` or `--python /path/to/python3`.
+
+```bash
+# Core (CLI only, no GUI)
+python -m pip install -e .
+
+# With napari GUI
+python -m pip install -e ".[gui]"
+
+# Everything (GUI + dev tools)
+python -m pip install -e ".[all]"
+
+# Must include "(tracking integration)"
+python -m acetree_py --version
+```
+
+**Requirements:** Python 3.10+, Git, numpy, scipy, tifffile, typer, matplotlib. GUI additionally requires napari (0.5–0.6.x) and qtpy.
 
 **Tested versions:** napari 0.6.6, numpy 2.3, scipy 1.16, matplotlib 3.10, qtpy 2.4, Python 3.12.
 
@@ -462,10 +491,10 @@ corpus and an older MATLAB release that reconstructs those objects. Noisy,
 representative whole-embryo performance and import/export conformance remain
 real-world release-validation work.
 
-As of 2026-07-16, the complete non-live repository suite passed with `1308
-passed, 71 skipped`; the opt-in MATLAB-oracle suite passed with `19 passed, 1
-skipped` in 11 minutes 37 seconds. The expected skip is the historical-object
-export boundary above. See [StarryNite Differential Testing](STARRYNITE_DIFFERENTIAL_TESTING.md#running-locally)
+As of 2026-07-29, the complete non-live repository suite passed with `1347
+passed, 71 skipped`. The latest opt-in MATLAB-oracle suite, run on 2026-07-16,
+passed with `19 passed, 1 skipped` in 11 minutes 37 seconds. The expected skip is
+the historical-object export boundary above. See [StarryNite Differential Testing](STARRYNITE_DIFFERENTIAL_TESTING.md#running-locally)
 to repeat the live comparison with a local MATLAB and StarryNite checkout.
 
 #### Curate a Known Sublineage: EMS to E to Ea/Ep
