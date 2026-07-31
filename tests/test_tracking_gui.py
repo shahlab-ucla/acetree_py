@@ -56,6 +56,8 @@ def test_dataset_wizard_builds_trackmate_keyed_global_request(qtbot):
     qtbot.addWidget(dialog)
     dialog._radio_tracking_auto.setChecked(True)
     dialog._tracking_gap_spin.setValue(1)
+    dialog._tracking_radius_spin.setValue(6.25)
+    dialog._tracking_threshold_spin.setValue(17.5)
 
     request = dialog.get_tracking_request()
 
@@ -65,6 +67,10 @@ def test_dataset_wizard_builds_trackmate_keyed_global_request(qtbot):
     assert request.detector.plugin_id == "acetree.starrynite_detector"
     assert request.detector.settings["TARGET_CHANNEL"] == 1
     assert request.detector.settings["THRESHOLD"] == 0.0
+    assert request.detector.settings["RADIUS"] == pytest.approx(6.25)
+    assert request.detector.settings["INTENSITY_THRESHOLD"] == pytest.approx(17.5)
+    assert request.detector.settings["STARRYNITE_DISTRIBUTION_FILE"] == ""
+    assert request.detector.settings["STARRYNITE_DISTRIBUTION_SOURCE_SHA256"] == ""
     assert request.tracker.plugin_id == "acetree.starrynite_division"
     # The UI speaks in missed frames; TrackMate MAX_FRAME_GAP is the frame delta.
     assert request.tracker.settings["MAX_FRAME_GAP"] == 2

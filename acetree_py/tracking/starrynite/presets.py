@@ -30,21 +30,32 @@ _EXACT_DETECTOR_BINDING_KEYS = (
 )
 
 
-def native_sparse_detector_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
-    """Materialize StarryNite settings for a moving selected-cell ROI.
+def native_detector_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Materialize StarryNite settings for the native detector backend.
 
     A distribution-file binding is the detector's explicit switch into the
-    sequential, movie-global exact tail.  Sparse forward tracking starts at an
-    arbitrary frame and evaluates moving local crops, so that tail and its fixed
-    one-based legacy ROI are not valid there.  Parameter identity and staged
-    native values remain intact; only the exact detector source binding is
-    neutralized.
+    sequential exact legacy tail.  Native workflows use the staged values
+    already materialized from the parameter file and must not retain that
+    backend selector.  Parameter identity and all editable native values remain
+    intact; only the exact detector source binding is neutralized.
     """
 
     materialized = dict(settings)
     for key in _EXACT_DETECTOR_BINDING_KEYS:
         materialized[key] = ""
     return materialized
+
+
+def native_sparse_detector_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Materialize native StarryNite settings for a moving selected-cell ROI.
+
+    A distribution-file binding is the detector's explicit switch into the
+    sequential, movie-global exact tail.  Sparse forward tracking starts at an
+    arbitrary frame and evaluates moving local crops, so that tail and its fixed
+    one-based legacy ROI are not valid there.
+    """
+
+    return native_detector_settings(settings)
 
 
 @dataclass(frozen=True, slots=True)

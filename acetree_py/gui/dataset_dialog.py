@@ -1035,6 +1035,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             from ..tracking.starrynite import (
                 bundled_parameter_preset,
                 load_tuning_profile,
+                native_detector_settings,
             )
 
             preset = bundled_parameter_preset(
@@ -1044,7 +1045,9 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
                 preset.parameter_file,
                 fallback_radius_um=self._tracking_radius_spin.value(),
             )
-            detector_settings.update(profile.detector_settings)
+            detector_settings.update(
+                native_detector_settings(profile.detector_settings)
+            )
             tracker_settings.update(profile.tracker_settings)
         detector_common = {
             "TARGET_CHANNEL": self._tracking_channel_spin.value(),

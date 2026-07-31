@@ -85,7 +85,6 @@ class _NudgeApp:
         if plane == self.current_plane:
             return
         self.current_plane = plane
-        self.tracking = False
         self.update_display()
 
 
@@ -103,9 +102,9 @@ def test_z_nudge_renders_once_on_final_plane(qtbot):
 
     assert app.nucleus.z == 11.0
     assert app.current_plane == 11
-    assert app.tracking is False
+    assert app.tracking is True
     assert app.set_plane_calls == []
-    assert app.render_events == [(11, False, 11.0, 100, 200, 20)]
+    assert app.render_events == [(11, True, 11.0, 100, 200, 20)]
     assert app.edit_history.num_undoable == 1
 
 
@@ -121,17 +120,17 @@ def test_z_nudge_clamps_plane_and_preserves_undo_redo(qtbot):
 
     assert app.nucleus.z == 34.0
     assert app.current_plane == 30
-    assert app.render_events == [(30, False, 34.0, 100, 200, 20)]
+    assert app.render_events == [(30, True, 34.0, 100, 200, 20)]
 
     app.edit_history.undo()
     assert app.nucleus.z == 29.0
     assert app.current_plane == 30
-    assert app.render_events[-1] == (30, False, 29.0, 100, 200, 20)
+    assert app.render_events[-1] == (30, True, 29.0, 100, 200, 20)
 
     app.edit_history.redo()
     assert app.nucleus.z == 34.0
     assert app.current_plane == 30
-    assert app.render_events[-1] == (30, False, 34.0, 100, 200, 20)
+    assert app.render_events[-1] == (30, True, 34.0, 100, 200, 20)
     assert len(app.render_events) == 3
 
 
@@ -206,6 +205,6 @@ def test_post_commit_render_failure_retains_final_z_navigation(qtbot):
 
     assert app.nucleus.z == 11.0
     assert app.current_plane == 11
-    assert app.tracking is False
-    assert app.render_events == [(11, False, 11.0, 100, 200, 20)]
+    assert app.tracking is True
+    assert app.render_events == [(11, True, 11.0, 100, 200, 20)]
     assert app.edit_history.num_undoable == 1

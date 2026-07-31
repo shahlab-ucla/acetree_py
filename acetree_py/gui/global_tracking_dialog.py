@@ -1826,7 +1826,12 @@ class GlobalTrackingDialog(QDialog):
         detector_id = str(self._detector_combo.currentData())
         detector_settings = self._registry.default_settings(detector_id)
         if detector_id == _STARRYNITE_DETECTOR_ID:
-            detector_settings.update(self._starrynite_detector_settings)
+            source_settings = self._starrynite_detector_settings
+            if not self._exact_starrynite_selected():
+                from ..tracking.starrynite import native_detector_settings
+
+                source_settings = native_detector_settings(source_settings)
+            detector_settings.update(source_settings)
         detector_common = {
             "TARGET_CHANNEL": self._channel_spin.value(),
             "RADIUS": self._radius_spin.value(),

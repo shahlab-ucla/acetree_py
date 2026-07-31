@@ -364,21 +364,30 @@ class TestTracking:
         assert app.current_plane == 20  # Not changed
 
     def test_z_nav_preserves_cell_selection(self):
-        """Regression: set_plane used to clear current_cell_name and
-        set tracking=False.  This broke Add/Track modes where the user
-        wants to nudge the Z slice to position the new nucleus while
-        still inheriting the selected cell as predecessor.  After the
-        fix, Z nav only disables auto-tracking — the cell stays
-        selected so the Add path still sees a parent."""
+        """Z navigation keeps the selection and time-follow behavior."""
         app = _make_app()
         app.current_cell_name = "AB"
         app.tracking = True
         app.current_plane = 15
         app.set_plane(20)
-        # Cell stays selected, tracking is frozen
+        # Cell stays selected and remains ready to follow through time.
         assert app.current_cell_name == "AB"
-        assert app.tracking is False
+        assert app.tracking is True
         assert app.current_plane == 20
+
+    def test_time_advance_follows_selected_cell_after_manual_z_navigation(self):
+        """Regression: a manual Z move must not silently disable following."""
+        app = _make_app()
+        app.select_cell("AB", time=4)
+        app.set_plane(20)
+
+        app.next_time()
+
+        # AB moves from z=15 at T4 to z=14 at T5.
+        assert app.current_time == 5
+        assert app.current_plane == 14
+        assert app.current_cell_name == "AB"
+        assert app.tracking is True
 
     def test_tracking_follows_daughter(self):
         app = _make_app()

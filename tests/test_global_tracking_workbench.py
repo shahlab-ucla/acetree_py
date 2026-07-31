@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
+import numpy as np
 import pytest
 
 pytest.importorskip("qtpy")
@@ -21,7 +22,7 @@ from acetree_py.tracking.api import (
     TrackingScope,
 )
 from acetree_py.tracking.registry import TrackingRegistry, build_default_registry
-from acetree_py.tracking.starrynite import read_parameter_file
+from acetree_py.tracking.starrynite import StarryNiteDetector, read_parameter_file
 
 
 class _ViewerApp:
@@ -107,6 +108,77 @@ def test_global_starrynite_threshold_control_maps_to_absolute_legacy_threshold(q
 
     dialog._subpixel_check.setChecked(True)
     assert dialog.get_detector_spec().settings["DO_SUBPIXEL_LOCALIZATION"] is True
+
+
+def test_global_native_starrynite_tuning_works_without_restoring_defaults(qtbot):
+    registry = build_default_registry(discover_plugins=False)
+    dialog = GlobalTrackingDialog(1, 3, registry=registry)
+    qtbot.addWidget(dialog)
+
+    # The bundled source keeps its exact replay assets available so users can
+    # deliberately switch to the advanced exact workflow.
+    assert dialog._starrynite_detector_settings["STARRYNITE_DISTRIBUTION_FILE"]
+
+    dialog._radius_spin.setValue(2.0)
+    dialog._threshold_spin.setValue(0.01)
+    request = dialog.get_request()
+
+    # The recommended workflow must materialize the native backend before any
+    # Restore Defaults interaction.  Otherwise the distribution binding makes
+    # the detector reread and silently prefer the source-file values.
+    assert request.detector.settings["RADIUS"] == pytest.approx(2.0)
+    assert request.detector.settings["INTENSITY_THRESHOLD"] == pytest.approx(0.01)
+    assert request.detector.settings["STARRYNITE_DISTRIBUTION_FILE"] == ""
+    assert request.detector.settings["STARRYNITE_DISTRIBUTION_SOURCE_SHA256"] == ""
+    assert request.detector.settings["STARRYNITE_PARAMETER_FILE"] == (
+        dialog._starrynite_detector_settings["STARRYNITE_PARAMETER_FILE"]
+    )
+    assert request.detector.settings["STARRYNITE_PARAMETER_SHA256"] == (
+        dialog._starrynite_detector_settings["STARRYNITE_PARAMETER_SHA256"]
+    )
+
+    z, y, x = np.indices((9, 31, 31), dtype=float)
+    image = 1_000.0 * np.exp(
+        -(
+            ((z - 4.0) / 1.0) ** 2
+            + ((y - 15.0) / 2.0) ** 2
+            + ((x - 16.0) / 2.0) ** 2
+        )
+        / 2.0
+    )
+    low_threshold = StarryNiteDetector().detect(
+        image.astype(np.float32),
+        1,
+        Calibration(0.5, 1.0),
+        request.detector.settings,
+    )
+
+    dialog._threshold_spin.setValue(1_000_000.0)
+    high_request = dialog.get_request()
+    high_threshold = StarryNiteDetector().detect(
+        image.astype(np.float32),
+        1,
+        Calibration(0.5, 1.0),
+        high_request.detector.settings,
+    )
+
+    assert len(low_threshold) == 1
+    assert high_threshold == ()
+
+    restored = GlobalTrackingDialog(
+        1,
+        3,
+        registry=registry,
+        initial_request=request,
+    )
+    qtbot.addWidget(restored)
+    restored._threshold_spin.setValue(23.0)
+    rerun = restored.get_request()
+
+    assert rerun.detector.settings["INTENSITY_THRESHOLD"] == pytest.approx(23.0)
+    assert rerun.detector.settings["STARRYNITE_DISTRIBUTION_FILE"] == ""
+    dialog.reject()
+    restored.reject()
 
 
 def test_global_starrynite_parameter_load_save_restore_and_recent(

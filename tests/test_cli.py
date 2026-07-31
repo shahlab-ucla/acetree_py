@@ -122,6 +122,11 @@ class TestCreateCommand:
         assert request.detector.settings["STARRYNITE_PARAMETER_FILE"] == str(
             preset.parameter_file.resolve()
         )
+        assert request.detector.settings["STARRYNITE_PARAMETER_SHA256"] == (
+            profile.detector_settings["STARRYNITE_PARAMETER_SHA256"]
+        )
+        assert request.detector.settings["STARRYNITE_DISTRIBUTION_FILE"] == ""
+        assert request.detector.settings["STARRYNITE_DISTRIBUTION_SOURCE_SHA256"] == ""
         assert request.detector.settings["RADIUS"] == profile.detector_settings[
             "RADIUS"
         ]

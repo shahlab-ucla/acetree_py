@@ -1319,14 +1319,12 @@ class AceTreeApp:
     def set_plane(self, plane: int) -> None:
         """Navigate to a specific z-plane.
 
-        Manual Z navigation disables auto-tracking (the slice should stop
-        snapping to the selected cell's centroid on time-scrubs) but
-        keeps ``current_cell_name`` set.  Previously we cleared the cell
-        name entirely — which broke Add/Track modes where the user wants
-        to adjust the Z slice to place a new nucleus while still
-        inheriting the selected cell's name as the predecessor.  The
-        selection is only explicitly cleared by clicking empty space,
-        selecting a different cell, or pressing Escape.
+        Manual Z navigation changes the slice at the current timepoint while
+        preserving both the selected cell and follow mode.  The next time
+        navigation therefore resumes at the selected cell's Z centroid.
+        Selection/follow mode is only stopped explicitly, for example by
+        clicking empty space, pressing Deselect/Space, or by a caller setting
+        ``tracking`` to false.
 
         Args:
             plane: 1-based z-plane index.
@@ -1336,10 +1334,6 @@ class AceTreeApp:
         if plane == self.current_plane:
             return
         self.current_plane = plane
-        # Preserve current_cell_name so Add/Track modes keep their
-        # predecessor.  Just freeze auto-tracking so scrubbing time next
-        # doesn't yank Z back to the cell's centroid.
-        self.tracking = False
         if self.current_cell_name:
             self.update_display()
         else:

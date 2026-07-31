@@ -1071,9 +1071,9 @@ class EditPanel(QWidget):  # type: ignore[misc]
             plane_changed = new_plane != old_plane
             if plane_changed:
                 self.app.current_plane = new_plane
-                # Match set_plane(): manual Z navigation freezes automatic
-                # slice following without clearing the selected cell.
-                self.app.tracking = False
+                # Match set_plane(): the current slice follows the edit, and
+                # the selected cell remains in follow mode for the next time
+                # navigation.
 
         change_counter = getattr(self.app.edit_history, "change_counter", None)
         try:

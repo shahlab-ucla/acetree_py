@@ -422,6 +422,7 @@ def create(
                 from acetree_py.tracking.starrynite import (
                     bundled_parameter_preset,
                     load_tuning_profile,
+                    native_detector_settings,
                 )
 
                 try:
@@ -437,7 +438,9 @@ def create(
                 tracker_id = "acetree.starrynite_division"
                 detector_settings = registry.default_settings(detector_id)
                 tracker_settings = registry.default_settings(tracker_id)
-                detector_settings.update(profile.detector_settings)
+                detector_settings.update(
+                    native_detector_settings(profile.detector_settings)
+                )
                 tracker_settings.update(profile.tracker_settings)
                 radius = (
                     float(profile.detector_settings.get("RADIUS", 4.0))
