@@ -69,8 +69,11 @@ acetree_py/                    # Root package (__version__ = "0.2.0")
     viewer_3d_window.py        # Viewer3DWindow (detached 3D viewer)
     dataset_dialog.py          # DatasetCreationDialog (5-page wizard)
     measure_dialog.py          # MeasureDialog (channel + output picker)
+    expression_plot_window.py  # Multi-instance modeless expression plotting UI
   analysis/                    # Post-hoc analysis — no GUI dependencies
     expression.py              # Expression time series analysis
+    expression_plot.py         # Plot snapshots, time transforms, tidy CSV
+    expression_measurements.py # Revision-bound all-channel Measure store
     export.py                  # CSV, Newick export functions
     measure.py                 # Per-nucleus pixel sampling (port of ExtractRed)
     measure_csv.py             # Measure CSV writer (per-channel, absolute time)
@@ -640,15 +643,54 @@ Each nucleus is modelled as a sphere of diameter `nuc.size` centred at `(x, y, z
 `run_measure(manager, image_provider, output_dir, at_channel, progress_cb=None)`:
 
 1. Iterates every channel, every timepoint. For each `(t, channel)` it calls `image_provider.get_stack(t, channel)` and `measure_timepoint`, collecting `(sum_in, count_in, sum_ann, count_ann)` for every nucleus.
-2. For the chosen `at_channel` only: writes `rwraw = round(sum_in * 1000 / count_in)` and `rwcorr1 = round(sum_ann * 1000 / count_ann)` back onto each `Nucleus` (the `* 1000` SCALE matches Java `NucleiMgr.computeRWeight`). Leaves untouched nuclei (dead or unmeasured) unchanged so prior values aren't blown away.
-3. Recomputes `rweight` via `manager.compute_red_weights()` (under `correction = "none"`, falls back to copying `rwraw` directly).
-4. Writes one CSV per channel. The per-timepoint CSV value follows the session's current correction method — plain `rwraw` for `"none"`, `rwraw - rwcorr1` for `"global"`, `rwraw - rwcorr3` for `"blot"`.
+2. Builds one all-channel immutable measurement snapshot and stages one CSV per channel. The per-timepoint value follows the requested correction method — plain `rwraw` for `"none"`, `rwraw - rwcorr1` for `"global"`, and `rwraw - rwcorr3` for `"blot"`.
+3. Revalidates the starting document fingerprint, then installs the staged CSV set while retaining the prior files as rollback copies.
+4. For the chosen `at_channel` only, writes scaled `rwraw`, `rwcorr1`, optional `rwcorr3`, `rsum`, `rcount`, and the matching `rweight` onto measurable nuclei. It then publishes the all-channel snapshot and releases the rollback copies. Dead or unmeasured nuclei remain untouched.
+
+The runner writes every channel to private sibling files, validates the source
+again, then installs the complete CSV set while retaining rollback copies. It
+publishes an immutable `ExpressionMeasurementSet` and the legacy AT fields as
+part of the same transaction; rollback copies are deleted only after all
+in-memory publication succeeds. A cancellation, source mutation, CSV error, or
+late application error restores the prior files, legacy fields, correction
+mode, freshness flag, and measurement snapshot. The public
+`run_measure() -> list[Path]` return contract remains unchanged.
+
+The measurement set is keyed by `(timepoint, nucleus.index)` and stores raw,
+annulus, blot, pixel-count, and selected expression values for every channel.
+Each sample has a nucleus geometry signature. Calibration is checked for every
+mode, and blot results also retain a movie-wide geometry dependency fingerprint
+because an unselected neighbour can change the projected exclusion mask.
 
 **Cancellation:** `progress_cb(channel_idx, n_channels, t_1based, n_timepoints) -> bool | None` is fired after every timepoint. Returning `False` raises `RuntimeError("Measure cancelled by user")`.
 
-**Scope note:** The port computes `rwcorr1` (global annulus background) and `rwcorr3` (blot — annulus with every nucleus's projected inner disk masked out; see `measure_timepoint_with_blot` in `analysis/measure.py`). `rwcorr2` / `rwcorr4` are not computed (Java's pipeline filled them via external MATLAB and a crosstalk solver). The correction method is selected in the Measure dialog (`gui/measure_dialog.py::MeasureDialog`) and threaded through `run_measure(…, correction_method=…)`: `"none"` writes no subtraction, `"global"` writes `rwraw - rwcorr1`, `"blot"` writes `rwraw - rwcorr3`. Unknown / legacy modes (`"local"`, `"cross"`) fall back to `rwraw - rwcorr1`.
+**Scope note:** The port computes `rwcorr1` (global annulus background) and `rwcorr3` (blot — annulus with every nucleus's projected inner disk masked out; see `measure_timepoint_with_blot` in `analysis/measure.py`). `rwcorr2` / `rwcorr4` are not computed (Java's pipeline filled them via external MATLAB and a crosstalk solver). The correction method is selected in the Measure dialog (`gui/measure_dialog.py::MeasureDialog`) and threaded through `run_measure(…, correction_method=…)`: `"none"` writes no subtraction, `"global"` writes `rwraw - rwcorr1`, and `"blot"` writes `rwraw - rwcorr3`. Compatible legacy modes `"local"` and `"cross"` use the documented fresh global fallback; unknown modes are rejected.
 
 **GUI wiring:** `File → Measure…` (added in `gui/app.py::_add_file_menu_actions`) opens `MeasureDialog` (channel combo + output-dir picker), runs the orchestrator under a `QProgressDialog`, and rebuilds every lineage widget on completion so the fresh `rweight` values show up.
+
+---
+
+### 7.4 Expression Plot (`analysis/expression_plot.py`, `gui/expression_plot_window.py`)
+
+`ExpressionPlotService` produces immutable `ExpressionPlotData` snapshots for
+absolute, birth-relative, and normalized lifetime axes. Missing measurements
+remain `None` in the snapshot and become NaN gaps only at the Matplotlib
+boundary. The exact same snapshot feeds the renderer and tidy CSV exporter.
+
+**Window lifecycle:** `Window → New Expression Plot…` creates an independent
+`Qt.Window`; repeated actions create distinct instances with monotonic titles.
+Each removes itself from `AceTreeApp._expression_plot_windows` on close.
+
+**Concurrency:** `NucleiManager.data_revision` advances after every committed
+GUI edit, including Undo and Redo. Each measurement set records its source
+revision, calibration, and per-nucleus geometry; blot sets additionally record
+movie-wide geometry dependencies. A mismatch fails closed: the window retains
+an existing plot only as a watermarked stale visual reference, displays a
+**Run Measure…** prompt, and disables both dedicated and Matplotlib-toolbar
+CSV/SVG export until a new Measure run publishes data for the current revision.
+Reloaded legacy data has no provenance, so it receives a nonblocking
+freshness-unverified advisory rather than a false claim that the values are
+current.
 
 ---
 

@@ -180,7 +180,12 @@ class AceTreeApp:
         self._tracking_menu = None
         self._tracking_menu_actions: dict[str, object] = {}
         self._lineage_widgets: list = []  # Multiple lineage tree panels
+        self._expression_plot_windows: list = []
+        self._expression_plot_window_counter: int = 0
+        self._panel_menu_actions: dict[str, object] = {}
         self._lineage_list = None
+        # 0-based image channel most recently chosen by File -> Measure.
+        self.current_expression_channel: int = 0
 
         # Cached image layers (one per channel)
         self._image_layers: list = []
@@ -1736,6 +1741,25 @@ class AceTreeApp:
         self._3d_windows.append(win)
         win.show()
 
+    def open_expression_plot_window(self) -> None:
+        """Open an independent, modeless expression plot window."""
+
+        from .expression_plot_window import ExpressionPlotWindow
+
+        self._expression_plot_window_counter += 1
+        parent = None
+        try:
+            parent = self.viewer.window._qt_window if self.viewer is not None else None
+        except (AttributeError, RuntimeError):
+            parent = None
+        window = ExpressionPlotWindow(
+            self,
+            window_number=self._expression_plot_window_counter,
+            parent=parent,
+        )
+        self._expression_plot_windows.append(window)
+        window.show()
+
     def _say(self, msg: str) -> None:
         """Set a one-line status message on the napari status bar.
 
@@ -3201,6 +3225,12 @@ class AceTreeApp:
         cmd = self.edit_history.last_command
         self._last_post_commit_refresh_error = None
         self._sync_tracking_provenance(cmd)
+        # Expression values are derived from nucleus geometry and topology.
+        # Every committed edit, including undo/redo, advances the concurrency
+        # token so plots cannot export values measured against an older state.
+        self.manager.mark_data_edited(
+            (id(self.edit_history), self.edit_history.change_counter)
+        )
         is_structural = cmd is None or cmd.structural
 
         if is_structural:
@@ -3231,6 +3261,19 @@ class AceTreeApp:
         # undo entry have already committed. Do not let a napari/layer redraw
         # failure masquerade as a rejected edit (which can leave a cyan draft
         # drawn over the newly curated marker).
+        for window in tuple(self._expression_plot_windows):
+            try:
+                window.on_document_edited(structural=is_structural)
+            except RuntimeError as error:
+                if "deleted" in str(error).lower():
+                    try:
+                        self._expression_plot_windows.remove(window)
+                    except ValueError:
+                        pass
+                else:
+                    self._report_committed_refresh_failure(cmd, error)
+            except Exception as error:  # noqa: BLE001 - isolate optional observer
+                self._report_committed_refresh_failure(cmd, error)
         try:
             self.update_display()
         except Exception as error:
@@ -3381,12 +3424,22 @@ class AceTreeApp:
             toggle.setText(dock_widget.name)
             window_menu.addAction(toggle)
 
-        # Add "New Lineage Panel" action
+        # Add independent visualization-window actions.
         window_menu.addSeparator()
         from qtpy.QtWidgets import QAction
         add_panel_action = QAction("New Lineage Panel...", qt_window)
         add_panel_action.triggered.connect(self._on_new_lineage_panel)
         window_menu.addAction(add_panel_action)
+        expression_action = QAction("New Expression Plot…", qt_window)
+        expression_action.setStatusTip(
+            "Plot one or more cells from any measured image channel"
+        )
+        expression_action.triggered.connect(self.open_expression_plot_window)
+        window_menu.addAction(expression_action)
+        self._panel_menu_actions = {
+            "new_lineage": add_panel_action,
+            "new_expression_plot": expression_action,
+        }
 
     def _on_new_lineage_panel(self) -> None:
         """Show config dialog and create a new lineage panel."""
@@ -3578,6 +3631,7 @@ class AceTreeApp:
             return
         values = dlg.get_values()
         at_channel: int = values["at_channel"]
+        self.current_expression_channel = at_channel
         output_dir: Path = values["output_dir"]
         correction_method: str = values.get("correction_method", "global")
 
@@ -3637,6 +3691,20 @@ class AceTreeApp:
                 lw.rebuild_tree()
             except Exception:
                 logger.exception("Failed to rebuild lineage widget")
+
+        for window in tuple(self._expression_plot_windows):
+            try:
+                window.on_measurements_updated()
+            except RuntimeError as error:
+                if "deleted" in str(error).lower():
+                    try:
+                        self._expression_plot_windows.remove(window)
+                    except ValueError:
+                        pass
+                else:
+                    logger.exception("Failed to refresh expression plot window")
+            except Exception:  # noqa: BLE001 - completed Measure remains successful
+                logger.exception("Failed to refresh expression plot window")
 
         msg = (
             f"Measured {len(written)} channel(s); "

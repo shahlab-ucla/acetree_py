@@ -679,6 +679,17 @@ Use Measure when:
 4. Click **OK**. A progress dialog shows `channel c/N, timepoint t/T…` and can be cancelled.
 5. When the run completes, every open lineage tree panel rebuilds to reflect the fresh `rweight` values. A status message reports how many CSVs were written.
 
+The completed run also keeps every measured image channel available to any
+open **Expression Plot** window for the rest of the session. The legacy nuclei
+ZIP still stores only the selected AT channel; after reopening a dataset, run
+Measure again when you need the other image channels.
+
+Measure snapshots the starting document revision, calibration, geometry,
+lineage, and expression state. If the dataset changes while measurement or CSV
+preparation is running, the operation stops without publishing the result.
+All channel CSVs are staged as one set; a cancellation, write failure, or late
+publication failure restores the prior CSV set and in-memory measurements.
+
 ### 10.2 Output CSVs
 
 One CSV per image channel, with filenames like:
@@ -725,6 +736,60 @@ The Measure dialog exposes three background-correction modes:
 | **Blot — annulus with neighbors masked (rwcorr3)** | `rwraw − rwcorr3` | Crowded embryos where neighbouring nuclei poke into the annulus and inflate the global background. |
 
 The dialog also writes the chosen mode back onto `manager._expr_corr`, so the lineage tree immediately re-colours using the corresponding correction field.
+
+### 10.5 Expression Plot windows
+
+Choose **Window → New Expression Plot…** to open a modeless plotting window.
+You can open as many independent windows as needed—for example, one comparing
+sisters on absolute time and another comparing a lineage subtree on normalized
+time. The active cell in the main viewer is preselected when possible.
+
+The basic workflow is:
+
+1. Find cells with the search box and select any combination. **Current cell**
+   restores the main-viewer selection, **All filtered** builds a name-based
+   group, and **+ Descendants** expands selected cells to their subtrees.
+2. Choose a Y-axis source. Reloaded legacy datasets expose the stored AT
+   `rweight` (the original physical channel is not recorded). After **Measure**,
+   every measured image channel appears as a clearly numbered entry.
+3. Choose **Absolute timepoint**, **Relative to cell birth** (birth = 0), or
+   **Normalized lifetime** (birth = 0, final observation/division/death = 1).
+   A one-timepoint cell is placed at 0. Missing samples remain gaps; they are
+   never interpolated or silently connected.
+4. Edit each series' legend label and color. Plot controls cover title and axis
+   labels, line/marker style and size, opacity, font sizes, linear/log Y scale,
+   grid, automatic or manual X/Y limits, figure/axes/text colors, and legend
+   title, location, and column count. The embedded Matplotlib toolbar also
+   provides pan, zoom, and navigation.
+5. Use **Save plotted data as CSV…** for tidy long-form data containing the
+   channel key/label/unit, displayed X coordinate, original absolute timepoint,
+   value, and series color. Use **Export plot as SVG…** for an editable vector
+   figure. Matplotlib's toolbar Save action follows the same validation as the
+   dedicated SVG button.
+
+#### Measurement completeness and edit concurrency
+
+An amber prompt appears when stored expression looks incomplete. Use its
+**Run Measure…** button to measure all image channels without leaving the plot
+workflow. Numeric zero remains a legitimate measurement; for legacy files,
+which have no explicit validity flag, AceTree conservatively prompts when the
+underlying expression aggregates are absent.
+
+Every committed nucleus edit, including Undo and Redo, advances a document
+revision. Measurements are bound to the revision and nucleus geometry from
+which they were computed. After an edit, an existing plot may remain visible
+as a clearly watermarked stale reference, but CSV and SVG export (including
+toolbar Save) are disabled until Measure succeeds again. Export also rechecks
+the live geometry in case a programmatic caller bypassed edit history. For blot
+correction this includes every neighbouring nucleus, because every projected
+disk contributes to the background mask.
+
+Legacy nuclei archives do not store measurement provenance. On reload, a
+complete legacy AT series therefore shows **freshness unverified** and
+recommends Measure before quantitative comparison. This advisory does not
+disable export of otherwise complete legacy values. Once Measure runs in the
+current session, any later edit becomes a blocking stale-data condition until
+Measure succeeds again.
 
 ---
 

@@ -184,6 +184,8 @@ acetree-py info config.xml --cell ABala
 - **Save/Save As** — persist edits to ZIP files compatible with Java AceTree
 - **Export** — cell tables, nucleus tables, expression time series, Newick trees
 
+- **Expression Plot (Window > New Expression Plot...)** - open any number of independent multi-cell plots, choose any freshly measured image channel, align by absolute time, birth, or normalized lifetime, customize series/axes/legend styling, and export the exact plotted snapshot as CSV or SVG. Incomplete or edit-stale measurements prompt for Measure and fail closed for export.
+
 ## Documentation
 
 - [User Guide](docs/user_guide.md) — navigation, editing, saving, manual tracking, 3D view

@@ -104,6 +104,15 @@ class NucleiManager:
         self.auxinfo: AuxInfo | None = None
         self._naming_method: int = NEWCANONICAL
         self._expr_corr: str = "none"
+        # Monotonic document revision used to bind derived measurements to
+        # the exact nuclei geometry/topology they were computed from.  Loading
+        # starts at revision 0; every edit (including undo/redo) advances it.
+        self._data_revision: int = 0
+        self._last_data_edit_token: object | None = None
+        self.expression_measurements = None
+        # False for reloaded legacy nuclei: the file format contains values
+        # but no proof that they were measured after the last saved geometry.
+        self.expression_measurement_freshness_known: bool = True
         self.naming_warnings: list[NamingWarning] = []
         # The last-run IdentityAssigner is kept so the GUI can reach the
         # topology-inferred per-timepoint axes (via
@@ -115,6 +124,26 @@ class NucleiManager:
         # the same filter 3+ times per display update cycle.
         self._alive_cache_time: int = -1
         self._alive_cache_result: list[Nucleus] = []
+
+    @property
+    def data_revision(self) -> int:
+        """Monotonic revision of data that can affect pixel measurements."""
+
+        return self._data_revision
+
+    def mark_data_edited(self, edit_token: object | None = None) -> int:
+        """Advance and return the document revision after an edit commits.
+
+        ``edit_token`` makes post-commit observer retries idempotent.  A retry
+        may call the GUI refresh boundary twice for one already-committed edit;
+        it must not masquerade as a second data change.
+        """
+
+        if edit_token is not None and edit_token == self._last_data_edit_token:
+            return self._data_revision
+        self._data_revision += 1
+        self._last_data_edit_token = edit_token
+        return self._data_revision
 
     @classmethod
     def new_empty(cls, config: AceTreeConfig, num_timepoints: int) -> NucleiManager:
@@ -202,7 +231,11 @@ class NucleiManager:
             zip_path: Path to the nuclei ZIP file.
         """
         logger.info("Loading nuclei from %s", zip_path)
+        self._data_revision = 0
+        self._last_data_edit_token = None
         self.nuclei_record = read_nuclei_zip(zip_path)
+        self.expression_measurements = None
+        self.expression_measurement_freshness_known = False
 
         if self.nuclei_record:
             self.movie.start_time = 1
