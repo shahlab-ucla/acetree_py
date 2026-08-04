@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Iterable, Mapping, TYPE_CHECKING
 
 from .expression_plot import ExpressionChannel
@@ -69,6 +70,9 @@ class MeasuredExpressionChannel:
     label: str
     samples: Mapping[tuple[int, int], MeasuredExpressionSample]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "samples", MappingProxyType(dict(self.samples)))
+
     @property
     def key(self) -> str:
         return f"measured_channel_{self.image_channel + 1}"
@@ -86,6 +90,19 @@ class ExpressionMeasurementSet:
     channels: tuple[MeasuredExpressionChannel, ...]
     geometries: Mapping[tuple[int, int], NucleusGeometrySignature]
     csv_paths: tuple[Path, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "channels", tuple(self.channels))
+        object.__setattr__(
+            self,
+            "geometries",
+            MappingProxyType(dict(self.geometries)),
+        )
+        object.__setattr__(
+            self,
+            "csv_paths",
+            tuple(Path(path) for path in self.csv_paths),
+        )
 
     def is_current(self, manager: NucleiManager) -> bool:
         """Return whether this result belongs to the manager's current edit."""

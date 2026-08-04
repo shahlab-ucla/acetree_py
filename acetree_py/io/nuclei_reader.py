@@ -43,7 +43,9 @@ def read_nuclei_zip(
 
     Returns:
         A list of nucleus lists, indexed by timepoint (0-based).
-        nuclei_record[0] contains nuclei for the first timepoint, etc.
+        ``nuclei_record[timepoint - 1]`` contains the nuclei from that
+        1-based ZIP timepoint.  Missing and leading timepoints are retained as
+        empty lists so that absolute movie coordinates are not compacted.
         Each timepoint's list is ordered by the nucleus index in the file.
 
     Raises:
@@ -73,8 +75,15 @@ def read_nuclei_zip(
 
             # Extract timepoint number
             time = _parse_timepoint(filename)
-            if time is not None:
-                entries.append((time, entry))
+            if time is None:
+                continue
+            if time <= 0:
+                logger.warning(
+                    "Ignoring nuclei entry with nonpositive timepoint: %s",
+                    entry,
+                )
+                continue
+            entries.append((time, entry))
 
         if not entries:
             logger.warning("No nuclei entries found in ZIP: %s", zip_path)
@@ -88,18 +97,11 @@ def read_nuclei_zip(
         max_time = max(t for t, _ in entries)
         min_time = min(t for t, _ in entries)
 
-        nuclei_record: list[list[Nucleus]] = []
+        nuclei_record: list[list[Nucleus]] = [[] for _ in range(max_time)]
 
-        # Map timepoints to sequential indices
-        time_to_idx: dict[int, int] = {}
         for time, entry_name in entries:
-            if time not in time_to_idx:
-                time_to_idx[time] = len(nuclei_record)
-                nuclei_record.append([])
-
-            idx = time_to_idx[time]
             nuclei = _read_entry(zf, entry_name, old_format=old_format)
-            nuclei_record[idx] = nuclei
+            nuclei_record[time - 1] = nuclei
 
     logger.info(
         "Read %d timepoints (%d-%d), total nuclei: %d",

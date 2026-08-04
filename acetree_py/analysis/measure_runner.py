@@ -10,10 +10,10 @@ ImageProvider, it:
 3. Writes one CSV per channel with per-cell time series, using the
    session's current correction method to derive the per-timepoint
    value (``rwraw - rwcorr1`` for global, plain ``rwraw`` otherwise).
-4. For the *chosen* AT expression channel only, writes the computed
-   ``rwraw`` and ``rwcorr1`` back onto each Nucleus and re-runs
-   :meth:`NucleiManager.compute_red_weights` so the lineage tree
-   re-colours immediately.
+4. For the *chosen* AT expression channel only, publishes the computed
+   legacy red fields back onto each Nucleus. Samples without a valid inner
+   measurement have those fields cleared so a save/reopen cannot disguise
+   stale values as part of the new, intentionally partial result.
 
 The orchestrator is deliberately separate from ``NucleiManager`` so
 the pixel-measurement dependency (and numpy) can be optional for
@@ -25,12 +25,13 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from ..core.nuclei_manager import NucleiManager
 from ..core.nucleus import RED_CORRECTIONS, Nucleus
-from ..io.image_provider import ImageProvider
+from ..io.image_provider import ImageProvider, image_source_manifest_token
 from .measure import measure_timepoint, measure_timepoint_with_blot
 from .measure_csv import write_measure_csv
 from .expression_measurements import (
@@ -54,6 +55,61 @@ SCALE: int = 1000
 #   progress_cb(channel_idx, num_channels, t_1based, num_timepoints) -> bool
 # Return False to cancel; True (or None) to continue.
 ProgressCallback = Callable[[int, int, int, int], bool | None]
+MeasurementTuple = tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _MeasurementRun:
+    measurements: list[list[list[MeasurementTuple]]]
+    method: str
+    at_channel: int
+    n_channels: int
+    n_timepoints: int
+    source_revision: int
+    source_fingerprint: str
+    source_dependency_fingerprint: str
+    source_calibration: tuple[float, float, int, float]
+
+
+def measure_expression_set(
+    manager: NucleiManager,
+    image_provider: ImageProvider,
+    *,
+    at_channel: int = 0,
+    progress_cb: ProgressCallback | None = None,
+    correction_method: str | None = None,
+) -> ExpressionMeasurementSet:
+    """Measure all image channels without mutating or writing the dataset.
+
+    This is the reusable computation boundary for comparison/analysis tools.
+    The returned immutable snapshot is revision-, calibration-, and
+    geometry-bound, but it is not installed on ``manager`` and no legacy
+    expression fields or CSV files are changed.
+    """
+
+    run = _collect_measurement_run(
+        manager,
+        image_provider,
+        at_channel=at_channel,
+        progress_cb=progress_cb,
+        correction_method=correction_method,
+    )
+    result = _build_expression_measurement_set(
+        manager,
+        run.measurements,
+        method=run.method,
+        at_channel=run.at_channel,
+        csv_paths=[],
+        source_revision=run.source_revision,
+        source_dependency_fingerprint=run.source_dependency_fingerprint,
+        source_calibration=run.source_calibration,
+    )
+    if not _measurement_source_matches(manager, run):
+        raise RuntimeError(
+            "Dataset changed while Measure was preparing results; no "
+            "measurement snapshot was returned. Run Measure again."
+        )
+    return result
 
 
 def run_measure(
@@ -96,102 +152,35 @@ def run_measure(
         ValueError: On invalid inputs (no tree, no nuclei, bad channel).
         RuntimeError: If the run is cancelled via progress_cb.
     """
-    if manager.lineage_tree is None:
-        raise ValueError("Lineage tree not built — call manager.process() first")
-    if not manager.nuclei_record:
-        raise ValueError("Nuclei record is empty")
-    n_channels = image_provider.num_channels
-    if not 0 <= at_channel < n_channels:
-        raise ValueError(
-            f"at_channel={at_channel} out of range (provider has "
-            f"{n_channels} channel(s))"
+    measurement = _collect_measurement_run(
+        manager,
+        image_provider,
+        at_channel=at_channel,
+        progress_cb=progress_cb,
+        correction_method=correction_method,
+    )
+    valid_at_samples = sum(
+        1
+        for timepoint in measurement.measurements[at_channel]
+        for sample in timepoint
+        if sample[1] > 0
+    )
+    if valid_at_samples == 0:
+        raise RuntimeError(
+            "Measure produced no valid samples for the selected AT channel; "
+            "existing expression values and files were left unchanged. Verify "
+            "the image source, channel, time range, and nucleus geometry."
         )
-
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    n_timepoints = len(manager.nuclei_record)
-    z_pix_res = manager.z_pix_res
-    source_revision = int(getattr(manager, "data_revision", 0))
-    source_fingerprint = expression_document_fingerprint(manager)
-    source_dependency_fingerprint = (
-        expression_measurement_dependency_fingerprint(manager)
-    )
-    source_calibration = expression_measurement_calibration(manager)
-
-    # Resolve correction method.  Dialog-driven callers pass it
-    # explicitly; legacy callers fall back to the session default.
-    if correction_method is None:
-        method = manager._expr_corr  # "none", "global", "local", "blot", "cross"
-    else:
-        method = correction_method
-
-    if method not in RED_CORRECTIONS:
-        choices = ", ".join(RED_CORRECTIONS)
-        raise ValueError(
-            f"Unknown correction_method={method!r}; choose one of: {choices}"
-        )
-
+    measurements = measurement.measurements
+    method = measurement.method
     use_blot = method == "blot"
-
-    logger.info(
-        "Measure starting: %d channel(s), %d timepoint(s), z_pix_res=%.3f, "
-        "at_channel=%d, correction=%s",
-        n_channels, n_timepoints, z_pix_res, at_channel, method,
-    )
-
-    # measurements[channel][t_0based] = per-nucleus measurement tuples.
-    # 4-tuple for non-blot modes, 6-tuple for blot (last two fields are
-    # neighbor-masked sums).  Stored uniformly as 6-tuples internally so
-    # downstream code doesn't need to branch on length.
-    measurements: list[list[list[tuple[int, int, int, int, int, int]]]] = []
-
-    for c in range(n_channels):
-        per_channel: list[list[tuple[int, int, int, int, int, int]]] = []
-        for t0 in range(n_timepoints):
-            t_1based = t0 + 1
-            nucs = manager.nuclei_record[t0]
-            if not nucs:
-                per_channel.append([])
-            else:
-                try:
-                    stack = image_provider.get_stack(t_1based, c)
-                except Exception as e:  # noqa: BLE001 — report & skip
-                    logger.warning(
-                        "Failed to load stack t=%d channel=%d: %s; "
-                        "emitting zeros for this timepoint",
-                        t_1based, c, e,
-                    )
-                    per_channel.append([(0, 0, 0, 0, 0, 0)] * len(nucs))
-                else:
-                    if use_blot:
-                        tuples = measure_timepoint_with_blot(
-                            stack, nucs, z_pix_res,
-                        )
-                    else:
-                        raw = measure_timepoint(stack, nucs, z_pix_res)
-                        # Widen each 4-tuple to 6-tuple with zeros for the
-                        # blot fields so storage is uniform.
-                        tuples = [
-                            (a, b, c_, d, 0, 0) for (a, b, c_, d) in raw
-                        ]
-                    per_channel.append(tuples)
-
-            if progress_cb is not None:
-                cont = progress_cb(c, n_channels, t_1based, n_timepoints)
-                if cont is False:
-                    raise RuntimeError("Measure cancelled by user")
-
-        measurements.append(per_channel)
-
-    if (
-        int(getattr(manager, "data_revision", 0)) != source_revision
-        or expression_document_fingerprint(manager) != source_fingerprint
-    ):
-        raise RuntimeError(
-            "Dataset changed while Measure was running; no measurements were "
-            "applied. Run Measure again against the current nuclei."
-        )
+    n_timepoints = measurement.n_timepoints
+    source_revision = measurement.source_revision
+    source_fingerprint = measurement.source_fingerprint
+    source_dependency_fingerprint = measurement.source_dependency_fingerprint
+    source_calibration = measurement.source_calibration
 
     staged_csvs = _stage_measure_csvs(
         manager,
@@ -207,6 +196,10 @@ def run_measure(
     # form one publication transaction.  Old files remain as rollback copies
     # until every in-memory step succeeds.
     previous_method = manager._expr_corr
+    previous_config_method = (
+        manager.config.expr_corr if manager.config is not None else None
+    )
+    previous_config_dirty = bool(getattr(manager, "_config_dirty", False))
     previous_store = manager.expression_measurements
     previous_freshness = manager.expression_measurement_freshness_known
     previous_fields = [
@@ -215,7 +208,9 @@ def run_measure(
             nucleus.rweight,
             nucleus.rwraw,
             nucleus.rwcorr1,
+            nucleus.rwcorr2,
             nucleus.rwcorr3,
+            nucleus.rwcorr4,
             nucleus.rsum,
             nucleus.rcount,
         )
@@ -224,6 +219,7 @@ def run_measure(
     ]
     written: list[Path] = []
     csv_backups: dict[Path, Path] = {}
+    publication_started = False
     try:
         # Non-GUI callers may mutate the manager from another thread while
         # files are being staged. Validate before constructing the result.
@@ -259,12 +255,27 @@ def run_measure(
             )
 
         written, csv_backups = _install_staged_csvs(staged_csvs)
+        if (
+            int(getattr(manager, "data_revision", 0)) != source_revision
+            or expression_document_fingerprint(manager) != source_fingerprint
+        ):
+            raise RuntimeError(
+                "Dataset changed immediately before Measure publication; no "
+                "measurements were applied. Run Measure again."
+            )
+        publication_started = True
         if method in ("none", "global", "blot"):
             manager._expr_corr = method
         elif method in RED_CORRECTIONS:
             # Python cannot recompute local/cross fields. Their documented
             # Measure fallback is the fresh global annulus.
             manager._expr_corr = "global"
+        if (
+            manager.config is not None
+            and manager.config.expr_corr != manager._expr_corr
+        ):
+            manager.config.expr_corr = manager._expr_corr
+            manager._config_dirty = True
         _apply_to_at_channel(
             manager, measurements[at_channel], at_channel, use_blot=use_blot,
         )
@@ -272,24 +283,35 @@ def run_measure(
         manager.expression_measurements = pending_store
         manager.expression_measurement_freshness_known = True
     except BaseException:
-        manager._expr_corr = previous_method
-        manager.expression_measurements = previous_store
-        manager.expression_measurement_freshness_known = previous_freshness
-        for (
-            nucleus,
-            rweight,
-            rwraw,
-            rwcorr1,
-            rwcorr3,
-            rsum,
-            rcount,
-        ) in previous_fields:
-            nucleus.rweight = rweight
-            nucleus.rwraw = rwraw
-            nucleus.rwcorr1 = rwcorr1
-            nucleus.rwcorr3 = rwcorr3
-            nucleus.rsum = rsum
-            nucleus.rcount = rcount
+        # A source mismatch detected before publication may be the result of
+        # a legitimate concurrent edit.  Do not overwrite that edit with the
+        # older snapshot when Measure has not mutated the manager yet.
+        if publication_started:
+            manager._expr_corr = previous_method
+            if manager.config is not None and previous_config_method is not None:
+                manager.config.expr_corr = previous_config_method
+            manager._config_dirty = previous_config_dirty
+            manager.expression_measurements = previous_store
+            manager.expression_measurement_freshness_known = previous_freshness
+            for (
+                nucleus,
+                rweight,
+                rwraw,
+                rwcorr1,
+                rwcorr2,
+                rwcorr3,
+                rwcorr4,
+                rsum,
+                rcount,
+            ) in previous_fields:
+                nucleus.rweight = rweight
+                nucleus.rwraw = rwraw
+                nucleus.rwcorr1 = rwcorr1
+                nucleus.rwcorr2 = rwcorr2
+                nucleus.rwcorr3 = rwcorr3
+                nucleus.rwcorr4 = rwcorr4
+                nucleus.rsum = rsum
+                nucleus.rcount = rcount
         if written or csv_backups:
             _rollback_installed_csvs(written, csv_backups)
         _discard_staged_csvs(staged_csvs)
@@ -299,6 +321,155 @@ def run_measure(
 
     logger.info("Measure complete: wrote %d CSV(s) to %s", len(written), output_dir)
     return written
+
+
+def _collect_measurement_run(
+    manager: NucleiManager,
+    image_provider: ImageProvider,
+    *,
+    at_channel: int,
+    progress_cb: ProgressCallback | None,
+    correction_method: str | None,
+) -> _MeasurementRun:
+    """Compute all channel aggregates against one immutable source state."""
+
+    if manager.lineage_tree is None:
+        raise ValueError("Lineage tree not built — call manager.process() first")
+    if not manager.nuclei_record:
+        raise ValueError("Nuclei record is empty")
+    measured_timepoints = tuple(
+        time
+        for time, nuclei in enumerate(manager.nuclei_record, start=1)
+        if nuclei
+    )
+    image_manifest_before = image_source_manifest_token(
+        image_provider,
+        timepoints=measured_timepoints,
+        planes=None,
+    )
+    n_channels = image_provider.num_channels
+    if not 0 <= at_channel < n_channels:
+        raise ValueError(
+            f"at_channel={at_channel} out of range (provider has "
+            f"{n_channels} channel(s))"
+        )
+
+    n_timepoints = len(manager.nuclei_record)
+    z_pix_res = manager.z_pix_res
+    source_revision = int(getattr(manager, "data_revision", 0))
+    source_fingerprint = expression_document_fingerprint(manager)
+    source_dependency_fingerprint = (
+        expression_measurement_dependency_fingerprint(manager)
+    )
+    source_calibration = expression_measurement_calibration(manager)
+
+    method = manager._expr_corr if correction_method is None else correction_method
+    if method not in RED_CORRECTIONS:
+        choices = ", ".join(RED_CORRECTIONS)
+        raise ValueError(
+            f"Unknown correction_method={method!r}; choose one of: {choices}"
+        )
+    use_blot = method == "blot"
+
+    logger.info(
+        "Measure starting: %d channel(s), %d timepoint(s), z_pix_res=%.3f, "
+        "at_channel=%d, correction=%s",
+        n_channels,
+        n_timepoints,
+        z_pix_res,
+        at_channel,
+        method,
+    )
+
+    # measurements[channel][t_0based] = per-nucleus measurement tuples.
+    # Stored uniformly as 6-tuples; non-blot runs use zero blot aggregates.
+    measurements: list[list[list[MeasurementTuple]]] = []
+    for channel_index in range(n_channels):
+        per_channel: list[list[MeasurementTuple]] = []
+        for t0 in range(n_timepoints):
+            time = t0 + 1
+            nuclei = manager.nuclei_record[t0]
+            if not nuclei:
+                per_channel.append([])
+            else:
+                try:
+                    stack = image_provider.get_stack(time, channel_index)
+                except Exception as error:  # noqa: BLE001 — preserve partial coverage
+                    logger.warning(
+                        "Failed to load stack t=%d channel=%d: %s; "
+                        "emitting missing measurements for this timepoint",
+                        time,
+                        channel_index,
+                        error,
+                    )
+                    per_channel.append([(0, 0, 0, 0, 0, 0)] * len(nuclei))
+                else:
+                    if use_blot:
+                        tuples = measure_timepoint_with_blot(
+                            stack,
+                            nuclei,
+                            z_pix_res,
+                        )
+                    else:
+                        raw = measure_timepoint(stack, nuclei, z_pix_res)
+                        tuples = [
+                            (inner_sum, inner_count, ann_sum, ann_count, 0, 0)
+                            for inner_sum, inner_count, ann_sum, ann_count in raw
+                        ]
+                    per_channel.append(tuples)
+
+            if progress_cb is not None:
+                proceed = progress_cb(
+                    channel_index,
+                    n_channels,
+                    time,
+                    n_timepoints,
+                )
+                if proceed is False:
+                    raise RuntimeError("Measure cancelled by user")
+        measurements.append(per_channel)
+
+    run = _MeasurementRun(
+        measurements=measurements,
+        method=method,
+        at_channel=at_channel,
+        n_channels=n_channels,
+        n_timepoints=n_timepoints,
+        source_revision=source_revision,
+        source_fingerprint=source_fingerprint,
+        source_dependency_fingerprint=source_dependency_fingerprint,
+        source_calibration=source_calibration,
+    )
+    image_manifest_after = image_source_manifest_token(
+        image_provider,
+        timepoints=measured_timepoints,
+        planes=None,
+    )
+    if (
+        image_manifest_before is not None
+        and image_manifest_after is not None
+        and image_manifest_before != image_manifest_after
+    ):
+        raise RuntimeError(
+            "Image source changed while Measure was running; no measurements "
+            "were applied. Reload the dataset and run Measure again."
+        )
+    if not _measurement_source_matches(manager, run):
+        raise RuntimeError(
+            "Dataset changed while Measure was running; no measurements were "
+            "applied. Run Measure again against the current nuclei."
+        )
+    return run
+
+
+def _measurement_source_matches(
+    manager: NucleiManager,
+    run: _MeasurementRun,
+) -> bool:
+    return (
+        int(getattr(manager, "data_revision", 0)) == run.source_revision
+        and expression_document_fingerprint(manager) == run.source_fingerprint
+    )
 
 
 def _build_expression_measurement_set(
@@ -490,14 +661,18 @@ def _apply_to_at_channel(
 ) -> None:
     """Write measured rwraw / rwcorr1 (/ rwcorr3) back onto each nucleus.
 
-    Only touches nuclei with a non-zero pixel count; leaves dead or
-    unmeasured nuclei untouched so prior values aren't blown away.
+    A non-positive inner-pixel count is the explicit missing-sample marker.
+    In that case all legacy red-expression fields are cleared. This prevents
+    a successful partial run from combining old values with new ones after
+    the nuclei archive is saved and reopened, when the in-memory measurement
+    snapshot is no longer available to carry an exact validity mask.
 
     When ``use_blot`` is True, the neighbor-masked annulus aggregation
     is stored in ``rwcorr3`` (the historical "blot" slot).  Otherwise
     ``rwcorr3`` is left untouched.
     """
     updated = 0
+    cleared = 0
     for t0, nucs in enumerate(manager.nuclei_record):
         if t0 >= len(per_tp):
             break
@@ -507,6 +682,8 @@ def _apply_to_at_channel(
                 continue
             sum_in, count_in, sum_ann, count_ann, sum_blot, count_blot = tp_meas[j]
             if count_in <= 0:
+                _clear_legacy_at_measurement(nuc)
+                cleared += 1
                 continue
             nuc.rwraw = int(round(sum_in * SCALE / count_in))
             nuc.rwcorr1 = (
@@ -528,10 +705,26 @@ def _apply_to_at_channel(
             updated += 1
 
     logger.info(
-        "Updated rwraw / rwcorr1%s on %d nuclei from channel %d",
+        "Updated rwraw / rwcorr1%s on %d nuclei and cleared %d missing "
+        "samples from channel %d",
         " / rwcorr3" if use_blot else "",
-        updated, at_channel + 1,
+        updated,
+        cleared,
+        at_channel + 1,
     )
+
+
+def _clear_legacy_at_measurement(nucleus: Nucleus) -> None:
+    """Mark one selected-channel legacy sample as absent for persistence."""
+
+    nucleus.rweight = 0
+    nucleus.rsum = 0
+    nucleus.rcount = 0
+    nucleus.rwraw = 0
+    nucleus.rwcorr1 = 0
+    nucleus.rwcorr2 = 0
+    nucleus.rwcorr3 = 0
+    nucleus.rwcorr4 = 0
 
 
 def _set_measured_at_weights(

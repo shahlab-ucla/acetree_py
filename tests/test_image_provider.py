@@ -19,6 +19,8 @@ from acetree_py.io.image_provider import (
     TiffDirectoryProvider,
     ZipTiffProvider,
     clone_image_provider_for_worker,
+    enumerate_image_source_files,
+    image_source_manifest_token,
 )
 
 
@@ -47,6 +49,127 @@ def test_builtin_provider_can_be_cloned_for_worker(provider, expected_type) -> N
 
     assert isinstance(clone, expected_type)
     assert clone is not provider
+
+
+def test_per_plane_manifest_tracks_missing_files_within_bounded_movie(
+    tmp_path: Path,
+) -> None:
+    provider = TiffDirectoryProvider(
+        tmp_path,
+        pattern="emb_t{time:03d}-p{plane:02d}.tif",
+        num_planes=3,
+    )
+
+    paths = enumerate_image_source_files(
+        SplitChannelProvider(provider),
+        timepoints=(1, 2),
+        planes=(1, 2),
+    )
+    before = image_source_manifest_token(
+        provider,
+        timepoints=(1, 2),
+        planes=(1, 2),
+    )
+    (tmp_path / "emb_t002-p02.tif").write_bytes(b"appeared")
+    after = image_source_manifest_token(
+        provider,
+        timepoints=(1, 2),
+        planes=(1, 2),
+    )
+    (tmp_path / "emb_t002-p02.tif").unlink()
+    disappeared = image_source_manifest_token(
+        provider,
+        timepoints=(1, 2),
+        planes=(1, 2),
+    )
+
+    assert paths is not None
+    assert [path.name for path in paths] == [
+        "emb_t001-p01.tif",
+        "emb_t001-p02.tif",
+        "emb_t002-p01.tif",
+        "emb_t002-p02.tif",
+    ]
+    assert before != after
+    assert disappeared != after
+
+
+def test_multichannel_stack_manifest_includes_every_channel_sibling(
+    tmp_path: Path,
+) -> None:
+    red = StackTiffProvider(tmp_path / "red", pattern="r_t{time:02d}.tif")
+    green = StackTiffProvider(tmp_path / "green", pattern="g_t{time:02d}.tif")
+    provider = MultiChannelFolderProvider([red, green])
+
+    paths = enumerate_image_source_files(
+        provider,
+        timepoints=(2, 3),
+        planes=(1,),
+    )
+
+    assert paths is not None
+    assert {path.name for path in paths} == {
+        "r_t02.tif",
+        "r_t03.tif",
+        "g_t02.tif",
+        "g_t03.tif",
+    }
+
+
+def test_ome_directory_manifest_covers_every_eagerly_loaded_file(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "ome"
+    directory.mkdir()
+    (directory / "t001.tif").write_bytes(b"one")
+    (directory / "t002.tif").write_bytes(b"two")
+    (directory / "t003.tif").write_bytes(b"outside requested range")
+    provider = OmeTiffProvider(directory)
+
+    paths = enumerate_image_source_files(
+        provider,
+        timepoints=(1, 2),
+        planes=(1,),
+    )
+    before = image_source_manifest_token(
+        provider,
+        timepoints=(1, 2),
+        planes=(1,),
+    )
+    (directory / "t000.tif").write_bytes(b"new first logical timepoint")
+    after = image_source_manifest_token(
+        provider,
+        timepoints=(1, 2),
+        planes=(1,),
+    )
+
+    assert paths is not None
+    assert [path.name for path in paths] == ["t001.tif", "t002.tif", "t003.tif"]
+    assert before != after
+
+
+def test_custom_manifest_hook_is_supported_and_numpy_remains_untracked(
+    tmp_path: Path,
+) -> None:
+    class HookProvider:
+        def image_source_files(self, *, timepoints, planes):
+            assert timepoints == (1, 2)
+            assert planes == (1,)
+            return [tmp_path / f"custom_{time}.bin" for time in timepoints]
+
+    paths = enumerate_image_source_files(
+        HookProvider(),  # type: ignore[arg-type]
+        timepoints=(2, 1),
+        planes=(1,),
+    )
+
+    assert paths is not None
+    assert [path.name for path in paths] == ["custom_1.bin", "custom_2.bin"]
+    assert image_source_manifest_token(
+        NumpyProvider(np.zeros((1, 1, 2, 2))),
+        timepoints=(1,),
+        planes=(1,),
+    ) is None
 
 
 # ── NumpyProvider tests ─────────────────────────────────────────

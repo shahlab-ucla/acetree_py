@@ -26,6 +26,7 @@ from typing import Callable, Iterable, Mapping, TextIO
 
 from ..core.cell import Cell
 from ..core.nucleus import Nucleus
+from .expression_smoothing import gaussian_smooth_missing
 
 
 class TimeAxisMode(str, Enum):
@@ -81,6 +82,7 @@ class ExpressionPlotSeries:
     absolute_timepoints: tuple[int, ...]
     x_values: tuple[float, ...]
     y_values: tuple[float | None, ...]
+    raw_y_values: tuple[float | None, ...] | None = None
 
     def __post_init__(self) -> None:
         lengths = {
@@ -88,8 +90,16 @@ class ExpressionPlotSeries:
             len(self.x_values),
             len(self.y_values),
         }
+        if self.raw_y_values is not None:
+            lengths.add(len(self.raw_y_values))
         if len(lengths) != 1:
             raise ValueError("Expression plot series arrays must have equal length")
+
+    @property
+    def source_y_values(self) -> tuple[float | None, ...]:
+        """Unsmoothed measurements used to construct the displayed series."""
+
+        return self.y_values if self.raw_y_values is None else self.raw_y_values
 
     @property
     def has_data(self) -> bool:
@@ -131,6 +141,7 @@ class ExpressionPlotData:
     channel: ExpressionChannel
     time_mode: TimeAxisMode
     series: tuple[ExpressionPlotSeries, ...]
+    smoothing_sigma: float = 0.0
 
     @property
     def x_label(self) -> str:
@@ -188,6 +199,7 @@ class ExpressionPlotService:
         time_mode: TimeAxisMode | str = TimeAxisMode.ABSOLUTE,
         *,
         styles: Mapping[str, ExpressionSeriesStyle] | None = None,
+        smoothing_sigma: float = 0.0,
     ) -> ExpressionPlotData:
         """Build series for every selected cell.
 
@@ -202,6 +214,8 @@ class ExpressionPlotService:
 
         channel = self.channel(channel_key)
         mode = _coerce_time_mode(time_mode)
+        smoothing_sigma = float(smoothing_sigma)
+        gaussian_smooth_missing((), smoothing_sigma)
         styles = styles or {}
         output: list[ExpressionPlotSeries] = []
 
@@ -213,14 +227,20 @@ class ExpressionPlotService:
             style = styles.get(cell_key) or styles.get(cell.name) or ExpressionSeriesStyle()
 
             x_values = tuple(_time_coordinate(time, start, end, mode) for time in absolute_times)
-            y_values: list[float | None] = []
+            raw_y_values: list[float | None] = []
             for time in absolute_times:
                 nucleus = cell.get_nucleus_at(time)
                 if nucleus is None:
-                    y_values.append(None)
+                    raw_y_values.append(None)
                     continue
                 raw_value = channel.reader(cell, time, nucleus)
-                y_values.append(_finite_value_or_none(raw_value, channel, cell, time))
+                raw_y_values.append(
+                    _finite_value_or_none(raw_value, channel, cell, time)
+                )
+            plotted_y_values = gaussian_smooth_missing(
+                raw_y_values,
+                smoothing_sigma,
+            )
 
             output.append(
                 ExpressionPlotSeries(
@@ -233,11 +253,17 @@ class ExpressionPlotService:
                     end_time=end,
                     absolute_timepoints=absolute_times,
                     x_values=x_values,
-                    y_values=tuple(y_values),
+                    y_values=plotted_y_values,
+                    raw_y_values=tuple(raw_y_values),
                 )
             )
 
-        return ExpressionPlotData(channel=channel, time_mode=mode, series=tuple(output))
+        return ExpressionPlotData(
+            channel=channel,
+            time_mode=mode,
+            series=tuple(output),
+            smoothing_sigma=float(smoothing_sigma),
+        )
 
 
 def nucleus_attribute_channel(
@@ -313,14 +339,17 @@ def export_expression_plot_csv(
                 "time_mode",
                 "x",
                 "absolute_time",
+                "raw_value",
                 "value",
+                "smoothing_sigma",
                 "color",
             ]
         )
         for series in data.series:
-            for absolute_time, x_value, y_value in zip(
+            for absolute_time, x_value, raw_y_value, y_value in zip(
                 series.absolute_timepoints,
                 series.x_values,
+                series.source_y_values,
                 series.y_values,
             ):
                 writer.writerow(
@@ -334,7 +363,9 @@ def export_expression_plot_csv(
                         data.time_mode.value,
                         _format_number(x_value),
                         absolute_time,
+                        "" if raw_y_value is None else _format_number(raw_y_value),
                         "" if y_value is None else _format_number(y_value),
+                        _format_number(data.smoothing_sigma),
                         series.color or "",
                     ]
                 )

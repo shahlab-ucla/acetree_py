@@ -188,7 +188,9 @@ def test_export_csv_contains_transformed_and_absolute_time_and_missing_values() 
         "time_mode": "normalized",
         "x": "0",
         "absolute_time": "3",
+        "raw_value": "10",
         "value": "10",
+        "smoothing_sigma": "0",
         "color": "#ff0000",
     }
     assert rows[1]["x"] == "0.5"
@@ -220,6 +222,38 @@ def test_service_exposes_stable_default_channel_order() -> None:
         "rwraw",
         "weight",
     ]
+
+
+def test_gaussian_smoothing_preserves_raw_values_and_plot_gaps() -> None:
+    cell = _cell("A", 1, [0, 10, 0, None, 100, 100])
+    series = ExpressionPlotService().build(
+        [cell],
+        "rweight",
+        smoothing_sigma=1.0,
+    ).series[0]
+
+    assert series.source_y_values == (0.0, 10.0, 0.0, None, 100.0, 100.0)
+    assert series.y_values[3] is None
+    assert series.y_values[:3] != series.source_y_values[:3]
+    assert series.y_values[4:] == pytest.approx((100.0, 100.0))
+
+
+def test_smoothed_csv_exports_raw_and_exact_plotted_values() -> None:
+    data = ExpressionPlotService().build(
+        [_cell("A", 1, [0, 10, 0])],
+        "rweight",
+        smoothing_sigma=1.0,
+    )
+    output = io.StringIO()
+
+    export_expression_plot_csv(data, output)
+
+    rows = list(csv.DictReader(io.StringIO(output.getvalue())))
+    assert [row["raw_value"] for row in rows] == ["0", "10", "0"]
+    assert [float(row["value"]) for row in rows] == pytest.approx(
+        data.series[0].y_values
+    )
+    assert {row["smoothing_sigma"] for row in rows} == {"1"}
 
 
 def test_duplicate_and_unknown_channels_fail_with_context() -> None:

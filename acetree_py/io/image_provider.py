@@ -18,11 +18,15 @@ Ported from: org.rhwlab.image.ZipImage (ZipImage.java)
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import logging
+import os
 import re
 import typing
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -83,6 +87,159 @@ class ImageProvider(Protocol):
     def image_shape(self) -> tuple[int, int]:
         """(height, width) of each plane."""
         ...
+
+
+def enumerate_image_source_files(
+    provider: ImageProvider,
+    *,
+    timepoints: Iterable[int],
+    planes: Iterable[int] | None = None,
+) -> tuple[Path, ...] | None:
+    """Enumerate files a provider can consume for a bounded movie range.
+
+    Built-in wrapper providers are unwrapped recursively.  Per-plane sources
+    include every configured plane at every requested absolute timepoint,
+    including paths which do not currently exist; this is intentional so a
+    later file appearance changes the manifest.  Unknown and in-memory
+    providers return ``None`` and therefore retain their existing behavior.
+
+    Third-party providers can opt in without inheriting from a concrete class
+    by implementing::
+
+        image_source_files(*, timepoints: tuple[int, ...],
+                           planes: tuple[int, ...]) -> Iterable[Path]
+
+    The hook must be side-effect free and should return missing expected paths
+    as well as existing paths when file appearance must invalidate a cache.
+    """
+
+    bounded_times = tuple(
+        sorted({int(value) for value in timepoints if int(value) > 0})
+    )
+    bounded_planes = tuple(
+        sorted({int(value) for value in (planes or ()) if int(value) > 0})
+    )
+
+    if isinstance(provider, SplitChannelProvider):
+        return enumerate_image_source_files(
+            provider._inner,
+            timepoints=bounded_times,
+            planes=bounded_planes,
+        )
+    if isinstance(provider, MultiChannelFolderProvider):
+        combined: list[Path] = []
+        for channel_provider in provider._channels:
+            channel_files = enumerate_image_source_files(
+                channel_provider,
+                timepoints=bounded_times,
+                planes=bounded_planes,
+            )
+            if channel_files is None:
+                return None
+            combined.extend(channel_files)
+        return _canonical_source_paths(combined)
+    if isinstance(provider, ZipTiffProvider):
+        selected_planes = bounded_planes or tuple(range(1, provider._num_planes + 1))
+        return _canonical_source_paths(
+            provider._build_path(time, plane)
+            for time in bounded_times
+            for plane in selected_planes
+        )
+    if isinstance(provider, TiffDirectoryProvider):
+        selected_planes = bounded_planes or tuple(range(1, provider._num_planes + 1))
+        return _canonical_source_paths(
+            provider.directory
+            / provider.pattern.format(time=time, plane=plane, channel=channel)
+            for time in bounded_times
+            for plane in selected_planes
+            for channel in range(max(1, provider.num_channels))
+        )
+    if isinstance(provider, StackTiffProvider):
+        return _canonical_source_paths(
+            provider._build_path(time) for time in bounded_times
+        )
+    if isinstance(provider, OmeTiffProvider):
+        if provider.path.is_dir():
+            # Keep exactly the same extension grouping and lexical ordering
+            # used by OmeTiffProvider._load_directory. That implementation
+            # eagerly reads the entire directory even when only a bounded set
+            # of logical timepoints is later requested, so every file belongs
+            # in the source manifest.
+            files = sorted(provider.path.glob("*.tif")) + sorted(
+                provider.path.glob("*.tiff")
+            )
+            return _canonical_source_paths(files)
+        return _canonical_source_paths((provider.path,))
+    if isinstance(provider, NumpyProvider):
+        return None
+
+    hook = getattr(provider, "image_source_files", None)
+    if not callable(hook):
+        return None
+    return _canonical_source_paths(
+        hook(timepoints=bounded_times, planes=bounded_planes)
+    )
+
+
+def image_source_manifest_token(
+    provider: ImageProvider,
+    *,
+    timepoints: Iterable[int],
+    planes: Iterable[int] | None = None,
+) -> str | None:
+    """Return a deterministic stat-only token for a provider's movie files.
+
+    Contents are deliberately not read.  Canonical path, existence, file
+    type, byte size, and nanosecond modification time are sufficient to make
+    session caches fail closed while keeping validation inexpensive.
+    """
+
+    paths = enumerate_image_source_files(
+        provider,
+        timepoints=timepoints,
+        planes=planes,
+    )
+    if paths is None:
+        return None
+    records = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            records.append(
+                {
+                    "path": os.path.normcase(str(path)),
+                    "exists": False,
+                    "is_file": False,
+                    "size": None,
+                    "mtime_ns": None,
+                }
+            )
+        else:
+            records.append(
+                {
+                    "path": os.path.normcase(str(path)),
+                    "exists": True,
+                    "is_file": path.is_file(),
+                    "size": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                }
+            )
+    payload = json.dumps(
+        {"schema": 1, "files": records},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_source_paths(paths: Iterable[str | Path]) -> tuple[Path, ...]:
+    unique: dict[str, Path] = {}
+    for value in paths:
+        path = Path(value).expanduser().resolve(strict=False)
+        unique[os.path.normcase(str(path))] = path
+    return tuple(unique[key] for key in sorted(unique))
 
 
 # ── Implementations ──────────────────────────────────────────────

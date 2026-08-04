@@ -105,6 +105,10 @@ if _GUI_AVAILABLE:
         """Matplotlib navigation whose Save action honors data validity."""
 
         def __init__(self, canvas, parent) -> None:
+            # A toolbar added to the plot-area layout is reparented to that
+            # intermediate QWidget by Qt.  Keep the actual expression-window
+            # owner explicitly so guarded Save never targets the layout host.
+            self._expression_owner = parent
             super().__init__(canvas, parent)
             self._save_action = next(
                 (
@@ -121,7 +125,7 @@ if _GUI_AVAILABLE:
                 self._save_action.setEnabled(enabled)
 
         def save_figure(self, *_args) -> None:
-            owner = self.parent()
+            owner = self._expression_owner
             try:
                 owner._exportable_snapshot()
             except (AttributeError, RuntimeError) as error:
@@ -317,6 +321,9 @@ class ExpressionPlotWindow(QWidget):  # type: ignore[misc]
         self._line_width = _double_spin(0.1, 10.0, 1.5, 0.1)
         self._marker_size = _double_spin(0.0, 30.0, 4.0, 0.5)
         self._opacity = _double_spin(0.05, 1.0, 1.0, 0.05)
+        self._smooth_check = QCheckBox("Gaussian smoothing")
+        self._smooth_sigma = _double_spin(0.1, 20.0, 1.0, 0.1)
+        self._smooth_sigma.setEnabled(False)
         self._font_size = _double_spin(6.0, 36.0, 10.0, 1.0)
         self._title_size = _double_spin(6.0, 48.0, 13.0, 1.0)
         for spin in (
@@ -327,9 +334,13 @@ class ExpressionPlotWindow(QWidget):  # type: ignore[misc]
             self._title_size,
         ):
             spin.valueChanged.connect(self.refresh_plot)
+        self._smooth_check.toggled.connect(self._on_smoothing_toggled)
+        self._smooth_sigma.valueChanged.connect(self.refresh_plot)
         form.addRow("Line width", self._line_width)
         form.addRow("Marker size", self._marker_size)
         form.addRow("Opacity", self._opacity)
+        form.addRow("Smoothing", self._smooth_check)
+        form.addRow("Gaussian σ (samples)", self._smooth_sigma)
         form.addRow("Label/tick font", self._font_size)
         form.addRow("Title font", self._title_size)
 
@@ -724,6 +735,11 @@ class ExpressionPlotWindow(QWidget):  # type: ignore[misc]
                 channel_key,
                 mode,
                 styles=self._series_styles,
+                smoothing_sigma=(
+                    self._smooth_sigma.value()
+                    if self._smooth_check.isChecked()
+                    else 0.0
+                ),
             )
         except Exception as error:  # noqa: BLE001 - surface plugin/reader errors in-window
             logger.exception("Could not build expression plot")
@@ -993,6 +1009,10 @@ class ExpressionPlotWindow(QWidget):  # type: ignore[misc]
     def _on_auto_y_changed(self, checked: bool) -> None:
         self._y_min.setEnabled(not checked)
         self._y_max.setEnabled(not checked)
+        self.refresh_plot()
+
+    def _on_smoothing_toggled(self, checked: bool) -> None:
+        self._smooth_sigma.setEnabled(checked)
         self.refresh_plot()
 
     def _on_auto_x_changed(self, checked: bool) -> None:

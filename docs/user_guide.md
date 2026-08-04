@@ -622,7 +622,7 @@ Multi-channel images are displayed as separate napari layers with green/magenta 
 - **Ctrl+S** or the **Save** button: Overwrites the original nuclei ZIP file.
 - **Ctrl+Shift+S** or **Save As**: Opens a file dialog to choose a new location, makes that location the target of subsequent Save operations, and updates the source XML config so reopening it follows the new ZIP. The retarget happens only after the data save and config rewrite both succeed.
 
-The saved file is a ZIP containing CSV-formatted nucleus data, one entry per timepoint. This is the standard AceTree nuclei format and can be opened by both AceTree-Py and the original Java AceTree. AceTree fully prepares the nuclei ZIP and any manual-orientation sidecar before committing them. A failure leaves the previous ZIP and sidecar together, rather than mixing one new file with one old file. Existing file permissions are retained across replacement. If an automated tracking run has been accepted, Save also writes the latest run beside the nuclei ZIP as `<stem>.tracking.json`.
+The saved file is a ZIP containing CSV-formatted nucleus data, one entry per timepoint. This is the standard AceTree nuclei format and can be opened by both AceTree-Py and the original Java AceTree. AceTree fully prepares the nuclei ZIP and any manual-orientation sidecar before committing them. If Measure changed the correction setting, ordinary Save also prepares the updated XML first and keeps a rollback copy of the old ZIP until the XML replacement succeeds. A failure therefore leaves the previous ZIP, sidecar, and correction config together, rather than mixing old and new files. Existing file permissions are retained across replacement. If an automated tracking run has been accepted, Save also writes the latest run beside the nuclei ZIP as `<stem>.tracking.json`.
 
 ### 8.2 What Gets Saved
 
@@ -690,6 +690,15 @@ preparation is running, the operation stops without publishing the result.
 All channel CSVs are staged as one set; a cancellation, write failure, or late
 publication failure restores the prior CSV set and in-memory measurements.
 
+A run is intentionally allowed to be partial when the selected AT channel has
+at least one valid nucleus sample. It publishes the valid measurements, writes
+empty CSV values for missing samples, and clears those samples' persisted
+legacy red fields so old values cannot masquerade as new data. If the selected
+AT channel produces **no valid samples at all**, Measure aborts before
+publication: existing CSVs, legacy fields, the session measurement snapshot,
+the correction setting, and the config-dirty state are all preserved. Check
+the image source, channel, time range, and nucleus geometry before retrying.
+
 ### 10.2 Output CSVs
 
 One CSV per image channel, with filenames like:
@@ -705,15 +714,28 @@ ABa,       4,          12,       ,   ,   , 1234.5, 1256.2, …
 ABp,       4,          13,       ,   ,   , 987.3,  1002.1, …
 ```
 
-Cells absent at a timepoint get an empty column value. The per-timepoint number is the same formula the lineage tree uses for color — plain `rwraw` when the session's correction is `"none"`, `rwraw - rwcorr1` otherwise.
+Cells absent or unmeasurable at a timepoint get an empty column value. The
+per-timepoint formula is plain `rwraw` for **None**, `rwraw - rwcorr1` for
+**Global**, and `rwraw - rwcorr3` for **Blot**. Legacy programmatic requests for
+`"local"` or `"cross"` use the documented fresh global fallback
+(`rwraw - rwcorr1`) because this port does not calculate `rwcorr2` or
+`rwcorr4`.
 
 Cells are sorted by `start_time` then name. Start and end times are 1-based and inclusive.
 
 ### 10.3 Effects on the Dataset
 
-- For the chosen AT channel, `nuc.rwraw`, `nuc.rwcorr1`, `nuc.rsum`, and `nuc.rcount` are **updated** on every live, measurable nucleus. Dead nuclei and nuclei that fall outside the image bounds are left untouched.
+- For the chosen AT channel, `nuc.rwraw`, `nuc.rwcorr1`, `nuc.rsum`, and
+  `nuc.rcount` are **updated** on every measurable nucleus. If a selected-channel
+  sample cannot be measured (for example, a missing stack, dead nucleus, or
+  nucleus outside the image), AceTree clears all of that sample's persisted
+  legacy red-expression fields, including the `rcount` validity marker. This
+  prevents values from an older run from looking current after save/reopen.
 - `compute_red_weights()` runs afterwards so `nuc.rweight` reflects the session's current correction mode.
-- **Save (`Ctrl+S`) to persist the new values** — Measure only changes the in-memory manager; the zip on disk is unchanged until you save.
+- **Save (`Ctrl+S`) to persist the new values** — Measure only changes the
+  in-memory manager until you save. Save writes the updated nuclei ZIP and the
+  selected correction identity back to the dataset XML, so reopening applies
+  the same correction to the saved legacy values.
 
 ### 10.4 Correction Modes and Limitations
 
@@ -735,7 +757,11 @@ The Measure dialog exposes three background-correction modes:
 | **Global — annulus mean** | `rwraw − rwcorr1` | Sparse embryos, isolated nuclei. Fastest. |
 | **Blot — annulus with neighbors masked (rwcorr3)** | `rwraw − rwcorr3` | Crowded embryos where neighbouring nuclei poke into the annulus and inflate the global background. |
 
-The dialog also writes the chosen mode back onto `manager._expr_corr`, so the lineage tree immediately re-colours using the corresponding correction field.
+A successful Measure run writes the effective mode onto `manager._expr_corr`
+and the in-memory XML configuration, so the lineage tree immediately
+re-colours using the matching correction. Ordinary **Save** persists both the
+nuclei values and that correction identity. Legacy `"local"` and `"cross"`
+requests persist as the effective `"global"` fallback.
 
 ### 10.5 Expression Plot windows
 
@@ -756,16 +782,20 @@ The basic workflow is:
    **Normalized lifetime** (birth = 0, final observation/division/death = 1).
    A one-timepoint cell is placed at 0. Missing samples remain gaps; they are
    never interpolated or silently connected.
-4. Edit each series' legend label and color. Plot controls cover title and axis
+4. Optionally enable **Gaussian smoothing** and set its sigma in samples.
+   Smoothing operates independently on each continuous run of measurements; it
+   never fills or blends across a missing sample. The displayed value is
+   smoothed, while CSV export also retains its unsmoothed value and the sigma.
+5. Edit each series' legend label and color. Plot controls cover title and axis
    labels, line/marker style and size, opacity, font sizes, linear/log Y scale,
    grid, automatic or manual X/Y limits, figure/axes/text colors, and legend
    title, location, and column count. The embedded Matplotlib toolbar also
    provides pan, zoom, and navigation.
-5. Use **Save plotted data as CSV…** for tidy long-form data containing the
+6. Use **Save plotted data as CSV…** for tidy long-form data containing the
    channel key/label/unit, displayed X coordinate, original absolute timepoint,
-   value, and series color. Use **Export plot as SVG…** for an editable vector
-   figure. Matplotlib's toolbar Save action follows the same validation as the
-   dedicated SVG button.
+   displayed and raw values, smoothing sigma, and series color. Use **Export
+   plot as SVG…** for an editable vector figure. Matplotlib's toolbar Save
+   action follows the same validation as the dedicated SVG button.
 
 #### Measurement completeness and edit concurrency
 
@@ -774,6 +804,12 @@ An amber prompt appears when stored expression looks incomplete. Use its
 workflow. Numeric zero remains a legitimate measurement; for legacy files,
 which have no explicit validity flag, AceTree conservatively prompts when the
 underlying expression aggregates are absent.
+
+After a partially successful current-session Measure run, both the numbered
+measured channel and its legacy AT view remain non-exportable when any selected
+cell sample is missing. The plot reports the valid/expected coverage and asks
+for Measure again; cleared legacy fields cannot make the partial result appear
+complete after save and reopen.
 
 Every committed nucleus edit, including Undo and Redo, advances a document
 revision. Measurements are bound to the revision and nucleus geometry from
@@ -790,6 +826,120 @@ recommends Measure before quantitative comparison. This advisory does not
 disable export of otherwise complete legacy values. Once Measure runs in the
 current session, any later edit becomes a blocking stale-data condition until
 Measure succeeds again.
+
+### 10.6 Comparing one cell across datasets
+
+Choose **Window → New Expression Comparison…** to compare biological or
+technical replicates in one modeless window. Each window focuses on one exact
+canonical cell name. Open additional windows to compare other cells or to keep
+several independently styled or statistically configured views. All
+comparison windows share an application-level dataset repository and
+measurement cache, so an XML loaded or measured once can be reused without
+repeating expensive work.
+
+The recommended workflow is:
+
+1. Use **Add XMLs…** to select one or more AceTree configuration files. Each
+   XML is opened as a detached, read-only dataset; comparison never replaces or
+   mutates the dataset in the main viewer. The detached copy always comes from
+   the XML/ZIP on disk. If that same dataset is active in the main viewer and
+   has unsaved edit-history or configuration changes, preparation and export
+   fail closed. Save it, select its comparison row, and use **Reload selected**
+   before preparing. If the current document has a saved XML, a new comparison
+   window adds it automatically. Later comparison windows
+   also prepopulate every XML already loaded in the shared session repository,
+   so making the same dataset set for another cell does not require browsing
+   for the files again. Re-adding the same resolved path is deduplicated.
+   Removing a row excludes it from that plot, while the shared cached dataset
+   remains available to other comparison windows.
+2. Enter or select one canonical cell name. Matching is exact and
+   case-sensitive in every dataset; partial names and internal hash keys are
+   not substituted. Missing and duplicate names are reported per dataset
+   instead of silently selecting another cell. Use the dataset table to enable
+   replicates and edit each replicate's display label, **Condition / group**,
+   and color. Datasets with the same nonblank group label are summarized
+   together; changing a label, group, or color redraws immediately and does not
+   require recomputation.
+3. Choose the expression source:
+   - **Saved legacy values** reads a complete built-in legacy expression field
+     from each nuclei archive. Legacy files do not record trustworthy source
+     provenance, physical image-channel identity, or correction method. The UI
+     marks all three as unverified. Any available saved legacy numeric trace
+     requires an explicit acknowledgement before export; the unacknowledged
+     plot is only a preview. A CSV containing only unavailable-status records
+     has no legacy numeric values to acknowledge.
+   - **Recompute from images** selects a numbered image channel and background
+     correction, then measures all channels into an immutable in-memory
+     snapshot. This path does not write Measure CSVs, change legacy nucleus
+     fields, modify the detached manager, or alter the active AceTree document.
+     The chosen physical channel number is applied to every included dataset;
+     verify that those datasets use the same channel ordering and fluorophore.
+     **Prepare/Recompute** shows cancellable progress. Later plots, cells, and
+     windows reuse the all-channel snapshot for that dataset and correction.
+   Missing cells, duplicate names, unavailable channels, and incomplete saved
+   or recomputed traces remain selected as explicit acquisition-status records.
+   They do not contribute invented values, and the CSV preserves why each
+   replicate was unavailable. Incomplete saved data specifically suggests the
+   verified image-recomputation path.
+4. Choose **Absolute timepoint**, **Relative to cell birth**, or **Normalized
+   lifetime**. Absolute and birth-relative comparisons use a tunable common
+   grid step; normalized lifetime uses a tunable number of points from 0 to 1.
+   **Union** keeps the full span represented by any replicate, whereas
+   **Intersection** limits the plot to their shared span. Values are never
+   extrapolated, and interpolation never crosses an explicit missing-data gap.
+5. Configure the traces and summary. **Show individual dataset traces** and
+   **Trace opacity** apply globally to every included replicate trace; the
+   table's **Use** checkbox instead includes or excludes that dataset from both
+   the plot and its summary. A **Mean** center offers sample SD, SEM, or
+   Student-t 95% confidence bands. A **Median** center offers IQR or scaled-MAD
+   bands. Choosing no center also disables the band, preventing statistically
+   mismatched center/error pairings. Each condition is summarized independently
+   and uses the first available row's trace color for its center/band;
+   individual rows retain their own colors. Each timepoint is calculated from
+   the available datasets, with selected, available, and valid replicate counts
+   preserved in the export.
+6. Optionally enable Gaussian smoothing and tune sigma in the displayed time
+   units. Each replicate is smoothed independently, without crossing gaps,
+   **before** the center line and error band are calculated. Thus the summary
+   describes the traces shown instead of smoothing an already averaged curve.
+7. Adjust title and axis labels, trace and center-line styles and widths,
+   markers, fonts, band opacity, legend title/position/columns, grid,
+   linear/log scale, manual limits, and figure/axes/text colors. **Save exact
+   comparison CSV…** exports the immutable numeric snapshot: native,
+   aligned/display, availability-status, provenance, and group-summary records.
+   Dataset labels and trace colors remain in those trace records, while
+   figure-only appearance controls are window-local rather than part of that
+   numeric data object. **Export plot as SVG…** (or the guarded toolbar Save) saves the
+   currently rendered figure after the same source validation. If every
+   included replicate is unavailable, the status-only CSV remains enabled but
+   SVG is disabled because there is no numeric plot to render.
+
+#### Cache validity and export safety
+
+The comparison cache lives only for the current AceTree application session;
+it is released, together with lazily opened image and ZIP handles, when AceTree
+closes. It is not reconstructed from Measure CSV files and it does not write a
+persistent sidecar. Restarting AceTree therefore requires loading the XMLs and,
+for verified values, recomputing them again.
+
+Each loaded dataset receives a new session generation. Its snapshot token
+combines that generation with the XML/nuclei/source fingerprint and, once a
+built-in image provider is opened, a stat-only inventory of every movie file
+Measure can consume, including non-representative timepoints and per-plane
+paths. Before reuse and immediately before CSV or SVG export, AceTree
+revalidates that token and its sources. If an XML, nuclei archive, image source,
+configuration, or measurement dependency has changed, appeared, or
+disappeared, the affected comparison fails closed. The stale row remains
+visible and selectable so **Reload selected** is always available; an existing
+figure may remain only as a visual reference, with export disabled.
+
+**Reload selected** closes that dataset's provider, clears its shared
+recomputation cache, and creates a new generation even when the on-disk file
+statistics happen to be identical. This deliberately invalidates snapshots in
+every other comparison window. Those windows do not need to browse for the XML
+again, but they must prepare the row against the new generation before export.
+This prevents a displayed plot from becoming exportable again under an old or
+mismatched provenance token.
 
 ---
 

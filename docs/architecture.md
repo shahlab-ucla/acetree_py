@@ -70,9 +70,13 @@ acetree_py/                    # Root package (__version__ = "0.2.0")
     dataset_dialog.py          # DatasetCreationDialog (5-page wizard)
     measure_dialog.py          # MeasureDialog (channel + output picker)
     expression_plot_window.py  # Multi-instance modeless expression plotting UI
+    expression_comparison_window.py # Multi-dataset replicate comparison UI
   analysis/                    # Post-hoc analysis — no GUI dependencies
     expression.py              # Expression time series analysis
     expression_plot.py         # Plot snapshots, time transforms, tidy CSV
+    expression_smoothing.py    # Gap-preserving Gaussian smoothing primitives
+    expression_comparison.py   # Cross-dataset grids, summaries, snapshots/export
+    expression_dataset_repository.py # Detached XMLs + session measurement cache
     expression_measurements.py # Revision-bound all-channel Measure store
     export.py                  # CSV, Newick export functions
     measure.py                 # Per-nucleus pixel sampling (port of ExtractRed)
@@ -236,7 +240,7 @@ nuclei/
 - `read_nuclei_zip(path)` → `list[list[Nucleus]]`
 - `write_nuclei_zip(nuclei_record, path, start_time=1)` — writes new-format CSV to a temporary archive in the destination directory, then atomically replaces the destination. Atomic replacements preserve an existing destination's file mode; a new file uses the normal process umask rather than inheriting the private `0600` mode of its staging file.
 
-When a manager contains manual body axes, Save also writes the matching AuxInfo v2 sidecar. The archive and sidecar are fully staged before either visible file changes. The sidecar is committed first with a same-directory rollback copy, and the archive is committed last; if either commit raises, the prior archive/sidecar set is restored. Undoing a manual frame removes only an AceTree-created sidecar under the same transaction—acquisition-provided sidecars are retained. Save As updates the config's nuclei path only after the data save succeeds, then atomically rewrites the source XML so reopening that config follows the new ZIP. If XML persistence fails, the in-memory target and savepoint remain unchanged (the newly written ZIP is retained as a standalone safety copy).
+When a manager contains manual body axes, Save also writes the matching AuxInfo v2 sidecar. The archive and sidecar are fully staged before either visible file changes. The sidecar is committed first with a same-directory rollback copy, and the archive is normally the final commit; if either commit raises, the prior archive/sidecar set is restored. When Measure has changed XML-backed correction state, ordinary Save also pre-stages the dirty XML and retains the old archive until the additional final XML replacement succeeds; a staging, archive, or XML-commit failure restores the prior archive/sidecar/config set. Undoing a manual frame removes only an AceTree-created sidecar under the same transaction—acquisition-provided sidecars are retained. Save As updates the config's nuclei path only after the data save succeeds, then atomically rewrites the source XML so reopening that config follows the new ZIP. If XML persistence fails, the in-memory target and savepoint remain unchanged (the newly written ZIP is retained as a standalone safety copy).
 
 When at least one tracking proposal has been accepted, the application also writes the latest `TrackingResult` beside the nuclei ZIP as `<stem>.tracking.json`. This versioned JSON records the request, detections, links, warnings, plugin provenance, and optional selected-forward `TrackingOutcome` (stop reason, prediction, search radius, and review-only candidates); the nuclei ZIP remains the authoritative curated dataset. Opening a dataset restores the optional sidecar for provenance, and a missing or malformed sidecar does not prevent the backward-compatible ZIP from opening.
 
@@ -645,15 +649,30 @@ Each nucleus is modelled as a sphere of diameter `nuc.size` centred at `(x, y, z
 1. Iterates every channel, every timepoint. For each `(t, channel)` it calls `image_provider.get_stack(t, channel)` and `measure_timepoint`, collecting `(sum_in, count_in, sum_ann, count_ann)` for every nucleus.
 2. Builds one all-channel immutable measurement snapshot and stages one CSV per channel. The per-timepoint value follows the requested correction method — plain `rwraw` for `"none"`, `rwraw - rwcorr1` for `"global"`, and `rwraw - rwcorr3` for `"blot"`.
 3. Revalidates the starting document fingerprint, then installs the staged CSV set while retaining the prior files as rollback copies.
-4. For the chosen `at_channel` only, writes scaled `rwraw`, `rwcorr1`, optional `rwcorr3`, `rsum`, `rcount`, and the matching `rweight` onto measurable nuclei. It then publishes the all-channel snapshot and releases the rollback copies. Dead or unmeasured nuclei remain untouched.
+4. For the chosen `at_channel` only, writes scaled `rwraw`, `rwcorr1`, optional
+   `rwcorr3`, `rsum`, `rcount`, and the matching `rweight` onto measurable
+   nuclei. A sample with no valid inner pixels clears every persisted legacy
+   red field (`rweight`, `rsum`, `rcount`, `rwraw`, and `rwcorr1`–`rwcorr4`) so
+   a partial run cannot retain a stale value that looks valid after reload. It
+   then publishes the all-channel snapshot and releases the rollback copies.
+
+Publication requires at least one valid sample in the selected AT channel. An
+all-failed selected channel raises before staging or publication and preserves
+the prior CSVs, legacy fields, measurement snapshot, correction/config value,
+and config-dirty flag. With one or more valid samples, the run is deliberately
+partial: valid samples publish and invalid selected-channel samples are cleared
+as described above.
 
 The runner writes every channel to private sibling files, validates the source
 again, then installs the complete CSV set while retaining rollback copies. It
 publishes an immutable `ExpressionMeasurementSet` and the legacy AT fields as
 part of the same transaction; rollback copies are deleted only after all
 in-memory publication succeeds. A cancellation, source mutation, CSV error, or
-late application error restores the prior files, legacy fields, correction
-mode, freshness flag, and measurement snapshot. The public
+late application error restores the prior files, all legacy fields (including
+`rwcorr2`/`rwcorr4`), correction mode/config-dirty state, freshness flag, and
+measurement snapshot. A successful correction change marks the XML config
+dirty so ordinary Save persists the correction identity alongside the nuclei
+ZIP. The public
 `run_measure() -> list[Path]` return contract remains unchanged.
 
 The measurement set is keyed by `(timepoint, nucleus.index)` and stores raw,
@@ -661,6 +680,14 @@ annulus, blot, pixel-count, and selected expression values for every channel.
 Each sample has a nucleus geometry signature. Calibration is checked for every
 mode, and blot results also retain a movie-wide geometry dependency fingerprint
 because an unselected neighbour can change the projected exclusion mask.
+
+`measure_expression_set(manager, image_provider, ...)` exposes the same
+all-channel measurement core as a nonmutating entry point. It returns an
+immutable `ExpressionMeasurementSet` without publishing it on the manager,
+rewriting legacy expression fields, changing correction state, or writing CSV
+files. The cross-dataset expression repository uses this boundary to prepare
+detached datasets safely; `run_measure()` remains the transactional,
+user-visible persistence path described above.
 
 **Cancellation:** `progress_cb(channel_idx, n_channels, t_1based, n_timepoints) -> bool | None` is fired after every timepoint. Returning `False` raises `RuntimeError("Measure cancelled by user")`.
 
@@ -675,7 +702,10 @@ because an unselected neighbour can change the projected exclusion mask.
 `ExpressionPlotService` produces immutable `ExpressionPlotData` snapshots for
 absolute, birth-relative, and normalized lifetime axes. Missing measurements
 remain `None` in the snapshot and become NaN gaps only at the Matplotlib
-boundary. The exact same snapshot feeds the renderer and tidy CSV exporter.
+boundary. Optional Gaussian smoothing is applied independently to each
+continuous run, so values cannot leak across a missing sample. Each series
+retains both its raw and displayed values, and the exact same immutable
+snapshot feeds the renderer and tidy CSV exporter.
 
 **Window lifecycle:** `Window → New Expression Plot…` creates an independent
 `Qt.Window`; repeated actions create distinct instances with monotonic titles.
@@ -691,6 +721,99 @@ CSV/SVG export until a new Measure run publishes data for the current revision.
 Reloaded legacy data has no provenance, so it receives a nonblocking
 freshness-unverified advisory rather than a false claim that the values are
 current.
+
+---
+
+### 7.5 Cross-Dataset Expression Comparison
+
+(`analysis/expression_dataset_repository.py`,
+`analysis/expression_comparison.py`,
+`gui/expression_comparison_window.py`)
+
+**Application-scoped repository:** `ExpressionDatasetRepository` owns detached
+`NucleiManager` instances for XML configurations selected in any comparison
+window. Canonical resolved paths are deduplicated, image providers are created
+lazily, and provider access is serialized per dataset. `AceTreeApp` owns one
+repository shared by every modeless comparison window and closes it at
+application shutdown, releasing image and ZIP handles. Loaded managers and
+recomputed measurements are deliberately session-only; Measure CSVs are
+neither read as cache entries nor written by this workflow.
+
+Every load receives a monotonically increasing session generation. A snapshot
+token combines that generation with the fingerprint of the XML, nuclei, and
+representative image sources. Once a built-in image provider is opened, a
+stat-only full-movie manifest additionally covers every file Measure can read
+at every nonempty absolute nuclei timepoint, including non-representative
+siblings and all per-plane paths, and becomes part of the token. Sources and
+tokens are checked before cache reuse and export. An explicit reload closes the
+provider, clears that dataset's correction caches, and creates a new generation
+even when file metadata is otherwise identical, so snapshots held by other
+windows cannot silently become current again.
+
+A source mismatch, appearance, or disappearance raises an explicit
+`DatasetSourceChangedError`. Recovery-only `session_status()` /
+`session_statuses()` access keeps a stale row visible without authorizing cache
+reuse or export, allowing the user to select **Reload**. The old figure may
+remain as a visual reference, but CSV and SVG export fail closed until the row
+is reloaded and prepared against the new generation. If the same XML is active
+in the main viewer with unsaved edit-history or config changes, comparison also
+blocks preparation/export and directs the user to Save, Reload, and prepare.
+
+**Trace acquisition:** A comparison window requests one exact, case-sensitive
+canonical cell name from each selected dataset. Missing and ambiguous cells,
+missing channels, and incomplete acquired traces become explicit status
+records rather than approximate matches. These selected replicates remain in
+the provenance and denominators even though they contribute no invented
+numeric values. There are two source boundaries:
+
+- Saved built-in legacy expression values are accepted only when the requested
+  cell has a complete trace. Because legacy nuclei archives do not establish
+  source provenance, physical channel identity, or correction identity, their
+  trace provenance marks freshness, channel, and correction as unverified; the
+  GUI requires explicit acknowledgement before exporting an available numeric
+  legacy trace. Status-only CSV contains no legacy numeric value and therefore
+  does not require that acknowledgement.
+- Recomputed values come from the nonmutating `measure_expression_set()` API.
+  The repository caches one immutable all-channel snapshot per dataset and
+  correction mode, allowing later cells, channels, and comparison windows to
+  reuse the work without mutating either the detached manager or active
+  document.
+
+**Renderer-neutral comparison model:** `ExpressionComparisonService` consumes
+immutable native traces; the dataset is the replicate unit. It transforms
+absolute, birth-relative, or normalized-lifetime coordinates and aligns each
+cell to a common union or intersection grid. Absolute and relative grids accept
+an explicit step, while normalized grids use a specified point count. Alignment
+never extrapolates or interpolates across an explicit gap.
+
+`gaussian_smooth_missing()` is applied to each aligned replicate before any
+pointwise summary is calculated. Sigma is expressed in displayed-axis units
+and converted to grid bins, preserving missing-data segments. The center can be
+none, mean, or median. A mean permits no band, sample standard deviation,
+standard error, or Student-t 95% confidence interval; a median permits no band,
+interquartile range, or scaled median absolute deviation. `SummarySpec` rejects
+cross-family pairings, and the GUI exposes only compatible choices. Dataset
+`group_id` is the condition boundary: each group is summarized independently,
+and each point records selected, trace-available, and numerically valid
+replicate counts. One global switch and opacity value control display of all
+included individual traces; a dataset's **Use** state instead controls its
+membership in both traces and summaries. Dataset colors and all other
+appearance settings remain window-local.
+
+**Snapshot and export:** Each render creates an immutable numeric
+`ExpressionComparisonData` containing the comparison specification,
+provenance, trace availability, native values, common-grid values, displayed
+smoothed values, and group-specific summary rows. Legacy acknowledgement is
+recorded in provenance metadata rather than inferred later. This object drives
+the numeric Matplotlib series and tidy CSV; dataset labels and trace colors
+remain in its trace records. Figure-only appearance—title and axis text, fonts,
+line and marker styles and widths, opacity, legend, limits, grid, and
+figure/axes/text colors—is window-local live state; SVG and the toolbar Save
+action write the currently rendered figure rather than claim
+that appearance belongs to the numeric snapshot. All export paths first
+revalidate repository generation/source tokens. A prepared comparison with only
+unavailable-status records may export CSV, but SVG/toolbar Save remain disabled
+because there is no numeric plot.
 
 ---
 

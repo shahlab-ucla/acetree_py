@@ -96,6 +96,138 @@ class TestSaveMethod:
         assert result == target
         assert target.exists()
 
+    def test_plain_save_persists_expression_correction_in_config(self, tmp_path):
+        config_path = tmp_path / "embryo.xml"
+        target = tmp_path / "nuclei.zip"
+        app = _make_app(zip_path=target)
+        app.manager.config.config_file = config_path
+        app.manager.config.expr_corr = "blot"
+        write_config_xml(app.manager.config, config_path)
+
+        app.manager.config.expr_corr = "global"
+        app.manager._config_dirty = True
+        assert app.save() == target
+
+        assert load_config(config_path).expr_corr == "global"
+        assert not app.manager._config_dirty
+
+    def test_plain_save_config_staging_failure_preserves_previous_files(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import acetree_py.io.config_writer as config_writer_module
+
+        config_path = tmp_path / "embryo.xml"
+        target = tmp_path / "nuclei.zip"
+        app = _make_app(zip_path=target)
+        app.manager.config.config_file = config_path
+        app.manager.config.expr_corr = "blot"
+        write_config_xml(app.manager.config, config_path)
+        assert app.save() == target
+        previous_archive = target.read_bytes()
+        previous_config = config_path.read_bytes()
+
+        app.manager.nuclei_record[0][0].x = 777
+        app.manager.config.expr_corr = "global"
+        app.manager._config_dirty = True
+        monkeypatch.setattr(
+            config_writer_module,
+            "write_config_xml",
+            lambda *args: (_ for _ in ()).throw(OSError("config staging failed")),
+        )
+
+        assert app.save() is None
+        assert target.read_bytes() == previous_archive
+        assert config_path.read_bytes() == previous_config
+        assert app.manager._config_dirty
+        assert list(tmp_path.glob("*.save-config.tmp")) == []
+
+    def test_plain_save_config_commit_failure_restores_previous_archive(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import acetree_py.gui.app as app_module
+
+        config_path = tmp_path / "embryo.xml"
+        target = tmp_path / "nuclei.zip"
+        app = _make_app(zip_path=target)
+        app.manager.config.config_file = config_path
+        app.manager.config.expr_corr = "blot"
+        write_config_xml(app.manager.config, config_path)
+        assert app.save() == target
+        previous_archive = target.read_bytes()
+        previous_config = config_path.read_bytes()
+
+        app.edit_history.do(MoveNucleus(time=1, index=1, new_x=777))
+        app.manager.config.expr_corr = "global"
+        app.manager._config_dirty = True
+        real_replace = app_module.os.replace
+
+        def fail_final_config_replace(source, destination):
+            if Path(destination) == config_path:
+                raise OSError("config commit failed")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(app_module.os, "replace", fail_final_config_replace)
+
+        assert app.save() is None
+        assert target.read_bytes() == previous_archive
+        assert config_path.read_bytes() == previous_config
+        assert app.manager._config_dirty
+        assert app.edit_history.modified
+        assert list(tmp_path.glob(".nuclei.zip.*.rollback")) == []
+        assert list(tmp_path.glob("*.save-config.tmp")) == []
+
+    def test_plain_save_archive_commit_failure_keeps_config_and_archive_together(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import acetree_py.core.nuclei_manager as nuclei_manager_module
+
+        config_path = tmp_path / "embryo.xml"
+        target = tmp_path / "nuclei.zip"
+        app = _make_app(zip_path=target)
+        app.manager.config.config_file = config_path
+        app.manager.config.expr_corr = "blot"
+        write_config_xml(app.manager.config, config_path)
+        assert app.save() == target
+        previous_archive = target.read_bytes()
+        previous_config = config_path.read_bytes()
+
+        app.manager.nuclei_record[0][0].x = 777
+        app.manager.config.expr_corr = "global"
+        app.manager._config_dirty = True
+        real_replace = nuclei_manager_module.os.replace
+        failed = False
+
+        def fail_new_archive_install(source, destination):
+            nonlocal failed
+            if (
+                not failed
+                and Path(destination) == target
+                and Path(source).suffix == ".tmp"
+            ):
+                failed = True
+                raise OSError("archive commit failed")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(
+            nuclei_manager_module.os,
+            "replace",
+            fail_new_archive_install,
+        )
+
+        assert app.save() is None
+        assert failed
+        assert target.read_bytes() == previous_archive
+        assert config_path.read_bytes() == previous_config
+        assert app.manager._config_dirty
+        assert list(tmp_path.glob(".nuclei.zip.*.rollback")) == []
+        assert list(tmp_path.glob("*.save-config.tmp")) == []
+
     def test_save_without_path_returns_none_no_viewer(self):
         """Without a viewer, save_as cannot show a dialog and returns None."""
         app = _make_app()

@@ -115,6 +115,27 @@ def test_active_cell_is_preselected_and_plot_is_exportable(qtbot, tmp_path: Path
     assert "Expression by cell" in svg_text
 
 
+def test_gaussian_smoothing_is_tunable_and_exported_from_main_plot(
+    qtbot,
+    tmp_path: Path,
+):
+    window = ExpressionPlotWindow(_app(_manager()))
+    qtbot.addWidget(window)
+    raw = window._plot_data.series[0].y_values
+
+    window._smooth_sigma.setValue(1.5)
+    window._smooth_check.setChecked(True)
+
+    assert window._smooth_sigma.isEnabled()
+    assert window._plot_data.smoothing_sigma == pytest.approx(1.5)
+    assert window._plot_data.series[0].source_y_values == raw
+    assert window._plot_data.series[0].y_values != raw
+    csv_path = window.export_csv(tmp_path / "smoothed.csv")
+    text = csv_path.read_text(encoding="utf-8")
+    assert "raw_value" in text
+    assert "smoothing_sigma" in text
+
+
 def test_incomplete_data_prompts_for_measure_and_prevents_export(qtbot):
     window = ExpressionPlotWindow(_app(_manager(complete=False)))
     qtbot.addWidget(window)
@@ -208,7 +229,7 @@ def test_partial_current_measure_blocks_numbered_and_legacy_at_views(
 ):
     manager = _manager()
     # Only t=1 exists. Measure emits explicit missing samples for t=2/3 and
-    # leaves their prior legacy values in place for compatibility.
+    # clears their persisted legacy fields so stale values cannot look current.
     provider = NumpyProvider(
         np.full((1, 1, 3, 16, 16), 50, dtype=np.uint16)
     )

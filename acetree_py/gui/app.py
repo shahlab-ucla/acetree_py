@@ -15,6 +15,9 @@ Ported from: org.rhwlab.acetree.AceTree (the monolithic 4000+ line Java class)
 from __future__ import annotations
 
 import logging
+import os
+import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -51,6 +54,32 @@ from .marker_layers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _stage_config_xml(config: AceTreeConfig, destination: Path) -> Path:
+    """Serialize a config to a private sibling for a coordinated Save."""
+
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".save-config.tmp",
+    )
+    os.close(descriptor)
+    staged = Path(name)
+    try:
+        if destination.exists():
+            os.chmod(staged, stat.S_IMODE(destination.stat().st_mode))
+        from ..io.config_writer import write_config_xml
+
+        # The sibling lives in the destination directory, so relative paths in
+        # the staged XML are exactly those of the eventual config file.
+        write_config_xml(config, staged)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    return staged
 
 # Java AceTree stored this constant as `NUCZINDEXOFFSET = 1`, but in our
 # Python port ``nuc.z`` and ``current_plane`` are in the *same* 1-based
@@ -182,6 +211,10 @@ class AceTreeApp:
         self._lineage_widgets: list = []  # Multiple lineage tree panels
         self._expression_plot_windows: list = []
         self._expression_plot_window_counter: int = 0
+        self._expression_comparison_windows: list = []
+        self._expression_comparison_window_counter: int = 0
+        self._expression_dataset_repository = None
+        self._expression_repository_shutdown_connected = False
         self._panel_menu_actions: dict[str, object] = {}
         self._lineage_list = None
         # 0-based image channel most recently chosen by File -> Measure.
@@ -399,6 +432,15 @@ class AceTreeApp:
             if qt_app is not None:
                 qt_app.aboutToQuit.connect(self._shutdown_global_tracking_workers)
                 self._tracking_shutdown_connected = True
+        if not self._expression_repository_shutdown_connected:
+            from qtpy.QtWidgets import QApplication
+
+            qt_app = QApplication.instance()
+            if qt_app is not None:
+                qt_app.aboutToQuit.connect(
+                    self._shutdown_expression_dataset_repository
+                )
+                self._expression_repository_shutdown_connected = True
         try:
             self.viewer.dims.events.ndisplay.connect(self._on_native_ndisplay_changed)
         except (AttributeError, TypeError):
@@ -1184,14 +1226,37 @@ class AceTreeApp:
                     )
                     return None
 
+        self.manager._config_dirty = False
         self._save_path_override = saved_path
         self.edit_history.mark_saved()
         return saved_path
 
     def _do_save(self, path: Path, *, mark_saved: bool = True) -> Path | None:
         """Write nuclei_record to *path* and report success/failure."""
+        config_stage: Path | None = None
         try:
-            self.manager.save(path)
+            config = self.manager.config
+            final_commit = None
+            if (
+                mark_saved
+                and config is not None
+                and bool(getattr(self.manager, "_config_dirty", False))
+            ):
+                config_path = Path(config.config_file)
+                if config_path != Path() and config_path.suffix.lower() == ".xml":
+                    config_stage = _stage_config_xml(config, config_path)
+                    staged_path = config_stage
+
+                    def commit_config() -> None:
+                        os.replace(staged_path, config_path)
+
+                    final_commit = commit_config
+
+            if final_commit is None:
+                self.manager.save(path)
+            else:
+                self.manager.save(path, final_commit=final_commit)
+                self.manager._config_dirty = False
             if self._tracking_results:
                 from ..tracking.persistence import (
                     tracking_sidecar_path,
@@ -1222,6 +1287,16 @@ class AceTreeApp:
                     f"Could not save to:\n{path}\n\nSee log for details.",
                 )
             return None
+        finally:
+            if config_stage is not None:
+                try:
+                    config_stage.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "Could not remove staged config after Save: %s",
+                        config_stage,
+                        exc_info=True,
+                    )
 
     # ── Screenshot + export ─────────────────────────────────────
 
@@ -1759,6 +1834,46 @@ class AceTreeApp:
         )
         self._expression_plot_windows.append(window)
         window.show()
+
+    def expression_dataset_repository(self):
+        """Return the application-scoped cross-dataset expression cache."""
+
+        if self._expression_dataset_repository is None:
+            from ..analysis.expression_dataset_repository import (
+                ExpressionDatasetRepository,
+            )
+
+            self._expression_dataset_repository = ExpressionDatasetRepository()
+        return self._expression_dataset_repository
+
+    def open_expression_comparison_window(self) -> None:
+        """Open an independent multi-dataset expression comparison window."""
+
+        from .expression_comparison_window import ExpressionComparisonWindow
+
+        self._expression_comparison_window_counter += 1
+        parent = None
+        try:
+            parent = self.viewer.window._qt_window if self.viewer is not None else None
+        except (AttributeError, RuntimeError):
+            parent = None
+        window = ExpressionComparisonWindow(
+            self,
+            repository=self.expression_dataset_repository(),
+            window_number=self._expression_comparison_window_counter,
+            parent=parent,
+        )
+        self._expression_comparison_windows.append(window)
+        window.show()
+
+    def _shutdown_expression_dataset_repository(self) -> None:
+        repository = self._expression_dataset_repository
+        self._expression_dataset_repository = None
+        if repository is not None:
+            try:
+                repository.close()
+            except Exception:  # noqa: BLE001 - best-effort application teardown
+                logger.exception("Could not close expression dataset repository")
 
     def _say(self, msg: str) -> None:
         """Set a one-line status message on the napari status bar.
@@ -3409,7 +3524,14 @@ class AceTreeApp:
                 window_menu = action.menu()
                 break
         if window_menu is None:
-            return
+            # Napari/app-model menu labels and construction order can vary by
+            # version or locale.  These are primary feature entry points, so
+            # never silently omit them merely because no discoverable Window
+            # menu existed yet.
+            logger.warning(
+                "No existing Window menu was discoverable; creating an AceTree one"
+            )
+            window_menu = menu_bar.addMenu("&Window")
 
         window_menu.addSeparator()
         # Add toggle actions for each of our dock widgets.
@@ -3436,9 +3558,16 @@ class AceTreeApp:
         )
         expression_action.triggered.connect(self.open_expression_plot_window)
         window_menu.addAction(expression_action)
+        comparison_action = QAction("New Expression Comparison…", qt_window)
+        comparison_action.setStatusTip(
+            "Compare one cell across multiple AceTree XML datasets"
+        )
+        comparison_action.triggered.connect(self.open_expression_comparison_window)
+        window_menu.addAction(comparison_action)
         self._panel_menu_actions = {
             "new_lineage": add_panel_action,
             "new_expression_plot": expression_action,
+            "new_expression_comparison": comparison_action,
         }
 
     def _on_new_lineage_panel(self) -> None:

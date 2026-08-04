@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,6 +105,10 @@ class NucleiManager:
         self.auxinfo: AuxInfo | None = None
         self._naming_method: int = NEWCANONICAL
         self._expr_corr: str = "none"
+        # Set when an in-memory operation changes XML-backed configuration.
+        # Ordinary Save rewrites the XML only while this flag is set, avoiding
+        # needless churn of legacy configs for nuclei-only edits.
+        self._config_dirty: bool = False
         # Monotonic document revision used to bind derived measurements to
         # the exact nuclei geometry/topology they were computed from.  Loading
         # starts at revision 0; every edit (including undo/redo) advances it.
@@ -233,6 +238,7 @@ class NucleiManager:
         logger.info("Loading nuclei from %s", zip_path)
         self._data_revision = 0
         self._last_data_edit_token = None
+        self._config_dirty = False
         self.nuclei_record = read_nuclei_zip(zip_path)
         self.expression_measurements = None
         self.expression_measurement_freshness_known = False
@@ -278,19 +284,29 @@ class NucleiManager:
             self.lineage_tree.num_cells if self.lineage_tree else 0,
         )
 
-    def save(self, zip_path: Path, start_time: int = 1) -> None:
+    def save(
+        self,
+        zip_path: Path,
+        start_time: int = 1,
+        *,
+        final_commit: Callable[[], None] | None = None,
+    ) -> None:
         """Save the nuclei archive and orientation sidecar as one transaction.
 
         Args:
             zip_path: Output path for the ZIP file.
             start_time: Starting timepoint number for file naming.
+            final_commit: Optional atomic final replacement coordinated with
+                the nuclei save. If it raises before changing its destination,
+                the previous archive and AuxInfo sidecar are restored. The GUI
+                uses this to commit a pre-staged dirty XML configuration.
         """
         zip_path = Path(zip_path)
         aux_base = zip_path.with_suffix("")
 
-        # Prepare every new byte before changing either user-visible file.
-        # The archive is committed last.  If that final atomic replacement
-        # fails, the sidecar change is rolled back to its exact prior file.
+        # Prepare every new byte before changing a user-visible file.  The
+        # archive is normally the final atomic replacement; a coordinated
+        # final commit retains the old archive until that added step succeeds.
         archive_stage = stage_nuclei_zip(
             self.nuclei_record,
             zip_path,
@@ -301,6 +317,8 @@ class NucleiManager:
         sidecar_operation = False
         sidecar_backup: Path | None = None
         sidecar_changed = False
+        archive_backup: Path | None = None
+        archive_changed = False
 
         try:
             if (
@@ -329,22 +347,46 @@ class NucleiManager:
                     os.replace(sidecar_stage, sidecar_path)
                 sidecar_changed = True
 
+            if final_commit is not None and zip_path.exists():
+                archive_backup = _unused_sibling_path(
+                    zip_path,
+                    suffix=".rollback",
+                )
+                os.replace(zip_path, archive_backup)
             os.replace(archive_stage, zip_path)
+            archive_changed = True
+            if final_commit is not None:
+                final_commit()
         except BaseException:
+            rollback_errors: list[BaseException] = []
+            if final_commit is not None:
+                try:
+                    if archive_changed:
+                        zip_path.unlink(missing_ok=True)
+                    if archive_backup is not None and archive_backup.exists():
+                        os.replace(archive_backup, zip_path)
+                except BaseException as rollback_error:
+                    rollback_errors.append(rollback_error)
+                    logger.exception(
+                        "Save failed and the archive rollback also failed for %s",
+                        zip_path,
+                    )
             try:
                 if sidecar_changed:
                     sidecar_path.unlink(missing_ok=True)
                 if sidecar_backup is not None and sidecar_backup.exists():
                     os.replace(sidecar_backup, sidecar_path)
             except BaseException as rollback_error:
+                rollback_errors.append(rollback_error)
                 logger.exception(
                     "Save failed and the AuxInfo rollback also failed for %s",
                     zip_path,
                 )
+            if rollback_errors:
                 raise RuntimeError(
-                    "Save failed and the previous AuxInfo sidecar could not "
-                    "be restored"
-                ) from rollback_error
+                    "Save failed and one or more previous dataset files could "
+                    "not be restored"
+                ) from rollback_errors[0]
             raise
         finally:
             _discard_staged_file(archive_stage)
@@ -359,6 +401,17 @@ class NucleiManager:
                 logger.warning(
                     "Could not remove completed-save backup: %s",
                     sidecar_backup,
+                    exc_info=True,
+                )
+        if archive_backup is not None:
+            try:
+                archive_backup.unlink(missing_ok=True)
+            except OSError:
+                # Both the new archive and final commit are already valid. A
+                # hidden backup is safer than reporting a failed durable save.
+                logger.warning(
+                    "Could not remove completed-save backup: %s",
+                    archive_backup,
                     exc_info=True,
                 )
         logger.info("Saved nuclei to %s", zip_path)
