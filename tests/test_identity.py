@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 
+import numpy as np
+import pytest
+
+import acetree_py.naming.identity as identity_module
 from acetree_py.core.nucleus import NILLI, Nucleus
 from acetree_py.io.auxinfo import AuxInfo
 from acetree_py.naming.identity import MANUAL, NEWCANONICAL, IdentityAssigner
@@ -535,3 +540,146 @@ class TestFullPipelineIntegration:
             if len(cell.nuclei) > 0 and cell != tree.root:
                 assert cell.parent is not None, \
                     f"Cell '{name}' has {len(cell.nuclei)} nuclei but no parent (orphaned)"
+
+
+def _axis_configuration(mode: str) -> AuxInfo | None:
+    if mode == "inferred":
+        return None
+    if mode == "v2":
+        return AuxInfo(
+            version=2,
+            data={
+                "AP_orientation": "-1 0 0",
+                "LR_orientation": "0 0 1",
+                "zpixres": "11.1",
+                "name": "forced-founder-test",
+            },
+        )
+    return AuxInfo(version=1, data={"axis": "ADL", "ang": "0"})
+
+
+@pytest.mark.parametrize("axis_mode", ["inferred", "v2", "v1"])
+def test_forced_early_parents_reconcile_progeny_for_every_axis_mode(axis_mode: str):
+    record = TestFullPipelineIntegration._build_full_lineage()
+    # Deliberately exchange the topology heuristic's AB/P1 roles.  These are
+    # cell-scoped curator anchors on the two-cell-stage continuations.
+    record[2][0].assigned_id = "P1"
+    record[2][0].identity = "P1"
+    record[2][1].assigned_id = "AB"
+    record[2][1].identity = "AB"
+
+    assigner = IdentityAssigner(
+        record,
+        auxinfo=_axis_configuration(axis_mode),
+        naming_method=NEWCANONICAL,
+        z_pix_res=11.1,
+    )
+    assigner.assign_identities()
+
+    assignment = assigner.founder_assignment
+    assert assignment is not None and assignment.success
+    assert not assignment.constraint_conflict
+    assert {assignment.ems_idx, assignment.p2_idx} == {0, 1}
+    assert {assignment.aba_idx, assignment.abp_idx} == {2, 3}
+    assert {record[4][0].identity, record[4][1].identity} == {"EMS", "P2"}
+    assert {record[6][2].identity, record[6][3].identity} == {"ABa", "ABp"}
+
+    expected = np.array([
+        record[assignment.four_cell_time][assignment.aba_idx].x
+        - record[assignment.four_cell_time][assignment.p2_idx].x,
+        record[assignment.four_cell_time][assignment.aba_idx].y
+        - record[assignment.four_cell_time][assignment.p2_idx].y,
+        (
+            record[assignment.four_cell_time][assignment.aba_idx].z
+            - record[assignment.four_cell_time][assignment.p2_idx].z
+        ) * 11.1,
+    ])
+    expected /= np.linalg.norm(expected)
+    np.testing.assert_allclose(assignment.ap_vector, expected)
+
+    assert assigner.division_caller is not None
+    if axis_mode == "inferred":
+        assert assigner.division_caller.is_lineage_mode
+        lineage_map = assigner.division_caller._lineage_map
+        assert lineage_map is not None
+        assert lineage_map[assignment.four_cell_time][assignment.aba_idx] == "ABa"
+        assert lineage_map[assignment.four_cell_time][assignment.ems_idx] == "EMS"
+    elif axis_mode == "v2":
+        assert assigner.division_caller.is_v2
+        assert not assigner.division_caller.is_lineage_mode
+    else:
+        assert not assigner.division_caller.is_v2
+        assert not assigner.division_caller.is_lineage_mode
+
+
+def _partial_forced_parent(auxinfo: AuxInfo | None) -> list[list[Nucleus]]:
+    parent = _make_nuc(
+        1, 100, 100, 10.0, identity="AB", assigned_id="AB",
+        succ1=1, succ2=2,
+    )
+    first = _make_nuc(1, 80, 100, 10.0, identity="EMS", pred=1)
+    second = _make_nuc(2, 120, 100, 10.0, identity="P2", pred=1)
+    record = [[parent], [first, second]]
+    IdentityAssigner(record, auxinfo=auxinfo, z_pix_res=1.0).assign_identities()
+    return record
+
+
+def test_partial_movie_without_axes_clears_stale_automatic_progeny():
+    record = _partial_forced_parent(None)
+
+    assert record[0][0].effective_name == "AB"
+    assert all(nuc.assigned_id == "" for nuc in record[1])
+    assert all(nuc.identity.startswith("Nuc") for nuc in record[1])
+    assert {nuc.identity for nuc in record[1]}.isdisjoint({"EMS", "P2", "ABa", "ABp"})
+
+
+@pytest.mark.parametrize("axis_mode", ["v2", "v1"])
+def test_partial_movie_explicit_axes_recompute_forced_parent_progeny(axis_mode: str):
+    record = _partial_forced_parent(_axis_configuration(axis_mode))
+    assert {nuc.identity for nuc in record[1]} == {"ABa", "ABp"}
+
+
+def test_post_founder_forced_parent_still_drives_canonical_daughters():
+    auxinfo = _axis_configuration("v2")
+    parent = _make_nuc(
+        1, 100, 100, 10.0, identity="ABal", assigned_id="ABal",
+        succ1=1, succ2=2,
+    )
+    record = [[parent], [
+        _make_nuc(1, 80, 100, 10.0, identity="OldA", pred=1),
+        _make_nuc(2, 120, 100, 10.0, identity="OldB", pred=1),
+    ]]
+
+    IdentityAssigner(record, auxinfo=auxinfo, z_pix_res=1.0).assign_identities()
+
+    assert {nuc.identity for nuc in record[1]} == {"ABala", "ABalp"}
+
+
+def test_legacy_initial_id_cannot_overwrite_forced_parent_before_division(
+    monkeypatch,
+):
+    parent = _make_nuc(
+        1, 100, 100, 10.0, identity="AB", assigned_id="AB",
+        succ1=1, succ2=2,
+    )
+    record = [[parent], [
+        _make_nuc(1, 80, 100, 10.0, pred=1),
+        _make_nuc(2, 120, 100, 10.0, pred=1),
+    ]]
+
+    def overwriting_initial_id(nuclei_record, **_kwargs):
+        nuclei_record[0][0].identity = "P1"
+        return SimpleNamespace(axis_found=True, start_index=0, ap=1, dv=1, lr=1)
+
+    monkeypatch.setattr(identity_module, "identify_initial_cells", overwriting_initial_id)
+    assigner = IdentityAssigner(
+        record,
+        auxinfo=_axis_configuration("v2"),
+        z_pix_res=1.0,
+        legacy_mode=True,
+    )
+
+    assigner.assign_identities()
+
+    assert record[0][0].identity == "AB"
+    assert {nuc.identity for nuc in record[1]} == {"ABa", "ABp"}

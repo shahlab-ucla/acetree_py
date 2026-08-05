@@ -512,6 +512,93 @@ class ClearNameOverride(EditCommand):
 
 
 @dataclass
+class LockCellName(EditCommand):
+    """Lock the selected cell's current effective name as a manual override.
+
+    This command is deliberately separate from :class:`RenameCell`.  Accepting
+    an unchanged, pre-filled Rename dialog remains a true no-op, while the
+    explicit *Lock Current Name* UI action records the current automatic name
+    in ``assigned_id`` across the cell's reciprocal continuation chain.
+
+    Both naming fields are normalized to the locked name, matching the manual
+    ownership state produced by Rename.  Undo restores the exact per-nucleus
+    automatic and forced values that existed before the lock.
+    """
+
+    time: int
+    index: int
+
+    _locked_name: str = field(default="", init=False)
+    _touched: list[tuple[int, int, str, str]] = field(default_factory=list)
+    _noop: bool = field(default=False, init=False)
+
+    def execute(self, nuclei_record: NucleiRecord) -> None:
+        anchor = _get_nucleus(nuclei_record, self.time, self.index)
+        if not anchor.is_alive:
+            raise ValueError("Cannot lock the name of a dead nucleus")
+
+        # Keep the name captured by the first execution stable across Redo.
+        if not self._locked_name:
+            error = validate_storable_name(anchor.effective_name, allow_empty=False)
+            if error:
+                raise ValueError(error)
+            self._locked_name = anchor.effective_name.strip()
+
+        chain = _walk_continuation_chain(
+            nuclei_record, self.time - 1, self.index - 1
+        )
+        if not chain:
+            raise ValueError("Selected nucleus has no valid continuation to lock")
+
+        self._touched = []
+        self._noop = True
+        self._mark_rollback_ready()
+        for t0, j0 in chain:
+            nuc = nuclei_record[t0][j0]
+            self._touched.append(
+                (t0 + 1, j0 + 1, nuc.identity, nuc.assigned_id)
+            )
+            if (
+                nuc.identity != self._locked_name
+                or nuc.assigned_id != self._locked_name
+            ):
+                self._noop = False
+            nuc.identity = self._locked_name
+            nuc.assigned_id = self._locked_name
+
+        logger.info(
+            "Locked cell name '%s': %d nuclei in continuation chain "
+            "(t=%d idx=%d clicked)",
+            self._locked_name,
+            len(self._touched),
+            self.time,
+            self.index,
+        )
+
+    def undo(self, nuclei_record: NucleiRecord) -> None:
+        _restore_name_state(nuclei_record, self._touched)
+        logger.info(
+            "Undid name lock on %d nuclei (clicked at t=%d idx=%d)",
+            len(self._touched),
+            self.time,
+            self.index,
+        )
+        self._touched = []
+
+    @property
+    def description(self) -> str:
+        name = self._locked_name or "current name"
+        return (
+            f"Lock cell name at t={self.time} idx={self.index} "
+            f"as '{name}'"
+        )
+
+    @property
+    def is_noop(self) -> bool:
+        return self._noop
+
+
+@dataclass
 class RenameCell(EditCommand):
     """Force a name on a cell (sets assigned_id across continuation chain).
 

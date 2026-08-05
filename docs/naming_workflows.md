@@ -17,6 +17,7 @@ Consequences:
 - Automatic division suggestions write `identity`, never `assigned_id`.
 - Add and Track may continue the current automatic identity, but they do not lock it. They inherit a forced override only when the parent already has `assigned_id`.
 - Rename is an explicit ownership change from automatic to user-forced.
+- **Lock Current Name** is the explicit way to keep an already-correct automatic name without changing its text.
 - **Use Automatic** is an explicit ownership change back to the pipeline: it clears `assigned_id`, reruns naming, and remains undoable.
 - A rename equal to the existing effective name is a no-op. Merely accepting a dialog must not freeze an automatic name.
 - UI labels, tree construction, cell lookup, kill selection, validation, exports, and division-parent rule lookup use `effective_name`.
@@ -57,7 +58,7 @@ One intentional user gesture is atomic:
 | Add across a gap | Add endpoint, add all interpolated nuclei, set every reciprocal link, apply automatic daughter state |
 | Track placement | Add/interpolate/link, advance tracking anchor, apply automatic daughter state |
 | Relink across a gap | Detach old link, add intermediates, attach new link, restore reciprocal successors |
-| Rename / Use Automatic | Change both name fields over the entire valid cell continuation |
+| Rename / Lock Current Name / Use Automatic | Change name ownership over the entire valid cell continuation |
 | Apply body axes | Replace orientation metadata, invalidate/rebuild naming, refresh views |
 
 If validation fails, none of the gesture commits. Undo reverses a composite in reverse mutation order; Redo replays it in forward order.
@@ -87,6 +88,14 @@ Dirty state is a comparison with an explicit savepoint, not `len(undo_stack) > 0
 5. Automatic naming reruns downstream, using the effective forced identity as the division parent.
 
 If another disconnected cell already has the target identity, resolve the explicit collision (for example, by an intentional Swap) rather than creating an alias.
+
+### Keep an already-correct automatic name
+
+1. Select the automatically named cell at any time during its lifetime.
+2. Choose **Lock Current Name**. This is intentionally separate from accepting the unchanged, pre-filled Rename dialog, which remains a no-op.
+3. AceTree checks that the current name is non-empty, safe to save, and not duplicated on a disconnected live cell.
+4. The current name becomes a manual override over the valid continuation, and automatic naming uses that forced parent name for downstream divisions.
+5. Undo restores the exact prior automatic state; **Use Automatic** later releases the lock.
 
 ### Return a cell to automatic naming
 
@@ -208,6 +217,8 @@ It returns both daughter names, confidence, governing axis label, source/provena
 | Scenario | Required result |
 |---|---|
 | Accept Rename without changing an automatic name | No command; `assigned_id` remains empty |
+| Lock Current Name on an automatic cell | Persist the visible name over its continuation; one Undo restores the automatic state |
+| Lock Current Name when a disconnected cell has the same name | Reject without creating a forced-name conflict |
 | Rename contains surrounding spaces | Trim once, then validate and apply |
 | Rename contains comma/newline/control byte | Reject before mutation |
 | Use Automatic on forced cell | Clear override over valid continuation; recompute; one Undo restores |

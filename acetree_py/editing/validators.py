@@ -325,6 +325,54 @@ def validate_rename_cell(
     return errors, None
 
 
+def validate_lock_cell_name(
+    nuclei_record: NucleiRecord,
+    time: int,
+    index: int,
+) -> list[str]:
+    """Validate locking a cell's current effective name.
+
+    Locking differs from an unchanged Rename: the visible name is expected to
+    stay the same, but it becomes a persistent manual override.  The explicit
+    action therefore still checks that the current name is safe to persist and
+    is not already used by a disconnected live continuation.
+    """
+    from .commands import _walk_continuation_chain
+
+    t_idx = time - 1
+    if t_idx < 0 or t_idx >= len(nuclei_record):
+        return [f"Timepoint {time} out of range"]
+    n_idx = index - 1
+    if n_idx < 0 or n_idx >= len(nuclei_record[t_idx]):
+        return [f"Nucleus index {index} out of range at t={time}"]
+
+    target = nuclei_record[t_idx][n_idx]
+    if not target.is_alive:
+        return [f"Cannot lock the name of a dead nucleus at t={time} idx={index}"]
+
+    errors = _validate_name_text(target.effective_name)
+    if errors:
+        return errors
+    name = target.effective_name.strip()
+
+    target_chain = set(_walk_continuation_chain(nuclei_record, t_idx, n_idx))
+    if not target_chain:
+        return ["Selected nucleus has no valid continuation to lock"]
+
+    for other_t0, nuclei in enumerate(nuclei_record):
+        for other_j0, nucleus in enumerate(nuclei):
+            if not nucleus.is_alive or (other_t0, other_j0) in target_chain:
+                continue
+            if nucleus.effective_name == name:
+                return [
+                    f"Name '{name}' is already used by another cell "
+                    f"(at t={other_t0 + 1} idx={other_j0 + 1}); "
+                    "resolve the duplicate before locking it."
+                ]
+
+    return []
+
+
 def validate_relink_interpolation(
     nuclei_record: NucleiRecord,
     start_time: int,

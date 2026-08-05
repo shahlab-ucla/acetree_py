@@ -116,6 +116,7 @@ class IdentityAssigner:
 
         if self.legacy_mode:
             self._clear_all_names()
+            self._propagate_assigned_ids()
             if self.auxinfo is not None and self.auxinfo.is_v2:
                 self._build_canonical_transform()
             self._run_legacy_pipeline()
@@ -206,6 +207,15 @@ class IdentityAssigner:
         # Do not let those rejected guesses leak into the fallback result.
         self._clear_all_names()
 
+        if fa.constraint_conflict:
+            # Conflicting curator anchors are visible data that require manual
+            # resolution.  Preserve those explicit values, but never replace
+            # them with a different automatic founder hypothesis or restore
+            # stale biological descendants.
+            self._propagate_assigned_ids()
+            self._assign_neutral_names(self.starting_index)
+            return
+
         # A late-start or ablated dataset may not contain a usable four-cell
         # stage.  If the curator supplied both a trusted orientation and at
         # least one forced lineage anchor, continue canonical rules forward
@@ -233,6 +243,7 @@ class IdentityAssigner:
 
         self._restore_previous_identities(previous_identities)
         self._propagate_assigned_ids()
+        self._clear_unforced_descendants_of_forced_early_cells()
         self._assign_neutral_names(self.starting_index)
 
     def _restore_previous_identities(
@@ -292,6 +303,49 @@ class IdentityAssigner:
                 z = round(nuc.z)
                 nuc.identity = f"{NUC}{t + 1:03d}_{z}_{nuc.x}_{nuc.y}"
 
+    def _clear_unforced_descendants_of_forced_early_cells(self) -> None:
+        """Invalidate stale automatic progeny after an unresolved early edit.
+
+        When a partial movie has no usable founder frame and no explicit body
+        axes, canonical daughter order cannot be recomputed.  Restoring loaded
+        identities below a changed forced P0/AB/P1/ABa/ABp/EMS/P2 anchor would
+        present old automatic names as though they were concurrent with the
+        edit.  Clear those unforced subtrees so ``_assign_neutral_names`` can
+        fail closed with non-biological labels.  Explicit descendant overrides
+        remain untouched.
+        """
+        early_names = {"P0", "AB", "P1", "ABa", "ABp", "EMS", "P2"}
+        end = min(self.ending_index, len(self.nuclei_record))
+        frontier: list[tuple[int, int]] = []
+
+        for t in range(self.starting_index, end):
+            for idx, nucleus in enumerate(self.nuclei_record[t]):
+                if nucleus.is_alive and nucleus.assigned_id in early_names:
+                    if nucleus.successor1 > 0 and t + 1 < end:
+                        frontier.append((t + 1, nucleus.successor1 - 1))
+                    if nucleus.successor2 > 0 and t + 1 < end:
+                        frontier.append((t + 1, nucleus.successor2 - 1))
+
+        visited: set[tuple[int, int]] = set()
+        while frontier:
+            t, idx = frontier.pop()
+            if (t, idx) in visited or not (0 <= t < end):
+                continue
+            if not (0 <= idx < len(self.nuclei_record[t])):
+                continue
+            visited.add((t, idx))
+            nucleus = self.nuclei_record[t][idx]
+            if not nucleus.is_alive:
+                continue
+            if not nucleus.assigned_id:
+                nucleus.identity = ""
+            if t + 1 >= end:
+                continue
+            if nucleus.successor1 > 0:
+                frontier.append((t + 1, nucleus.successor1 - 1))
+            if nucleus.successor2 > 0:
+                frontier.append((t + 1, nucleus.successor2 - 1))
+
     def _run_legacy_pipeline(self) -> None:
         """Run the legacy InitialID-based pipeline."""
         import math
@@ -308,6 +362,10 @@ class IdentityAssigner:
             angle=angle_rad,
             z_pix_res=self.z_pix_res,
         )
+        # InitialID assigns its own early identities.  Reassert cell-scoped
+        # curator overrides before those names become parents for canonical
+        # daughter rules.
+        self._propagate_assigned_ids()
 
         # If axis found and NEWCANONICAL, use canonical rules
         if result.axis_found and self.naming_method == NEWCANONICAL:
@@ -620,7 +678,9 @@ class IdentityAssigner:
                 if parent.status < 1:
                     continue
 
-                pname = parent.identity
+                pname = parent.effective_name
+                if parent.assigned_id:
+                    parent.identity = pname
 
                 # Assign generic name if unnamed
                 if not pname:

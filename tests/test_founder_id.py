@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+import acetree_py.naming.founder_id as founder_id_module
 from acetree_py.core.nucleus import NILLI, Nucleus
 from acetree_py.naming.founder_id import (
     _axes_from_founders,
@@ -235,6 +236,90 @@ class TestIdentifyFounders:
         assert result.success
         # Start index should be <= T0 (where P0 was found)
         assert result.start_index <= 1
+
+    def test_forced_ab_p1_anchors_override_automatic_pair_roles(self):
+        record = _make_standard_lineage()
+        # Exchange the two-cell identities relative to division timing.
+        record[1][0].assigned_id = "P1"
+        record[1][1].assigned_id = "AB"
+
+        result = identify_founders(record, z_pix_res=11.1)
+
+        assert result.success
+        assert not result.constraint_conflict
+        assert {result.ems_idx, result.p2_idx} == {0, 1}
+        assert {result.aba_idx, result.abp_idx} == {2, 3}
+        assert {record[3][0].identity, record[3][1].identity} == {"EMS", "P2"}
+        assert record[3][2].identity == "AB"
+
+    def test_forced_four_cell_members_override_heuristic_ordering(self):
+        record = _make_standard_lineage()
+        # Force the opposite member ordering inside both detected sister pairs.
+        record[6][0].assigned_id = "ABp"
+        record[6][1].assigned_id = "ABa"
+        record[6][2].assigned_id = "P2"
+        record[6][3].assigned_id = "EMS"
+
+        result = identify_founders(
+            record,
+            z_pix_res=11.1,
+            ap_hint=np.array([-1.0, 0.0, 0.0]),
+        )
+
+        assert result.success
+        assert (result.aba_idx, result.abp_idx) == (1, 0)
+        assert (result.ems_idx, result.p2_idx) == (3, 2)
+        midpoint = record[result.four_cell_time]
+        assert midpoint[result.aba_idx].identity == "ABa"
+        assert midpoint[result.ems_idx].identity == "EMS"
+
+    def test_duplicate_forced_founder_role_fails_without_tentative_names(self):
+        record = _make_standard_lineage()
+        record[6][0].assigned_id = "ABa"
+        record[6][1].assigned_id = "ABa"
+
+        result = identify_founders(record, z_pix_res=11.1)
+
+        assert not result.success
+        assert result.constraint_conflict
+        assert any("multiple four-cell lineages" in warning for warning in result.warnings)
+        assert all(
+            nucleus.identity == ""
+            for nuclei in record
+            for nucleus in nuclei
+        )
+
+    def test_conflicting_family_anchors_fail_closed(self):
+        record = _make_standard_lineage()
+        # AB and EMS cannot both identify the same sister pair.
+        record[1][0].assigned_id = "AB"
+        record[6][0].assigned_id = "EMS"
+
+        result = identify_founders(record, z_pix_res=11.1)
+
+        assert not result.success
+        assert result.constraint_conflict
+        assert any("conflicting family roles" in warning for warning in result.warnings)
+
+    def test_forced_pair_is_authoritative_when_birth_times_are_tied(self, monkeypatch):
+        record = _make_standard_lineage()
+        record[1][0].assigned_id = "P1"
+        record[1][1].assigned_id = "AB"
+        real_pairing = founder_id_module._find_sister_pairs
+
+        def tied_pairing(nuclei_record, alive, current_time):
+            pairs = real_pairing(nuclei_record, alive, current_time)
+            assert pairs is not None
+            (first, _), (second, _) = pairs
+            return (first, current_time), (second, current_time)
+
+        monkeypatch.setattr(founder_id_module, "_find_sister_pairs", tied_pairing)
+
+        result = identify_founders(record, z_pix_res=11.1)
+
+        assert result.success
+        assert {result.ems_idx, result.p2_idx} == {0, 1}
+        assert {result.aba_idx, result.abp_idx} == {2, 3}
 
 
 class TestAxesFromFounders:

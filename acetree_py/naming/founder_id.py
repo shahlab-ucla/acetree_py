@@ -43,6 +43,13 @@ MIN_FOUR_CELL_FRAMES = 2
 # Use a generous limit to ensure we always reach the division point.
 MAX_SISTER_SEARCH_DEPTH = 100
 
+# Canonical names whose biological position is fixed at or before the
+# four-cell stage.  A curator-supplied ``assigned_id`` for one of these names
+# is an identity constraint, not merely a display override.
+_EARLY_FOUNDER_NAMES = frozenset({"P0", "AB", "P1", "ABa", "ABp", "EMS", "P2"})
+_FOUR_CELL_NAMES = frozenset({"ABa", "ABp", "EMS", "P2"})
+_AB_FAMILY_NAMES = frozenset({"AB", "ABa", "ABp"})
+
 
 @dataclass
 class DivisionEvent:
@@ -80,6 +87,10 @@ class FounderAssignment:
 
     success: bool = False
     confidence: float = 0.0
+    # True when curator-supplied early canonical anchors contradict topology
+    # or one another.  Callers must not fall back to automatic biological
+    # naming in this state.
+    constraint_conflict: bool = False
 
     # 4-cell stage identification
     four_cell_time: int = -1  # 0-based timepoint of 4-cell stage midpoint
@@ -159,6 +170,8 @@ def identify_founders(
     # Step 2: For each candidate window, try to identify founders
     best_result: FounderAssignment | None = None
     best_score = -1.0
+    failed_warnings: list[str] = []
+    constraint_conflict = False
 
     for first_four, last_four in windows:
         candidate = _try_identify_from_window(
@@ -168,6 +181,9 @@ def identify_founders(
         if candidate.success and candidate.confidence > best_score:
             best_result = candidate
             best_score = candidate.confidence
+        elif not candidate.success:
+            failed_warnings.extend(candidate.warnings)
+            constraint_conflict = constraint_conflict or candidate.constraint_conflict
 
     if best_result is not None:
         return best_result
@@ -175,6 +191,8 @@ def identify_founders(
     # Fallback: return empty result with start_index set
     logger.warning("Founder identification failed for all candidate windows")
     result.start_index = starting_index
+    result.warnings = list(dict.fromkeys(failed_warnings))
+    result.constraint_conflict = constraint_conflict
     return result
 
 
@@ -204,6 +222,163 @@ def _get_alive(nuclei: list[Nucleus]) -> list[tuple[int, Nucleus]]:
         if n.status >= 1 and not _is_polar_body(n):
             result.append((i, n))
     return result
+
+
+def _trace_midpoint_descendants(
+    nuclei_record: list[list[Nucleus]],
+    anchor_time: int,
+    anchor_idx: int,
+    four_cell_time: int,
+) -> tuple[frozenset[int], bool]:
+    """Return four-cell lineages related to a forced-name anchor.
+
+    The boolean reports whether a path from a later anchor back to the
+    four-cell stage crossed a division.  Later ABa/ABp/EMS/P2 anchors are
+    valid only while they remain on the founder's continuation chain; a name
+    placed on one of its descendants must not silently relabel the founder.
+    """
+    if anchor_time <= four_cell_time:
+        descendants: set[int] = set()
+        for mid_idx, mid_nuc in _get_alive(nuclei_record[four_cell_time]):
+            t = four_cell_time
+            current = mid_nuc
+            current_idx = mid_idx
+            while t > anchor_time and current.predecessor != NILLI:
+                pred_idx = current.predecessor - 1
+                previous = nuclei_record[t - 1]
+                if not (0 <= pred_idx < len(previous)):
+                    break
+                current = previous[pred_idx]
+                current_idx = pred_idx
+                t -= 1
+            if t == anchor_time and current_idx == anchor_idx:
+                descendants.add(mid_idx)
+        return frozenset(descendants), False
+
+    t = anchor_time
+    current_idx = anchor_idx
+    crossed_division = False
+    while t > four_cell_time:
+        current = nuclei_record[t][current_idx]
+        if current.predecessor == NILLI:
+            return frozenset(), crossed_division
+        pred_idx = current.predecessor - 1
+        previous = nuclei_record[t - 1]
+        if not (0 <= pred_idx < len(previous)):
+            return frozenset(), crossed_division
+        predecessor = previous[pred_idx]
+        crossed_division = crossed_division or predecessor.successor2 != NILLI
+        current_idx = pred_idx
+        t -= 1
+    return frozenset({current_idx}), crossed_division
+
+
+def _collect_forced_founder_constraints(
+    nuclei_record: list[list[Nucleus]],
+    four_cell_time: int,
+    starting_index: int,
+    ending_index: int,
+) -> tuple[dict[str, frozenset[int]], list[str]]:
+    """Project forced early Sulston names onto the four-cell stage.
+
+    A valid P0 anchor spans all four lineages, AB/P1 each span one sister
+    pair, and a four-cell founder spans exactly one continuation lineage.
+    Invalid cardinality, duplicate biological roles, or contradictory anchors
+    fail closed before any tentative identity is written.
+    """
+    expected_count = {
+        "P0": 4,
+        "AB": 2,
+        "P1": 2,
+        "ABa": 1,
+        "ABp": 1,
+        "EMS": 1,
+        "P2": 1,
+    }
+    observations: dict[str, set[frozenset[int]]] = {}
+    errors: list[str] = []
+    stop = min(ending_index, len(nuclei_record))
+
+    for t in range(max(0, starting_index), stop):
+        for idx, nucleus in enumerate(nuclei_record[t]):
+            name = nucleus.assigned_id.strip()
+            if not nucleus.is_alive or name not in _EARLY_FOUNDER_NAMES:
+                continue
+            descendants, crossed_division = _trace_midpoint_descendants(
+                nuclei_record, t, idx, four_cell_time,
+            )
+            if name in _FOUR_CELL_NAMES and t > four_cell_time and crossed_division:
+                errors.append(
+                    f"Forced {name} at t={t + 1}, index={idx + 1} is below "
+                    "a division rather than on the founder continuation"
+                )
+                continue
+            if len(descendants) != expected_count[name]:
+                errors.append(
+                    f"Forced {name} at t={t + 1}, index={idx + 1} maps to "
+                    f"{len(descendants)} four-cell lineage(s); expected "
+                    f"{expected_count[name]}"
+                )
+                continue
+            observations.setdefault(name, set()).add(descendants)
+
+    constraints: dict[str, frozenset[int]] = {}
+    for name in sorted(observations):
+        mapped = observations[name]
+        if len(mapped) != 1:
+            errors.append(
+                f"Forced {name} anchors map to multiple four-cell lineages"
+            )
+            continue
+        constraints[name] = next(iter(mapped))
+
+    # Two canonical roles cannot designate the same biological lineage/pair.
+    for first, second in (("AB", "P1"), ("ABa", "ABp"), ("EMS", "P2")):
+        if (
+            first in constraints
+            and second in constraints
+            and constraints[first] == constraints[second]
+        ):
+            errors.append(f"Forced {first} and {second} anchors identify the same lineage")
+
+    return constraints, errors
+
+
+def _pair_selected_by_constraints(
+    constraints: dict[str, frozenset[int]],
+    pair_a: list[tuple[int, Nucleus]],
+    pair_b: list[tuple[int, Nucleus]],
+) -> tuple[int | None, list[str]]:
+    """Return which sister pair must be AB (0/1), if constrained."""
+    pair_sets = (
+        frozenset(idx for idx, _ in pair_a),
+        frozenset(idx for idx, _ in pair_b),
+    )
+    selections: list[tuple[str, int]] = []
+    errors: list[str] = []
+
+    for name, descendants in constraints.items():
+        if name == "P0":
+            continue
+        if name in ("AB", "P1"):
+            matches = [i for i, pair in enumerate(pair_sets) if descendants == pair]
+        else:
+            matches = [i for i, pair in enumerate(pair_sets) if descendants <= pair]
+        if len(matches) != 1:
+            errors.append(
+                f"Forced {name} anchor is incompatible with the detected sister pairs"
+            )
+            continue
+        family_pair = matches[0]
+        ab_pair = family_pair if name in _AB_FAMILY_NAMES else 1 - family_pair
+        selections.append((name, ab_pair))
+
+    selected = {pair for _, pair in selections}
+    if len(selected) > 1:
+        detail = ", ".join(f"{name}->pair{pair + 1}" for name, pair in selections)
+        errors.append(f"Forced founder anchors assign conflicting family roles ({detail})")
+        return None, errors
+    return (next(iter(selected)) if selected else None), errors
 
 
 def _find_four_cell_windows(
@@ -299,6 +474,23 @@ def _try_identify_from_window(
 
     (pair_a, pair_a_birth), (pair_b, pair_b_birth) = pairs
 
+    # Resolve curator-supplied early Sulston names before topology heuristics
+    # choose biological roles.  This makes forced names true constraints on
+    # founder assignment and ensures the same final indices feed back-tracing,
+    # founder vectors, and the inferred lineage-axis map.
+    founder_constraints, constraint_errors = _collect_forced_founder_constraints(
+        nuclei_record, mid_time, starting_index, ending_index,
+    )
+    forced_ab_pair, pair_errors = _pair_selected_by_constraints(
+        founder_constraints, pair_a, pair_b,
+    )
+    constraint_errors.extend(pair_errors)
+    if constraint_errors:
+        result.warnings.extend(constraint_errors)
+        result.constraint_conflict = True
+        logger.error("Forced founder constraints are inconsistent: %s", constraint_errors)
+        return result
+
     # Step 2: The pair that appeared FIRST is from AB division (AB divides before P1)
     if pair_a_birth <= pair_b_birth:
         ab_pair = pair_a
@@ -311,9 +503,18 @@ def _try_identify_from_window(
         ab_birth = pair_b_birth
         p1_birth = pair_a_birth
 
+    if forced_ab_pair is not None:
+        if forced_ab_pair == 0:
+            ab_pair, p1_pair = pair_a, pair_b
+            ab_birth, p1_birth = pair_a_birth, pair_b_birth
+        else:
+            ab_pair, p1_pair = pair_b, pair_a
+            ab_birth, p1_birth = pair_b_birth, pair_a_birth
+        result.warnings.append("Forced founder anchor selected the AB/P1 sister-pair roles")
+
     # Confidence based on timing separation
     timing_gap = abs(p1_birth - ab_birth)
-    if timing_gap == 0:
+    if timing_gap == 0 and forced_ab_pair is None:
         # Can't distinguish pairs by backward tracing.  Try forward
         # division timing: cells that divide at the same time in the
         # future are likely sisters.  This is critical for datasets
@@ -347,20 +548,46 @@ def _try_identify_from_window(
             )
         else:
             timing_confidence = 0.3
-            result.warnings.append("AB and P1 divisions appear simultaneous — assignment uncertain")
+            result.warnings.append(
+                "AB and P1 divisions appear simultaneous — assignment uncertain"
+            )
     elif timing_gap == 1:
         timing_confidence = 0.6
     else:
         timing_confidence = min(1.0, 0.6 + timing_gap * 0.1)
+    if forced_ab_pair is not None:
+        # A valid curator anchor is authoritative for family assignment; do
+        # not reject it merely because the automatic timing signal disagrees.
+        timing_confidence = 1.0
 
     # Step 3: Within P1 pair, distinguish EMS from P2.
     # Primary signal: EMS divides before P2 (forward division timing).
     # Secondary signal: EMS is typically larger than P2 (nucleus size).
     (p1_d1_idx, p1_d1), (p1_d2_idx, p1_d2) = p1_pair
-    ems_idx, ems_nuc, p2_idx, p2_nuc, size_confidence = _distinguish_ems_p2(
-        nuclei_record, p1_d1_idx, p1_d1, p1_d2_idx, p1_d2,
-        mid_time, last_four, ending_index, result,
+    forced_ems = (
+        next(iter(founder_constraints["EMS"]), None)
+        if "EMS" in founder_constraints else None
     )
+    forced_p2 = (
+        next(iter(founder_constraints["P2"]), None)
+        if "P2" in founder_constraints else None
+    )
+    if forced_ems is not None or forced_p2 is not None:
+        ems_idx = forced_ems if forced_ems is not None else (
+            p1_d2_idx if forced_p2 == p1_d1_idx else p1_d1_idx
+        )
+        p2_idx = forced_p2 if forced_p2 is not None else (
+            p1_d2_idx if ems_idx == p1_d1_idx else p1_d1_idx
+        )
+        p1_by_idx = {p1_d1_idx: p1_d1, p1_d2_idx: p1_d2}
+        ems_nuc, p2_nuc = p1_by_idx[ems_idx], p1_by_idx[p2_idx]
+        size_confidence = 1.0
+        result.warnings.append("Forced EMS/P2 anchor selected the P1-daughter ordering")
+    else:
+        ems_idx, ems_nuc, p2_idx, p2_nuc, size_confidence = _distinguish_ems_p2(
+            nuclei_record, p1_d1_idx, p1_d1, p1_d2_idx, p1_d2,
+            mid_time, last_four, ending_index, result,
+        )
 
     # Step 4: Within AB pair, distinguish ABa from ABp.
     # ABa is more anterior. We average spatial projections over a window
@@ -368,11 +595,30 @@ def _try_identify_from_window(
     # present (AP axis degenerate), use PC1 of the 4-cell point cloud
     # as the long axis of the embryo — ABa is closer to the long axis.
     (ab_d1_idx, ab_d1), (ab_d2_idx, ab_d2) = ab_pair
-    aba_idx, aba_nuc, abp_idx, abp_nuc = _distinguish_aba_abp(
-        nuclei_record, ab_d1_idx, ab_d1, ab_d2_idx, ab_d2,
-        ems_idx, ems_nuc, p2_idx, p2_nuc,
-        first_four, last_four, z_pix_res, result, ap_hint,
+    forced_aba = (
+        next(iter(founder_constraints["ABa"]), None)
+        if "ABa" in founder_constraints else None
     )
+    forced_abp = (
+        next(iter(founder_constraints["ABp"]), None)
+        if "ABp" in founder_constraints else None
+    )
+    if forced_aba is not None or forced_abp is not None:
+        aba_idx = forced_aba if forced_aba is not None else (
+            ab_d2_idx if forced_abp == ab_d1_idx else ab_d1_idx
+        )
+        abp_idx = forced_abp if forced_abp is not None else (
+            ab_d2_idx if aba_idx == ab_d1_idx else ab_d1_idx
+        )
+        ab_by_idx = {ab_d1_idx: ab_d1, ab_d2_idx: ab_d2}
+        aba_nuc, abp_nuc = ab_by_idx[aba_idx], ab_by_idx[abp_idx]
+        result.warnings.append("Forced ABa/ABp anchor selected the AB-daughter ordering")
+    else:
+        aba_idx, aba_nuc, abp_idx, abp_nuc = _distinguish_aba_abp(
+            nuclei_record, ab_d1_idx, ab_d1, ab_d2_idx, ab_d2,
+            ems_idx, ems_nuc, p2_idx, p2_nuc,
+            first_four, last_four, z_pix_res, result, ap_hint,
+        )
 
     # Step 5: Assign names to nuclei
     aba_nuc.identity = "ABa"
@@ -436,6 +682,15 @@ def _try_identify_from_window(
         * (0.5 + 0.5 * axis_confidence)
         - confidence_penalty,
     )
+    if (
+        any(name != "P0" for name in founder_constraints)
+        and not used_coordinate_fallback
+    ):
+        # A topology-compatible curator anchor resolves at least one founder
+        # role directly.  Keep the result above the automatic commit boundary
+        # when the remaining daughter ordering has a real geometric signal;
+        # do not apply this floor to the raw-coordinate last resort.
+        result.confidence = max(result.confidence, 0.35)
     if used_coordinate_fallback:
         # Raw microscope X has no intrinsic anatomical meaning.  Never allow
         # that last-resort ordering to cross the automatic-commit threshold.

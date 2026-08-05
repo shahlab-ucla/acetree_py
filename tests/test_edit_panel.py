@@ -187,6 +187,7 @@ class TestEditPanel:
         assert panel._btn_remove is not None
         assert panel._btn_track is not None
         assert panel._btn_rename is not None
+        assert panel._btn_lock_name.text() == "Lock Current Name"
         assert panel._btn_auto_name is not None
         assert panel._btn_kill is not None
         assert panel._btn_resurrect is not None
@@ -405,6 +406,78 @@ class TestEditPanel:
         assert app.edit_history.num_undoable == before
         assert selected.assigned_id == ""
         assert "No change" in panel._status_label.text()
+
+    def test_lock_current_name_is_explicit_and_undoable(self, qtbot):
+        from acetree_py.gui.edit_panel import EditPanel
+
+        app = MockApp()
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+        selected, _, _ = panel._get_selected_nucleus()
+        assert selected.effective_name == "AB"
+        assert selected.assigned_id == ""
+
+        panel._btn_lock_name.click()
+
+        assert selected.identity == "AB"
+        assert selected.assigned_id == "AB"
+        assert app.edit_history.num_undoable == 1
+        assert "Lock cell name" in panel._status_label.text()
+
+        app.edit_history.undo()
+        assert selected.identity == "AB"
+        assert selected.assigned_id == ""
+
+    def test_lock_current_name_without_selection_updates_status(self, qtbot):
+        from acetree_py.gui.edit_panel import EditPanel
+
+        app = MockApp()
+        app.current_cell_name = ""
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+
+        panel._on_lock_current_name()
+
+        assert "No nucleus selected" in panel._status_label.text()
+        assert app.edit_history.num_undoable == 0
+
+    def test_lock_current_name_already_locked_is_noop(self, qtbot):
+        from acetree_py.gui.edit_panel import EditPanel
+
+        app = MockApp()
+        selected = app.manager.nuclei_record[1][0]
+        selected.assigned_id = "AB"
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+
+        panel._on_lock_current_name()
+
+        assert app.edit_history.num_undoable == 0
+        assert "already locked" in panel._status_label.text()
+
+    def test_lock_current_name_rejects_disconnected_duplicate(
+        self, qtbot, monkeypatch,
+    ):
+        from qtpy.QtWidgets import QMessageBox
+        from acetree_py.gui.edit_panel import EditPanel
+
+        app = MockApp()
+        app.manager.nuclei_record[1][1].identity = "AB"
+        panel = EditPanel(app)
+        qtbot.addWidget(panel)
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            lambda *args: warnings.append(args),
+        )
+
+        panel._on_lock_current_name()
+
+        assert app.edit_history.num_undoable == 0
+        assert app.manager.nuclei_record[1][0].assigned_id == ""
+        assert warnings
+        assert "another cell" in panel._status_label.text()
 
     def test_use_automatic_clears_manual_override(self, qtbot):
         from acetree_py.gui.edit_panel import EditPanel

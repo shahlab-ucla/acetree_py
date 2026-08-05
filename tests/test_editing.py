@@ -15,6 +15,7 @@ from acetree_py.editing.commands import (
     ClearNameOverride,
     CompositeCommand,
     KillCell,
+    LockCellName,
     MoveNucleus,
     RelinkNucleus,
     RelinkWithInterpolation,
@@ -33,6 +34,7 @@ from acetree_py.editing.history import EditHistory, PostCommitCallbackError
 from acetree_py.editing.validators import (
     validate_add_nucleus,
     validate_kill_cell,
+    validate_lock_cell_name,
     validate_relink,
     validate_relink_interpolation,
     validate_remove_nucleus,
@@ -508,6 +510,70 @@ class TestRenameCell:
         assert all(record[t][0].assigned_id == "" for t in range(3))
 
 
+class TestLockCellName:
+    def test_locks_current_automatic_name_and_undoes_exactly(self):
+        record = _simple_record()
+        record[0][0].identity = "early-auto"
+        record[1][0].identity = "A"
+        record[2][0].identity = "late-auto"
+        old_states = [
+            (record[t][0].identity, record[t][0].assigned_id)
+            for t in range(3)
+        ]
+
+        command = LockCellName(time=2, index=1)
+        command.execute(record)
+
+        assert all(record[t][0].identity == "A" for t in range(3))
+        assert all(record[t][0].assigned_id == "A" for t in range(3))
+        assert not command.is_noop
+
+        command.undo(record)
+        assert [
+            (record[t][0].identity, record[t][0].assigned_id)
+            for t in range(3)
+        ] == old_states
+
+    def test_normalizes_partially_locked_continuation(self):
+        record = _simple_record()
+        record[1][0].assigned_id = "A"
+
+        command = LockCellName(time=2, index=1)
+        command.execute(record)
+
+        assert all(record[t][0].assigned_id == "A" for t in range(3))
+        assert not command.is_noop
+
+    def test_fully_locked_continuation_is_history_noop(self):
+        record = _simple_record()
+        for t in range(3):
+            record[t][0].assigned_id = "A"
+        history = EditHistory(record)
+
+        history.do(LockCellName(time=2, index=1))
+
+        assert history.num_undoable == 0
+        assert not history.modified
+
+    def test_lock_stops_at_division(self):
+        record = _dividing_record()
+
+        LockCellName(time=1, index=1).execute(record)
+
+        assert record[0][0].assigned_id == "P0"
+        assert record[1][0].assigned_id == ""
+        assert record[1][1].assigned_id == ""
+
+    def test_rejects_empty_current_name(self):
+        record = _simple_record()
+        record[1][0].identity = ""
+
+        with pytest.raises(ValueError, match="empty"):
+            LockCellName(time=2, index=1).execute(record)
+
+        assert all(record[t][0].assigned_id == "" for t in range(3))
+
+
 class TestCellNameStateCommands:
     def test_clear_override_is_cell_scoped_and_undoable(self):
         record = _simple_record()
@@ -688,6 +754,39 @@ class TestValidateRenameCell:
 
 
 # ── RelinkNucleus tests ─────────────────────────────────────────
+
+
+class TestValidateLockCellName:
+    def test_valid_current_automatic_name(self):
+        record = _simple_record()
+
+        assert validate_lock_cell_name(record, 2, 1) == []
+
+    def test_duplicate_on_disconnected_cell_is_rejected(self):
+        record = _simple_record()
+        for timepoint in record:
+            timepoint[1].identity = "A"
+
+        errors = validate_lock_cell_name(record, 2, 1)
+
+        assert errors
+        assert "another cell" in errors[0]
+        assert "before locking" in errors[0]
+
+    def test_same_name_within_continuation_is_allowed(self):
+        record = _simple_record()
+        record[0][0].assigned_id = "A"
+
+        assert validate_lock_cell_name(record, 2, 1) == []
+
+    def test_empty_current_name_is_rejected(self):
+        record = _simple_record()
+        record[1][0].identity = ""
+
+        errors = validate_lock_cell_name(record, 2, 1)
+
+        assert errors
+        assert "empty" in errors[0].lower()
 
 
 class TestRelinkNucleus:

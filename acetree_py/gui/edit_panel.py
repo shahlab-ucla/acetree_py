@@ -222,11 +222,21 @@ class EditPanel(QWidget):  # type: ignore[misc]
 
         # ── Cell-level operations ──
         cell_group = QGroupBox("Cell Operations")
-        cell_layout = QHBoxLayout(cell_group)
+        cell_layout = QVBoxLayout(cell_group)
+        name_layout = QHBoxLayout()
+        lifecycle_layout = QHBoxLayout()
 
         self._btn_rename = QPushButton("Rename")
         self._btn_rename.setToolTip("Force a name on the selected cell")
         self._btn_rename.clicked.connect(self._on_rename_cell)
+
+        self._btn_lock_name = QPushButton("Lock Current Name")
+        self._btn_lock_name.setToolTip(
+            "Keep the selected cell's current automatic name as a manual "
+            "override. The lock follows this cell until its next division "
+            "and can be undone or released with Use Automatic."
+        )
+        self._btn_lock_name.clicked.connect(self._on_lock_current_name)
 
         self._btn_auto_name = QPushButton("Use Automatic")
         self._btn_auto_name.setToolTip(
@@ -242,10 +252,13 @@ class EditPanel(QWidget):  # type: ignore[misc]
         self._btn_resurrect.setToolTip("Resurrect a dead nucleus")
         self._btn_resurrect.clicked.connect(self._on_resurrect)
 
-        cell_layout.addWidget(self._btn_rename)
-        cell_layout.addWidget(self._btn_auto_name)
-        cell_layout.addWidget(self._btn_kill)
-        cell_layout.addWidget(self._btn_resurrect)
+        name_layout.addWidget(self._btn_rename)
+        name_layout.addWidget(self._btn_lock_name)
+        name_layout.addWidget(self._btn_auto_name)
+        lifecycle_layout.addWidget(self._btn_kill)
+        lifecycle_layout.addWidget(self._btn_resurrect)
+        cell_layout.addLayout(name_layout)
+        cell_layout.addLayout(lifecycle_layout)
         layout.addWidget(cell_group)
 
         # ── Link operations ──
@@ -1167,6 +1180,33 @@ class EditPanel(QWidget):  # type: ignore[misc]
         cmd = RenameCell(time=time, index=index, new_name=new_name)
         self._run_edit_action(self.app.edit_history.do, cmd)
         self._status_label.setText(f"Done: {cmd.description}")
+        self.refresh()
+
+    def _on_lock_current_name(self) -> None:
+        """Persist the selected cell's visible name as a manual override."""
+        sel = self._get_selected_nucleus()
+        if sel is None:
+            self._status_label.setText("No nucleus selected")
+            return
+
+        _nuc, time, index = sel
+        from ..editing.commands import LockCellName
+        from ..editing.validators import validate_lock_cell_name
+
+        errors = validate_lock_cell_name(
+            self.app.edit_history.nuclei_record, time, index,
+        )
+        if errors:
+            QMessageBox.warning(self, "Name Lock Error", "\n".join(errors))
+            self._status_label.setText(f"Error: {errors[0]}")
+            return
+
+        cmd = LockCellName(time=time, index=index)
+        self._run_edit_action(self.app.edit_history.do, cmd)
+        if cmd.is_noop:
+            self._status_label.setText("Cell name is already locked")
+        else:
+            self._status_label.setText(f"Done: {cmd.description}")
         self.refresh()
 
     def _on_clear_name_override(self) -> None:
