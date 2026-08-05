@@ -76,12 +76,13 @@ acetree_py/                    # Root package (__version__ = "0.2.0")
     expression_plot.py         # Plot snapshots, time transforms, tidy CSV
     expression_smoothing.py    # Gap-preserving Gaussian smoothing primitives
     expression_comparison.py   # Cross-dataset grids, summaries, snapshots/export
+    expression_comparison_result.py # Versioned portable .aceexpr captures
     expression_dataset_repository.py # Detached XMLs + session measurement cache
     expression_measurements.py # Revision-bound all-channel Measure store
     export.py                  # CSV, Newick export functions
     measure.py                 # Per-nucleus pixel sampling (port of ExtractRed)
     measure_csv.py             # Measure CSV writer (per-channel, absolute time)
-    measure_runner.py          # Measure orchestrator (iterates channels/timepoints)
+    measure_runner.py          # Measure orchestrator + correction-neutral families
   utils/
     geometry.py                # 3D vector math helpers
   resources/
@@ -646,7 +647,12 @@ Each nucleus is modelled as a sphere of diameter `nuc.size` centred at `(x, y, z
 
 `run_measure(manager, image_provider, output_dir, at_channel, progress_cb=None)`:
 
-1. Iterates every channel, every timepoint. For each `(t, channel)` it calls `image_provider.get_stack(t, channel)` and `measure_timepoint`, collecting `(sum_in, count_in, sum_ann, count_ann)` for every nucleus.
+1. Traverses timepoints once and collects every image channel. Providers with
+   `get_all_channel_stacks(t)` decode/load a combined timepoint once and
+   distribute it to channels; providers backed by physically separate channel
+   files load each required stack once inside the same pass. Sampling collects
+   `(sum_in, count_in, sum_ann, count_ann)` and, for blot runs, blot sums/counts
+   for every nucleus.
 2. Builds one all-channel immutable measurement snapshot and stages one CSV per channel. The per-timepoint value follows the requested correction method — plain `rwraw` for `"none"`, `rwraw - rwcorr1` for `"global"`, and `rwraw - rwcorr3` for `"blot"`.
 3. Revalidates the starting document fingerprint, then installs the staged CSV set while retaining the prior files as rollback copies.
 4. For the chosen `at_channel` only, writes scaled `rwraw`, `rwcorr1`, optional
@@ -685,9 +691,19 @@ because an unselected neighbour can change the projected exclusion mask.
 all-channel measurement core as a nonmutating entry point. It returns an
 immutable `ExpressionMeasurementSet` without publishing it on the manager,
 rewriting legacy expression fields, changing correction state, or writing CSV
-files. The cross-dataset expression repository uses this boundary to prepare
-detached datasets safely; `run_measure()` remains the transactional,
-user-visible persistence path described above.
+files. It remains the single-correction nonmutating boundary; the built-in
+cross-dataset repository uses the family boundary below instead. `run_measure()`
+remains the transactional, user-visible persistence path described above.
+
+`measure_expression_family(manager, image_provider, ...)` is the optimized
+cross-dataset boundary. One blot-capable movie pass builds immutable
+`MeasuredExpressionAggregate` records for every nucleus and image channel:
+raw intensity, global-annulus background, blot-annulus background, and pixel
+counts. `ExpressionMeasurementFamily` derives `none`, `global`, and `blot`
+values from those aggregates; compatible `local`/`cross` requests deliberately
+use the global fallback. The family is revision-, calibration-,
+dependency-fingerprint-, and geometry-bound, so it cannot silently serve data
+after a relevant edit.
 
 **Cancellation:** `progress_cb(channel_idx, n_channels, t_1based, n_timepoints) -> bool | None` is fired after every timepoint. Returning `False` raises `RuntimeError("Measure cancelled by user")`.
 
@@ -746,16 +762,17 @@ stat-only full-movie manifest additionally covers every file Measure can read
 at every nonempty absolute nuclei timepoint, including non-representative
 siblings and all per-plane paths, and becomes part of the token. Sources and
 tokens are checked before cache reuse and export. An explicit reload closes the
-provider, clears that dataset's correction caches, and creates a new generation
-even when file metadata is otherwise identical, so snapshots held by other
-windows cannot silently become current again.
+provider, clears that dataset's shared measurement family and compatibility
+caches, and creates a new generation even when file metadata is otherwise
+identical, so snapshots held by other windows cannot silently become current
+again.
 
 A source mismatch, appearance, or disappearance raises an explicit
 `DatasetSourceChangedError`. Recovery-only `session_status()` /
 `session_statuses()` access keeps a stale row visible without authorizing cache
-reuse or export, allowing the user to select **Reload**. The old figure may
-remain as a visual reference, but CSV and SVG export fail closed until the row
-is reloaded and prepared against the new generation. If the same XML is active
+reuse or export, allowing the user to select **Reload selected**. The old figure
+may remain as a visual reference, but CSV and SVG export fail closed until the
+row is reloaded and prepared against the new generation. If the same XML is active
 in the main viewer with unsaved edit-history or config changes, comparison also
 blocks preparation/export and directs the user to Save, Reload, and prepare.
 
@@ -773,11 +790,25 @@ numeric values. There are two source boundaries:
   GUI requires explicit acknowledgement before exporting an available numeric
   legacy trace. Status-only CSV contains no legacy numeric value and therefore
   does not require that acknowledgement.
-- Recomputed values come from the nonmutating `measure_expression_set()` API.
-  The repository caches one immutable all-channel snapshot per dataset and
-  correction mode, allowing later cells, channels, and comparison windows to
-  reuse the work without mutating either the detached manager or active
-  document.
+- Recomputed values use the nonmutating measurement APIs. The built-in
+  repository path calls `measure_expression_family()` and caches one
+  correction-neutral family per dataset, not one movie result per correction.
+  Its first request measures every image channel and raw/global/blot aggregate
+  in one timepoint pass. Later cell, channel, correction, and window requests
+  only derive/extract from that family and perform no movie reread. `none`,
+  `global`, and `blot` are exact family derivations; `local`/`cross` retain the
+  documented global fallback. Injected legacy test/plugin measurement
+  functions continue through the compatibility per-mode cache rather than
+  being misrepresented as a family.
+
+The family is retained only after a complete successful pass. Cancellation or
+measurement failure publishes nothing. An incomplete extracted sample clears
+the family (and compatibility caches) so the next preparation retries instead
+of reusing known-incomplete data. A manager revision/calibration/geometry or
+dependency mismatch drops it lazily; source fingerprint/manifest failure,
+explicit reload, dataset removal, and application shutdown clear it and close
+the corresponding provider. `cached_corrections` reports every supported
+derivation once the family is valid.
 
 **Renderer-neutral comparison model:** `ExpressionComparisonService` consumes
 immutable native traces; the dataset is the replicate unit. It transforms
@@ -798,9 +829,10 @@ and each point records selected, trace-available, and numerically valid
 replicate counts. One global switch and opacity value control display of all
 included individual traces; a dataset's **Use** state instead controls its
 membership in both traces and summaries. Dataset colors and all other
-appearance settings remain window-local.
+appearance settings remain window-local in a live comparison, or become
+explicit presentation metadata when the user saves a portable result.
 
-**Snapshot and export:** Each render creates an immutable numeric
+**Live snapshot and export:** Each render creates an immutable numeric
 `ExpressionComparisonData` containing the comparison specification,
 provenance, trace availability, native values, common-grid values, displayed
 smoothed values, and group-specific summary rows. Legacy acknowledgement is
@@ -814,6 +846,51 @@ that appearance belongs to the numeric snapshot. All export paths first
 revalidate repository generation/source tokens. A prepared comparison with only
 unavailable-status records may export CSV, but SVG/toolbar Save remain disabled
 because there is no numeric plot.
+
+**Portable result boundary:**
+`analysis/expression_comparison_result.py` persists the validated materialized
+`ExpressionDataset` inputs and full `ComparisonSpec`, rather than serializing
+derived aligned/smoothed/summary arrays as authority. The v1 `.aceexpr` JSON
+envelope also records source mode, acquisition metadata, legacy
+acknowledgement, all dataset provenance/status/group/label/color information,
+JSON-safe inclusion/appearance state, capture/save timestamps, producer and
+calculation versions, and result/parent UUIDs. This is sufficient to rebuild
+all supported time, grid, smoothing, and compatible summary modes without a
+repository. It intentionally is not an all-cell/all-channel movie cache, and
+the current comparison UI accepts exactly one canonical cell per result.
+
+`capture_expression_comparison_result()` establishes the immutable native-data
+boundary. A presentation revision can change dataset labels/groups, trace
+labels/colors, inclusion, numeric-view settings, and appearance, but validation
+rejects changes to source provenance, native identities/times/values/gaps,
+acquisition statuses, or captured cell/channel mappings. Resaving a loaded
+result creates a child UUID while retaining original capture provenance.
+`build_expression_comparison_data()` consumes only embedded datasets and never
+dereferences `source_uri`.
+
+Serialization uses strict finite RFC-compatible UTF-8 JSON, exact v1 fields,
+duplicate-key rejection, enum/UUID/timestamp validation, and a SHA-256 checksum
+over the canonical result payload. Writes stage a same-directory temporary
+file, flush/fsync it, preserve the destination mode, and commit with
+`os.replace`; failure leaves the previous file intact. The checksum detects
+corruption or modification but is not keyed, signed, or evidence of
+authenticity.
+
+**Frozen UI mode:** **Window → Open Expression Result…**, **Open frozen
+result…**, or `.aceexpr` drag/drop validates the complete capture before
+atomically registering an independent comparison window. A prominent frozen
+notice makes clear that XML/image paths are provenance-only. Add/Reload/Prepare
+and acquisition controls are disabled; Use/label/group/color,
+time/grid/smoothing/statistics, and appearance remain editable. CSV and SVG
+consume the repository-free rebuilt snapshot. Status-only captures permit
+portable resave and CSV, but have no SVG/toolbar image render. **Save portable
+result…** persists the current frozen presentation as a new revision. This is
+deliberately separate from the application-scoped live measurement family:
+live caches can answer new cells/channels but expire and revalidate sources,
+whereas portable results survive sessions but freeze their captured
+cell/source data. Numeric saved/mixed captures without a recorded legacy
+provenance acknowledgement remain viewable but fail closed for CSV, SVG, and
+portable resave.
 
 ---
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Iterable, Mapping, TYPE_CHECKING
 
+from ..core.nucleus import RED_CORRECTIONS
 from .expression_plot import ExpressionChannel
 
 if TYPE_CHECKING:
@@ -63,6 +64,41 @@ class MeasuredExpressionSample:
 
 
 @dataclass(frozen=True, slots=True)
+class MeasuredExpressionAggregate:
+    """Correction-neutral pixel aggregates for one nucleus and image channel."""
+
+    raw: float
+    annulus_background: float | None
+    blot_background: float | None
+    inner_pixel_count: int
+    annulus_pixel_count: int
+    blot_pixel_count: int
+
+    def corrected_value(self, correction_method: str) -> float:
+        """Derive a supported correction without copying this aggregate."""
+
+        if correction_method not in RED_CORRECTIONS:
+            choices = ", ".join(RED_CORRECTIONS)
+            raise ValueError(
+                f"Unknown correction_method={correction_method!r}; "
+                f"choose one of: {choices}"
+            )
+        if correction_method == "none":
+            return self.raw
+        global_background = self.annulus_background or 0.0
+        if correction_method == "blot":
+            blot_background = (
+                self.blot_background
+                if self.blot_background is not None
+                else global_background
+            )
+            return self.raw - blot_background
+        # Python Measure intentionally aliases legacy local/cross requests to
+        # the freshly measured global annulus fallback.
+        return self.raw - global_background
+
+
+@dataclass(frozen=True, slots=True)
 class MeasuredExpressionChannel:
     """One image channel measured for all available nuclei."""
 
@@ -76,6 +112,138 @@ class MeasuredExpressionChannel:
     @property
     def key(self) -> str:
         return f"measured_channel_{self.image_channel + 1}"
+
+
+@dataclass(frozen=True, slots=True)
+class MeasuredExpressionAggregateChannel:
+    """One channel in a shared correction-neutral measurement family."""
+
+    image_channel: int
+    label: str
+    samples: Mapping[tuple[int, int], MeasuredExpressionAggregate]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "samples", MappingProxyType(dict(self.samples)))
+
+    @property
+    def key(self) -> str:
+        return f"measured_channel_{self.image_channel + 1}"
+
+
+@dataclass(frozen=True, slots=True)
+class ExpressionMeasurementFamily:
+    """One immutable aggregate store shared by every correction method."""
+
+    source_revision: int
+    source_dependency_fingerprint: str
+    source_calibration: tuple[float, float, int, float]
+    channels: tuple[MeasuredExpressionAggregateChannel, ...]
+    geometries: Mapping[tuple[int, int], NucleusGeometrySignature]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "channels", tuple(self.channels))
+        object.__setattr__(
+            self,
+            "geometries",
+            MappingProxyType(dict(self.geometries)),
+        )
+
+    @property
+    def available_corrections(self) -> tuple[str, ...]:
+        return tuple(RED_CORRECTIONS)
+
+    def is_current(self, manager: NucleiManager) -> bool:
+        return self.source_revision == int(getattr(manager, "data_revision", 0))
+
+    def dependencies_current(
+        self,
+        manager: NucleiManager,
+        correction_method: str = "blot",
+    ) -> bool:
+        """Validate only the dependencies required by one correction mode.
+
+        Calibration affects every aggregate. Raw/global/local/cross values only
+        depend on the sampled nucleus, whose geometry is checked at lookup.
+        Blot additionally masks every neighbouring nucleus and therefore needs
+        the movie-wide dependency fingerprint.
+        """
+
+        if correction_method not in RED_CORRECTIONS:
+            choices = ", ".join(RED_CORRECTIONS)
+            raise ValueError(
+                f"Unknown correction_method={correction_method!r}; "
+                f"choose one of: {choices}"
+            )
+        if expression_measurement_calibration(manager) != self.source_calibration:
+            return False
+        if correction_method != "blot":
+            return True
+        return (
+            expression_measurement_dependency_fingerprint(manager)
+            == self.source_dependency_fingerprint
+        )
+
+    def channel(self, image_channel: int) -> MeasuredExpressionAggregateChannel:
+        for channel in self.channels:
+            if channel.image_channel == image_channel:
+                return channel
+        raise KeyError(f"No measured expression channel {image_channel + 1}")
+
+    def sample(
+        self,
+        manager: NucleiManager,
+        image_channel: int,
+        time: int,
+        nucleus: Nucleus,
+        correction_method: str = "blot",
+    ) -> MeasuredExpressionAggregate | None:
+        """Resolve one aggregate, failing closed on its required dependencies.
+
+        Pass the correction that will be derived. The safe default is
+        ``"blot"``, whose neighbour mask requires movie-wide validation;
+        non-blot callers avoid that unnecessary whole-movie hash.
+        """
+
+        if not self.is_current(manager) or not self.dependencies_current(
+            manager,
+            correction_method,
+        ):
+            return None
+        return self._sample_from_current_source(time, nucleus, image_channel)
+
+    def _sample_from_current_source(
+        self,
+        time: int,
+        nucleus: Nucleus,
+        image_channel: int,
+    ) -> MeasuredExpressionAggregate | None:
+        """Resolve one sample after revision/dependency validation."""
+
+        key = (int(time), int(nucleus.index))
+        sample = self.channel(image_channel).samples.get(key)
+        if sample is None:
+            return None
+        if self.geometries.get(key) != NucleusGeometrySignature.from_nucleus(nucleus):
+            return None
+        return sample
+
+    def corrected_value(
+        self,
+        manager: NucleiManager,
+        image_channel: int,
+        time: int,
+        nucleus: Nucleus,
+        correction_method: str,
+    ) -> float | None:
+        if not self.is_current(manager) or not self.dependencies_current(
+            manager,
+            correction_method,
+        ):
+            return None
+        sample = self._sample_from_current_source(time, nucleus, image_channel)
+        if sample is None:
+            return None
+        return sample.corrected_value(correction_method)
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,7 +595,10 @@ def _correction_label(method: str) -> str:
 
 
 __all__ = [
+    "ExpressionMeasurementFamily",
     "ExpressionMeasurementSet",
+    "MeasuredExpressionAggregate",
+    "MeasuredExpressionAggregateChannel",
     "MeasuredExpressionChannel",
     "MeasuredExpressionSample",
     "NucleusGeometrySignature",

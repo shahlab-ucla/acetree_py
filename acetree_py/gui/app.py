@@ -1866,6 +1866,61 @@ class AceTreeApp:
         self._expression_comparison_windows.append(window)
         window.show()
 
+    def open_expression_comparison_result_window(self, path=None):
+        """Open a portable comparison in a new offline/frozen window.
+
+        Loading and validating the result happens before any window-list or
+        counter mutation. The shared live repository is intentionally not
+        instantiated for this workflow.
+        """
+
+        from qtpy.QtWidgets import QFileDialog, QMessageBox
+
+        from ..analysis.expression_comparison_result import (
+            EXPRESSION_COMPARISON_RESULT_SUFFIX,
+            load_expression_comparison_result,
+        )
+        from .expression_comparison_window import ExpressionComparisonWindow
+
+        parent = None
+        try:
+            parent = self.viewer.window._qt_window if self.viewer is not None else None
+        except (AttributeError, RuntimeError):
+            parent = None
+        if path is None:
+            path, _selected_filter = QFileDialog.getOpenFileName(
+                parent,
+                "Open portable expression result",
+                "",
+                "AceTree expression results (*.aceexpr)",
+            )
+            if not path:
+                return None
+        try:
+            result = load_expression_comparison_result(path)
+            next_number = self._expression_comparison_window_counter + 1
+            window = ExpressionComparisonWindow(
+                self,
+                repository=None,
+                result=result,
+                result_path=str(path),
+                window_number=next_number,
+                parent=parent,
+            )
+        except Exception as error:  # noqa: BLE001 - malformed files fail closed
+            logger.exception("Could not open portable expression result %s", path)
+            QMessageBox.warning(
+                parent,
+                "Cannot open expression result",
+                f"The selected {EXPRESSION_COMPARISON_RESULT_SUFFIX} file could not "
+                f"be opened:\n{error}",
+            )
+            return None
+        self._expression_comparison_window_counter = next_number
+        self._expression_comparison_windows.append(window)
+        window.show()
+        return window
+
     def _shutdown_expression_dataset_repository(self) -> None:
         repository = self._expression_dataset_repository
         self._expression_dataset_repository = None
@@ -3564,10 +3619,19 @@ class AceTreeApp:
         )
         comparison_action.triggered.connect(self.open_expression_comparison_window)
         window_menu.addAction(comparison_action)
+        open_comparison_result_action = QAction("Open Expression Result…", qt_window)
+        open_comparison_result_action.setStatusTip(
+            "Open an offline .aceexpr comparison capture without its source datasets"
+        )
+        open_comparison_result_action.triggered.connect(
+            lambda _checked=False: self.open_expression_comparison_result_window()
+        )
+        window_menu.addAction(open_comparison_result_action)
         self._panel_menu_actions = {
             "new_lineage": add_panel_action,
             "new_expression_plot": expression_action,
             "new_expression_comparison": comparison_action,
+            "open_expression_result": open_comparison_result_action,
         }
 
     def _on_new_lineage_panel(self) -> None:
@@ -3776,12 +3840,16 @@ class AceTreeApp:
         progress.setMinimumDuration(0)
         progress.setValue(0)
 
+        completed_steps = 0
+
         def progress_cb(c_idx: int, n_ch: int, t_1based: int, n_tp: int) -> bool:
-            step = c_idx * n_tp + t_1based
-            progress.setValue(step)
+            nonlocal completed_steps
+            completed_steps += 1
+            progress.setValue(min(total_steps, completed_steps))
             progress.setLabelText(
-                f"Measuring channel {c_idx + 1}/{n_ch}, "
-                f"timepoint {t_1based}/{n_tp}…"
+                "Reading movie once for all channels "
+                f"(selected correction: {correction_method}; "
+                f"{completed_steps}/{total_steps})…"
             )
             QApplication.processEvents()
             return not progress.wasCanceled()

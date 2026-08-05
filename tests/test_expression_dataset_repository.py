@@ -32,6 +32,7 @@ from acetree_py.analysis.expression_dataset_repository import (
     ExpressionTraceFreshness,
     ExpressionTraceSource,
     ImageSourceUnavailableError,
+    MeasurementComputationError,
     RepositoryClosedError,
     source_fingerprint_for_config,
 )
@@ -74,6 +75,58 @@ class _FakeProvider:
 
     def get_plane(self, *_args, **_kwargs):
         raise AssertionError("The injected measurement function owns image access")
+
+
+class _CountingFamilyProvider:
+    def __init__(
+        self,
+        *,
+        fail_second_time_once: bool = False,
+        source_files: tuple[Path, ...] = (),
+    ) -> None:
+        self.data = np.empty((2, 2, 5, 16, 16), dtype=np.uint16)
+        self.data[:, 0] = 100
+        self.data[:, 1] = 250
+        self.all_channel_calls: list[int] = []
+        self.single_channel_calls: list[tuple[int, int]] = []
+        self.fail_second_time_once = fail_second_time_once
+        self._failed_bulk_time: int | None = None
+        self.source_files = source_files
+
+    @property
+    def num_channels(self) -> int:
+        return 2
+
+    @property
+    def num_timepoints(self) -> int:
+        return 2
+
+    @property
+    def num_planes(self) -> int:
+        return 5
+
+    @property
+    def image_shape(self) -> tuple[int, int]:
+        return (16, 16)
+
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        self.all_channel_calls.append(time)
+        if self.fail_second_time_once and time == 2:
+            self.fail_second_time_once = False
+            self._failed_bulk_time = time
+            raise OSError("transient second-timepoint failure")
+        return tuple(self.data[time - 1, channel] for channel in range(2))
+
+    def get_stack(self, time: int, channel: int) -> np.ndarray:
+        self.single_channel_calls.append((time, channel))
+        if self._failed_bulk_time == time:
+            if channel == self.num_channels - 1:
+                self._failed_bulk_time = None
+            raise OSError("transient per-channel fallback failure")
+        return self.data[time - 1, channel]
+
+    def image_source_files(self, **_bounds) -> tuple[Path, ...]:
+        return self.source_files
 
 
 def _nucleus(index: int, name: str, *, predecessor: int = -1, complete: bool = True):
@@ -121,6 +174,7 @@ def _write_dataset(
     name: str = "embryo",
     complete: bool = True,
     duplicate: bool = False,
+    second_cell: bool = False,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     image_path = root / f"{name}_t1.tif"
@@ -128,6 +182,14 @@ def _write_dataset(
     zip_path = root / f"{name}.zip"
     if duplicate:
         nuclei = [[_nucleus(1, "ABa"), _nucleus(2, "ABa")]]
+    elif second_cell:
+        nuclei = [
+            [_nucleus(1, "ABa"), _nucleus(2, "ABp")],
+            [
+                _nucleus(1, "ABa", predecessor=1, complete=complete),
+                _nucleus(2, "ABp", predecessor=2, complete=complete),
+            ],
+        ]
     else:
         nuclei = [
             [_nucleus(1, "ABa")],
@@ -323,25 +385,220 @@ def test_unavailable_recomputed_channel_fails_closed(tmp_path: Path):
     assert calls == []
 
 
-def test_default_backend_uses_public_measure_expression_set(tmp_path: Path, monkeypatch):
+def test_default_backend_uses_public_measure_expression_family(
+    tmp_path: Path,
+    monkeypatch,
+):
     xml_path = _write_dataset(tmp_path / "data")
     calls: list[str] = []
     from acetree_py.analysis import measure_runner
 
+    provider = _CountingFamilyProvider()
+    real_measure = measure_runner.measure_expression_family
+
+    def counting_measure(*args, **kwargs):
+        calls.append("family")
+        return real_measure(*args, **kwargs)
+
     monkeypatch.setattr(
         measure_runner,
-        "measure_expression_set",
-        _measurement_function(calls),
+        "measure_expression_family",
+        counting_measure,
     )
     repository = ExpressionDatasetRepository(
-        image_provider_factory=lambda _config: _FakeProvider(num_channels=1)
+        image_provider_factory=lambda _config: provider
     )
     repository.load_dataset(xml_path)
 
     trace = repository.extract_recomputed_trace(xml_path, "ABa", 0, "global")
 
-    assert trace.values == (101.0, 102.0)
-    assert calls == ["global"]
+    assert trace.values == pytest.approx((0.0, 0.0))
+    assert calls == ["family"]
+
+
+def test_production_family_is_shared_across_cells_channels_and_corrections(
+    tmp_path: Path,
+    monkeypatch,
+):
+    xml_path = _write_dataset(tmp_path / "data", second_cell=True)
+    provider = _CountingFamilyProvider()
+    repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: provider
+    )
+    repository.load_dataset(xml_path)
+
+    global_trace = repository.extract_recomputed_trace(
+        xml_path, "ABa", 0, "global"
+    )
+    assert provider.all_channel_calls == [1, 2]
+    assert provider.single_channel_calls == []
+
+    import acetree_py.analysis.expression_measurements as measurements_module
+
+    fingerprint_calls = 0
+    real_fingerprint = measurements_module.expression_measurement_dependency_fingerprint
+
+    def counting_fingerprint(manager):
+        nonlocal fingerprint_calls
+        fingerprint_calls += 1
+        return real_fingerprint(manager)
+
+    monkeypatch.setattr(
+        measurements_module,
+        "expression_measurement_dependency_fingerprint",
+        counting_fingerprint,
+    )
+    blot_trace = repository.extract_recomputed_trace(xml_path, "ABp", 1, "blot")
+    none_trace = repository.extract_recomputed_trace(xml_path, "ABa", 0, "none")
+    local_trace = repository.extract_recomputed_trace(xml_path, "ABp", 1, "local")
+    cross_trace = repository.extract_recomputed_trace(xml_path, "ABp", 1, "cross")
+
+    assert provider.all_channel_calls == [1, 2]
+    assert provider.single_channel_calls == []
+    # Only blot depends on every neighbouring nucleus. Raw/global/local/cross
+    # reuse the family with calibration plus selected-geometry validation.
+    assert fingerprint_calls == 1
+    assert global_trace.values == pytest.approx((0.0, 0.0))
+    assert blot_trace.values == pytest.approx((0.0, 0.0))
+    assert none_trace.values == pytest.approx((100_000.0, 100_000.0))
+    assert local_trace.values == pytest.approx(cross_trace.values)
+    assert repository.status(xml_path).cached_corrections == (
+        "blot",
+        "cross",
+        "global",
+        "local",
+        "none",
+    )
+    entry = next(iter(repository._entries.values()))
+    assert entry.measurement_family is not None
+    assert entry.measurements_by_correction == {}
+
+
+def test_cached_family_trace_performs_one_source_validation(tmp_path: Path, monkeypatch):
+    xml_path = _write_dataset(tmp_path / "data")
+    provider = _CountingFamilyProvider()
+    repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: provider
+    )
+    repository.load_dataset(xml_path)
+    repository.extract_recomputed_trace(xml_path, "ABa", 0, "global")
+
+    validation_calls = 0
+    real_validate = repository._assert_source_current
+
+    def count_validation(entry):
+        nonlocal validation_calls
+        validation_calls += 1
+        return real_validate(entry)
+
+    monkeypatch.setattr(repository, "_assert_source_current", count_validation)
+    repository.extract_recomputed_trace(xml_path, "ABa", 0, "none")
+
+    assert validation_calls == 1
+    assert provider.all_channel_calls == [1, 2]
+
+
+def test_fresh_family_uses_repository_manifest_lease(tmp_path: Path, monkeypatch):
+    import acetree_py.analysis.expression_dataset_repository as repository_module
+    import acetree_py.analysis.measure_runner as runner_module
+
+    xml_path = _write_dataset(tmp_path / "data")
+    representative = xml_path.with_name("embryo_t1.tif")
+    sibling = xml_path.with_name("embryo_t2.tif")
+    sibling.write_bytes(b"stable sibling")
+    provider = _CountingFamilyProvider(source_files=(representative, sibling))
+    repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: provider
+    )
+    repository.load_dataset(xml_path)
+
+    manifest_calls = 0
+    real_manifest = repository_module.image_source_manifest_token
+
+    def count_manifest(*args, **kwargs):
+        nonlocal manifest_calls
+        manifest_calls += 1
+        return real_manifest(*args, **kwargs)
+
+    monkeypatch.setattr(repository_module, "image_source_manifest_token", count_manifest)
+    monkeypatch.setattr(runner_module, "image_source_manifest_token", count_manifest)
+
+    repository.extract_recomputed_trace(xml_path, "ABa", 0, "global")
+
+    # Provider opening takes a before/after inventory; repository publication
+    # takes one post-read inventory. The runner trusts that stronger lease.
+    assert manifest_calls == 3
+
+
+def test_incomplete_production_family_is_cleared_and_retried(tmp_path: Path):
+    xml_path = _write_dataset(tmp_path / "data")
+    provider = _CountingFamilyProvider(fail_second_time_once=True)
+    repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: provider
+    )
+    repository.load_dataset(xml_path)
+
+    with pytest.raises(ExpressionDataIncompleteError):
+        repository.extract_recomputed_trace(xml_path, "ABa", 0, "global")
+
+    assert provider.all_channel_calls == [1, 2]
+    assert provider.single_channel_calls == [(2, 0), (2, 1)]
+    assert repository.status(xml_path).cached_corrections == ()
+
+    trace = repository.extract_recomputed_trace(xml_path, "ABa", 0, "none")
+    assert trace.values == pytest.approx((100_000.0, 100_000.0))
+    assert provider.all_channel_calls == [1, 2, 1, 2]
+    assert repository.status(xml_path).cached_corrections == (
+        "blot",
+        "cross",
+        "global",
+        "local",
+        "none",
+    )
+
+
+def test_cancelled_production_family_is_not_cached(tmp_path: Path):
+    xml_path = _write_dataset(tmp_path / "data")
+    provider = _CountingFamilyProvider()
+    repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: provider
+    )
+    repository.load_dataset(xml_path)
+
+    with pytest.raises(MeasurementComputationError, match="cancelled"):
+        repository.extract_recomputed_trace(
+            xml_path,
+            "ABa",
+            0,
+            "global",
+            progress_cb=lambda *_args: False,
+        )
+
+    assert provider.all_channel_calls == [1]
+    assert repository.status(xml_path).cached_corrections == ()
+
+
+def test_production_family_manifest_change_clears_shared_cache(tmp_path: Path):
+    xml_path = _write_dataset(tmp_path / "data")
+    representative = xml_path.with_name("embryo_t1.tif")
+    sibling = xml_path.with_name("embryo_t2.tif")
+    sibling.write_bytes(b"initial sibling")
+    provider = _CountingFamilyProvider(
+        source_files=(representative, sibling),
+    )
+    repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: provider
+    )
+    repository.load_dataset(xml_path)
+    repository.extract_recomputed_trace(xml_path, "ABa", 0, "global")
+    entry = next(iter(repository._entries.values()))
+    assert entry.measurement_family is not None
+
+    sibling.write_bytes(b"changed sibling with a different size")
+
+    with pytest.raises(DatasetSourceChangedError, match="image file"):
+        repository.status(xml_path)
+    assert entry.measurement_family is None
 
 
 def test_real_tiff_to_measurement_comparison_and_csv(tmp_path: Path):

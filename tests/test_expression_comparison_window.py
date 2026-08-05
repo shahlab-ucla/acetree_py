@@ -13,6 +13,7 @@ import pytest
 try:
     from acetree_py.gui.expression_comparison_window import ExpressionComparisonWindow
     from acetree_py.gui.app import AceTreeApp
+    from qtpy.QtCore import Qt
     from qtpy.QtWidgets import QMainWindow
 
     _GUI_AVAILABLE = True
@@ -24,6 +25,10 @@ pytestmark = pytest.mark.skipif(not _GUI_AVAILABLE, reason="Qt/Matplotlib GUI un
 from acetree_py.analysis.expression_comparison import (
     BandStatistic,
     CenterStatistic,
+)
+from acetree_py.analysis.expression_comparison_result import (
+    ExpressionComparisonSourceMode,
+    load_expression_comparison_result,
 )
 from acetree_py.analysis.expression_dataset_repository import (
     CanonicalCellAmbiguousError,
@@ -218,6 +223,17 @@ class _FakeRepository:
         )
 
 
+class _ExplodingRepository:
+    """Repository sentinel proving that frozen windows never call it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __getattr__(self, name):
+        self.calls += 1
+        raise AssertionError(f"frozen mode called repository.{name}")
+
+
 def _app():
     return SimpleNamespace(
         manager=SimpleNamespace(config=None),
@@ -356,6 +372,310 @@ def test_status_only_comparison_can_export_csv_but_not_svg(qtbot, tmp_path):
     assert [row["trace_status"] for row in rows] == ["incomplete_data"]
     assert rows[0]["n_selected"] == "1"
     assert rows[0]["n_available"] == "0"
+
+
+def test_portable_result_is_offline_retunable_and_resaves_as_child(
+    qtbot, tmp_path
+):
+    repository = _FakeRepository()
+    app = _app()
+    source_paths = [_xml(tmp_path, "offline-a"), _xml(tmp_path, "offline-b")]
+    live = ExpressionComparisonWindow(app, repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths(source_paths, show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    live._dataset_table.item(0, live.COL_LABEL).setText("Control")
+    live._dataset_table.item(0, live.COL_GROUP).setText("control")
+    live._dataset_table.item(0, live.COL_COLOR).setText("#123456")
+    live._dataset_table.item(1, live.COL_LABEL).setText("Treatment")
+    live._dataset_table.item(1, live.COL_GROUP).setText("treated")
+    live._dataset_table.item(1, live.COL_USE).setCheckState(Qt.Unchecked)
+    live._title_edit.setText("Portable view")
+    live._trace_opacity.setValue(0.45)
+    captured_path = live.save_portable_result(tmp_path / "offline-capture")
+    captured = load_expression_comparison_result(captured_path)
+    original_overrides = captured.appearance["dataset_overrides"]
+    captured = replace(
+        captured,
+        appearance={
+            **dict(captured.appearance),
+            "future_extension": {"enabled": True},
+            "dataset_overrides": {
+                dataset_id: {
+                    **dict(values),
+                    "future_dataset_extension": "preserved",
+                }
+                for dataset_id, values in original_overrides.items()
+            },
+        },
+    )
+
+    assert len(captured.datasets) == 2
+    assert captured.appearance["included_dataset_ids"] == (
+        captured.datasets[0].provenance.dataset_id,
+    )
+    for source_path in source_paths:
+        source_path.unlink()
+
+    sentinel = _ExplodingRepository()
+    frozen_app = _app()
+    frozen = ExpressionComparisonWindow(
+        frozen_app,
+        repository=sentinel,
+        result=captured,
+        result_path=str(captured_path),
+        window_number=7,
+    )
+    qtbot.addWidget(frozen)
+
+    assert "Frozen Expression Result" in frozen.windowTitle()
+    assert "FROZEN RESULT" in frozen._intro_label.text()
+    assert not frozen._btn_add.isVisible()
+    assert not frozen._btn_prepare.isEnabled()
+    assert not frozen._source_combo.isEnabled()
+    assert frozen._source_combo.currentData() == "recomputed"
+    assert not frozen._saved_channel_combo.isVisible()
+    assert not frozen._image_channel.isHidden()
+    assert not frozen._correction_combo.isHidden()
+    assert frozen._image_channel.value() == 1
+    assert frozen._correction_combo.currentData() == "global"
+    assert frozen._dataset_table.item(0, frozen.COL_LABEL).text() == "Control"
+    assert not frozen._datasets[captured.datasets[1].provenance.dataset_id].included
+    assert sentinel.calls == 0
+
+    frozen._time_combo.setCurrentIndex(
+        frozen._time_combo.findData("normalized")
+    )
+    frozen._normalized_points.setValue(7)
+    frozen._smoothing_check.setChecked(True)
+    frozen._smoothing_sigma.setValue(0.2)
+    frozen._center_combo.setCurrentIndex(
+        frozen._center_combo.findData(CenterStatistic.MEDIAN.value)
+    )
+    frozen._band_combo.setCurrentIndex(
+        frozen._band_combo.findData(BandStatistic.IQR.value)
+    )
+    frozen._dataset_table.item(0, frozen.COL_LABEL).setText("Retuned control")
+    frozen._dataset_table.item(0, frozen.COL_COLOR).setText("#654321")
+
+    assert frozen._plot_data is not None
+    assert frozen._plot_data.spec.grid.normalized_points == 7
+    assert frozen._plot_data.spec.smoothing.sigma == pytest.approx(0.2)
+    assert frozen._plot_data.spec.summary.center is CenterStatistic.MEDIAN
+    csv_path = frozen.export_csv(tmp_path / "offline-values")
+    svg_path = frozen.export_svg(tmp_path / "offline-figure")
+    assert csv_path.is_file()
+    assert "<svg" in svg_path.read_text(encoding="utf-8")
+    assert sentinel.calls == 0
+
+    revised_path = frozen.save_portable_result(tmp_path / "offline-revised")
+    revised = load_expression_comparison_result(revised_path)
+    assert revised.parent_result_id == captured.result_id
+    assert revised.captured_at == captured.captured_at
+    assert revised.datasets[0].provenance.label == "Retuned control"
+    assert revised.datasets[0].traces[0].color == "#654321"
+    assert revised.appearance["title"] == "Portable view"
+    assert revised.appearance["trace_opacity"] == pytest.approx(0.45)
+    assert revised.appearance["future_extension"] == {"enabled": True}
+    assert all(
+        values["future_dataset_extension"] == "preserved"
+        for values in revised.appearance["dataset_overrides"].values()
+    )
+    assert sentinel.calls == 0
+
+
+def test_frozen_status_only_result_allows_csv_and_portable_save_not_svg(
+    qtbot, tmp_path
+):
+    repository = _FakeRepository()
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([_xml(tmp_path, "status-capture")], show_errors=False)
+
+    def incomplete(*_args, **_kwargs):
+        raise ExpressionDataIncompleteError("legacy sample missing")
+
+    repository.extract_saved_trace = incomplete
+    live.prepare_included_datasets()
+    path = live.save_portable_result(tmp_path / "status-capture")
+    result = load_expression_comparison_result(path)
+    sentinel = _ExplodingRepository()
+    frozen = ExpressionComparisonWindow(
+        _app(), repository=sentinel, result=result, result_path=str(path)
+    )
+    qtbot.addWidget(frozen)
+
+    assert frozen._btn_export_csv.isEnabled()
+    assert frozen._btn_save_result.isEnabled()
+    assert not frozen._btn_export_svg.isEnabled()
+    assert not frozen._toolbar._save_action.isEnabled()
+    assert frozen.export_csv(tmp_path / "frozen-status").is_file()
+    with pytest.raises(RuntimeError, match="no frozen expression comparison"):
+        frozen.export_svg(tmp_path / "must-not-exist")
+    assert sentinel.calls == 0
+
+
+def test_frozen_unacknowledged_legacy_values_fail_closed(qtbot, tmp_path):
+    repository = _FakeRepository()
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([_xml(tmp_path, "legacy-unacknowledged")], show_errors=False)
+    live.prepare_included_datasets()
+    live._legacy_ack.setChecked(True)
+    captured_path = live.save_portable_result(tmp_path / "legacy-acknowledged")
+    captured = load_expression_comparison_result(captured_path)
+    unacknowledged = replace(captured, legacy_acknowledged=False)
+
+    frozen = ExpressionComparisonWindow(
+        _app(),
+        repository=_ExplodingRepository(),
+        result=unacknowledged,
+        result_path=str(captured_path),
+    )
+    qtbot.addWidget(frozen)
+
+    assert "legacy acknowledgement recorded: no" in frozen._cell_availability.text()
+    assert not frozen._btn_export_csv.isEnabled()
+    assert not frozen._btn_export_svg.isEnabled()
+    assert not frozen._btn_save_result.isEnabled()
+    assert captured.acquisition_metadata["saved_channel_key"] == "rweight"
+    assert "image_channel_one_based" not in captured.acquisition_metadata
+    assert "correction_method" not in captured.acquisition_metadata
+    assert not frozen._saved_channel_combo.isHidden()
+    assert not frozen._image_channel.isVisible()
+    assert not frozen._correction_combo.isVisible()
+    with pytest.raises(RuntimeError, match="frozen result contains legacy numeric"):
+        frozen.export_csv(tmp_path / "must-not-export")
+
+
+def test_repeated_live_result_saves_form_revision_lineage(qtbot, tmp_path):
+    repository = _FakeRepository()
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([_xml(tmp_path, "live-lineage")], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+
+    first = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "live-first")
+    )
+    live._title_edit.setText("Presentation revision")
+    second = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "live-second")
+    )
+
+    assert second.parent_result_id == first.result_id
+    assert second.captured_at == first.captured_at
+    assert second.appearance["title"] == "Presentation revision"
+
+
+def test_mixed_unacknowledged_result_allows_recomputed_only_subset(qtbot, tmp_path):
+    repository = _FakeRepository()
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths(
+        [_xml(tmp_path, "mixed-recomputed"), _xml(tmp_path, "mixed-legacy")],
+        show_errors=False,
+    )
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    live._dataset_table.item(1, live.COL_USE).setCheckState(Qt.Unchecked)
+    path = live.save_portable_result(tmp_path / "mixed-source")
+    result = load_expression_comparison_result(path)
+    legacy_dataset = result.datasets[1]
+    legacy_metadata = dict(legacy_dataset.provenance.metadata)
+    legacy_metadata["trace_source"] = ExpressionTraceSource.SAVED_LEGACY.value
+    mixed = replace(
+        result,
+        source_mode=ExpressionComparisonSourceMode.MIXED,
+        legacy_acknowledged=False,
+        datasets=(
+            result.datasets[0],
+            replace(
+                legacy_dataset,
+                provenance=replace(
+                    legacy_dataset.provenance,
+                    metadata=tuple(legacy_metadata.items()),
+                ),
+            ),
+        ),
+    )
+
+    frozen = ExpressionComparisonWindow(_app(), repository=None, result=mixed)
+    qtbot.addWidget(frozen)
+
+    assert frozen._source_combo.currentData() == "mixed"
+    assert frozen._btn_export_csv.isEnabled()
+    assert frozen.export_csv(tmp_path / "mixed-recomputed-only").is_file()
+
+
+def test_frozen_result_rejects_uneditable_grid_precision(qtbot, tmp_path):
+    repository = _FakeRepository()
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([_xml(tmp_path, "precise-grid")], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    result = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "precise-grid")
+    )
+    precise = replace(
+        result,
+        spec=replace(
+            result.spec,
+            grid=replace(result.spec.grid, step=0.0001),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="outside the range or precision"):
+        ExpressionComparisonWindow(_app(), repository=None, result=precise)
+
+
+def test_comparison_progress_is_monotonic_for_time_major_callbacks(
+    qtbot, tmp_path, monkeypatch
+):
+    from acetree_py.gui import expression_comparison_window as window_module
+
+    class TimeMajorRepository(_FakeRepository):
+        def extract_recomputed_trace(self, *args, progress_cb=None, **kwargs):
+            if progress_cb is not None:
+                for timepoint in (1, 2, 3):
+                    for channel in (0, 1):
+                        assert progress_cb(channel, 2, timepoint, 3)
+            return super().extract_recomputed_trace(
+                *args, progress_cb=None, **kwargs
+            )
+
+    class Progress:
+        instance = None
+
+        def __init__(self, *_args):
+            type(self).instance = self
+            self.values = []
+            self._cancelled = False
+
+        def setWindowTitle(self, _value): pass
+        def setWindowModality(self, _value): pass
+        def setMinimumDuration(self, _value): pass
+        def setLabelText(self, _value): pass
+        def close(self): pass
+        def cancel(self): self._cancelled = True
+        def wasCanceled(self): return self._cancelled
+        def setValue(self, value): self.values.append(value)
+        def value(self): return self.values[-1] if self.values else 0
+
+    monkeypatch.setattr(window_module, "QProgressDialog", Progress)
+    repository = TimeMajorRepository()
+    window = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(window)
+    window.add_dataset_paths([_xml(tmp_path, "time-major")], show_errors=False)
+    _set_source(window, "recomputed")
+    window.prepare_included_datasets()
+
+    assert Progress.instance is not None
+    assert Progress.instance.values == sorted(Progress.instance.values)
+    assert Progress.instance.values[-1] == 1000
 
 
 def test_recomputed_measurement_cache_is_reused_across_windows(qtbot, tmp_path):
@@ -803,7 +1123,9 @@ def test_app_shutdown_closes_and_releases_shared_repository():
     assert repository.close_calls == 1
 
 
-def test_window_menu_exposes_multi_instance_expression_comparison(qtbot):
+def test_window_menu_exposes_multi_instance_expression_comparison(
+    qtbot, monkeypatch
+):
     manager = SimpleNamespace(nuclei_record=[], config=None)
     app = AceTreeApp(manager)
     repository = _FakeRepository()
@@ -817,9 +1139,20 @@ def test_window_menu_exposes_multi_instance_expression_comparison(qtbot):
 
     app._add_panel_menu_actions()
     action = app._panel_menu_actions["new_expression_comparison"]
+    open_result_action = app._panel_menu_actions["open_expression_result"]
 
     assert "Expression Comparison" in action.text()
+    assert open_result_action.text() == "Open Expression Result…"
+    assert ".aceexpr" in open_result_action.statusTip()
     assert "multiple AceTree XML datasets" in action.statusTip()
+    dialog_calls = []
+    monkeypatch.setattr(
+        "qtpy.QtWidgets.QFileDialog.getOpenFileName",
+        lambda *_args, **_kwargs: (dialog_calls.append("open") or "", ""),
+    )
+    open_result_action.trigger()
+    assert dialog_calls == ["open"]
+    assert app._expression_comparison_windows == []
     action.trigger()
     action.trigger()
 
@@ -835,6 +1168,44 @@ def test_window_menu_exposes_multi_instance_expression_comparison(qtbot):
     )
     for window in tuple(app._expression_comparison_windows):
         window.close()
+
+
+def test_app_opens_result_without_repository_and_malformed_open_is_atomic(
+    qtbot, tmp_path, monkeypatch
+):
+    repository = _FakeRepository()
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    source = _xml(tmp_path, "app-open")
+    live.add_dataset_paths([source], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    result_path = live.save_portable_result(tmp_path / "app-open")
+    source.unlink()
+
+    manager = SimpleNamespace(nuclei_record=[], config=None)
+    app = AceTreeApp(manager)
+    app._expression_dataset_repository = None
+    app.viewer = None
+    window = app.open_expression_comparison_result_window(result_path)
+    assert window is not None
+    qtbot.addWidget(window)
+    assert app._expression_dataset_repository is None
+    assert app._expression_comparison_windows == [window]
+
+    warnings = []
+    monkeypatch.setattr(
+        "qtpy.QtWidgets.QMessageBox.warning",
+        lambda _parent, title, message: warnings.append((title, message)),
+    )
+    malformed = tmp_path / "malformed.aceexpr"
+    malformed.write_text("{}", encoding="utf-8")
+    before_windows = tuple(app._expression_comparison_windows)
+    before_counter = app._expression_comparison_window_counter
+    assert app.open_expression_comparison_result_window(malformed) is None
+    assert tuple(app._expression_comparison_windows) == before_windows
+    assert app._expression_comparison_window_counter == before_counter
+    assert warnings and warnings[-1][0] == "Cannot open expression result"
 
 
 def test_panel_actions_create_window_menu_when_napari_has_none(qtbot):

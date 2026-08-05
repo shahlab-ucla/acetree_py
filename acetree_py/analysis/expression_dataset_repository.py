@@ -36,7 +36,11 @@ from ..io.image_provider import (
     create_image_provider_from_config,
     image_source_manifest_token,
 )
-from .expression_measurements import ExpressionMeasurementSet, legacy_expression_coverage
+from .expression_measurements import (
+    ExpressionMeasurementFamily,
+    ExpressionMeasurementSet,
+    legacy_expression_coverage,
+)
 from .expression_plot import DEFAULT_EXPRESSION_CHANNELS, ExpressionChannel
 
 logger = logging.getLogger(__name__)
@@ -193,6 +197,7 @@ class _DatasetEntry:
     image_provider: ImageProvider | None = None
     image_manifest_provider: ImageProvider | None = None
     image_manifest_token: str | None = None
+    measurement_family: ExpressionMeasurementFamily | None = None
     measurements_by_correction: dict[str, ExpressionMeasurementSet] = field(
         default_factory=dict
     )
@@ -307,6 +312,7 @@ class ExpressionDatasetRepository:
                     existing.active = False
                     self._entries.pop(key, None)
                     self._close_provider(existing)
+                    existing.measurement_family = None
                     existing.measurements_by_correction.clear()
         # Loading below creates a new generation even when every on-disk stat
         # happens to be identical.
@@ -429,13 +435,26 @@ class ExpressionDatasetRepository:
                     f"Image channel {channel_index + 1} is outside the "
                     f"{provider.num_channels}-channel source for {entry.config_path}"
                 )
-            measurement = self._measurement_set(
-                entry,
-                method,
-                progress_cb=progress_cb,
-            )
+            measurement = None
+            family = None
+            if self._measurement_function is None:
+                family = self._measurement_family(
+                    entry,
+                    method,
+                    progress_cb=progress_cb,
+                )
+            else:
+                measurement = self._measurement_set(
+                    entry,
+                    method,
+                    progress_cb=progress_cb,
+                )
             try:
-                measured_channel = measurement.channel(channel_index)
+                measured_channel = (
+                    family.channel(channel_index)
+                    if family is not None
+                    else measurement.channel(channel_index)
+                )
             except KeyError as error:
                 raise ExpressionChannelUnavailableError(
                     f"Recomputed image channel {channel_index + 1} is unavailable in "
@@ -446,28 +465,44 @@ class ExpressionDatasetRepository:
             values: list[float] = []
             try:
                 for time, nucleus in zip(timepoints, nuclei):
-                    sample = measurement.sample(
-                        entry.manager,
-                        channel_index,
-                        time,
-                        nucleus,
+                    sample = (
+                        family._sample_from_current_source(
+                            time,
+                            nucleus,
+                            channel_index,
+                        )
+                        if family is not None
+                        else measurement.sample(
+                            entry.manager,
+                            channel_index,
+                            time,
+                            nucleus,
+                        )
                     )
                     if sample is None:
                         raise ExpressionDataIncompleteError(
                             f"Recomputed channel {channel_index + 1} is incomplete "
                             f"for canonical cell {canonical_cell_name!r} at time {time}"
                         )
-                    values.append(
-                        _finite_float(sample.value, canonical_cell_name, time)
+                    value = (
+                        sample.corrected_value(method)
+                        if family is not None
+                        else sample.value
                     )
+                    values.append(_finite_float(value, canonical_cell_name, time))
             except ExpressionDataIncompleteError:
                 # A transient unreadable stack must be retryable without an
                 # explicit source reload.  Do not retain a known-incomplete
                 # all-channel correction snapshot indefinitely.
-                entry.measurements_by_correction.pop(method, None)
+                entry.measurement_family = None
+                entry.measurements_by_correction.clear()
                 raise
 
-            self._assert_source_current(entry)
+            # Fresh measurement reads external files and needs a post-read
+            # source check. A cache hit used only immutable in-memory values;
+            # the entry was already validated at the start of this lease.
+            if family is None:
+                self._assert_source_current(entry)
             return NativeExpressionTrace(
                 dataset_path=entry.config_path,
                 dataset_fingerprint=entry.source_fingerprint,
@@ -485,7 +520,7 @@ class ExpressionDatasetRepository:
                     freshness=ExpressionTraceFreshness.CURRENT_SESSION,
                     image_channel=channel_index,
                     correction_method=method,
-                    at_channel=measurement.at_channel,
+                    at_channel=0 if family is not None else measurement.at_channel,
                     channel_verified=True,
                     correction_verified=True,
                 ),
@@ -513,6 +548,7 @@ class ExpressionDatasetRepository:
                 entry.active = False
                 self._entries.pop(key, None)
                 self._close_provider(entry)
+                entry.measurement_family = None
                 entry.measurements_by_correction.clear()
         return True
 
@@ -535,6 +571,7 @@ class ExpressionDatasetRepository:
                     entry.close_when_idle = True
                 else:
                     self._close_provider(entry)
+                    entry.measurement_family = None
                     entry.measurements_by_correction.clear()
 
     @contextmanager
@@ -582,6 +619,7 @@ class ExpressionDatasetRepository:
             if entry.close_when_idle:
                 entry.close_when_idle = False
                 self._close_provider(entry)
+                entry.measurement_family = None
                 entry.measurements_by_correction.clear()
             entry.lock.release()
 
@@ -593,7 +631,16 @@ class ExpressionDatasetRepository:
             num_timepoints=entry.manager.num_timepoints,
             num_cells=tree.num_cells if tree is not None else 0,
             image_provider_loaded=entry.image_provider is not None,
-            cached_corrections=tuple(sorted(entry.measurements_by_correction)),
+            cached_corrections=tuple(
+                sorted(
+                    set(entry.measurements_by_correction)
+                    | (
+                        set(entry.measurement_family.available_corrections)
+                        if entry.measurement_family is not None
+                        else set()
+                    )
+                )
+            ),
             snapshot_token=self._snapshot_token(entry),
             generation=entry.generation,
             image_manifest_token=entry.image_manifest_token,
@@ -666,6 +713,58 @@ class ExpressionDatasetRepository:
             dataset_generation=entry.generation,
             image_manifest_token=entry.image_manifest_token,
         )
+
+    def _measurement_family(
+        self,
+        entry: _DatasetEntry,
+        correction_method: str,
+        *,
+        progress_cb: ProgressCallback | None,
+    ) -> ExpressionMeasurementFamily:
+        cached = entry.measurement_family
+        if cached is not None:
+            if cached.is_current(entry.manager) and cached.dependencies_current(
+                entry.manager,
+                correction_method,
+            ):
+                return cached
+            entry.measurement_family = None
+
+        provider = self._provider(entry)
+        if provider.num_channels <= 0:
+            raise ImageSourceUnavailableError(
+                f"Image source reports no channels for {entry.config_path}"
+            )
+        from .measure_runner import measure_expression_family
+
+        try:
+            result = measure_expression_family(
+                entry.manager,
+                provider,
+                progress_cb=progress_cb,
+                _validate_image_manifest=False,
+            )
+        except ExpressionDatasetRepositoryError:
+            raise
+        except Exception as error:
+            raise MeasurementComputationError(
+                f"Expression measurement failed for {entry.config_path}: {error}"
+            ) from error
+
+        self._assert_source_current(entry)
+        if not isinstance(result, ExpressionMeasurementFamily):
+            raise MeasurementComputationError(
+                "measure_expression_family returned an unexpected result type"
+            )
+        if not result.is_current(entry.manager) or not result.dependencies_current(
+            entry.manager,
+            "none",
+        ):
+            raise MeasurementComputationError(
+                "measure_expression_family returned a stale measurement family"
+            )
+        entry.measurement_family = result
+        return result
 
     def _measurement_set(
         self,
@@ -797,6 +896,7 @@ class ExpressionDatasetRepository:
                 current_manifest = self._image_manifest_token(
                     entry,
                     entry.image_manifest_provider,
+                    verify_load_stability=False,
                 )
             except Exception as error:
                 self._invalidate_entry(entry)
@@ -816,6 +916,8 @@ class ExpressionDatasetRepository:
     def _image_manifest_token(
         entry: _DatasetEntry,
         provider: ImageProvider,
+        *,
+        verify_load_stability: bool = True,
     ) -> str | None:
         # The Measure core reads every non-empty absolute nuclei frame in the
         # detached record.  Do not bound this inventory by XML ``start`` /
@@ -830,10 +932,14 @@ class ExpressionDatasetRepository:
         # load eagerly when ``num_planes`` is queried; comparing this token to
         # the post-query token prevents cached pixels from being paired with a
         # manifest captured only after a concurrent source replacement.
-        before_load = image_source_manifest_token(
-            provider,
-            timepoints=timepoints,
-            planes=None,
+        before_load = (
+            image_source_manifest_token(
+                provider,
+                timepoints=timepoints,
+                planes=None,
+            )
+            if verify_load_stability
+            else None
         )
         # Built-in per-plane providers read from plane 1 through their own
         # stack depth.  Include the XML end as a conservative lower bound for
@@ -859,6 +965,7 @@ class ExpressionDatasetRepository:
         return after_load
 
     def _invalidate_entry(self, entry: _DatasetEntry) -> None:
+        entry.measurement_family = None
         entry.measurements_by_correction.clear()
         self._close_provider(entry)
 

@@ -35,7 +35,10 @@ from ..io.image_provider import ImageProvider, image_source_manifest_token
 from .measure import measure_timepoint, measure_timepoint_with_blot
 from .measure_csv import write_measure_csv
 from .expression_measurements import (
+    ExpressionMeasurementFamily,
     ExpressionMeasurementSet,
+    MeasuredExpressionAggregate,
+    MeasuredExpressionAggregateChannel,
     MeasuredExpressionChannel,
     MeasuredExpressionSample,
     NucleusGeometrySignature,
@@ -109,6 +112,37 @@ def measure_expression_set(
             "Dataset changed while Measure was preparing results; no "
             "measurement snapshot was returned. Run Measure again."
         )
+    return result
+
+
+def measure_expression_family(
+    manager: NucleiManager,
+    image_provider: ImageProvider,
+    *,
+    progress_cb: ProgressCallback | None = None,
+    _validate_image_manifest: bool = True,
+) -> ExpressionMeasurementFamily:
+    """Measure every channel and supported correction in one image pass.
+
+    ``_validate_image_manifest=False`` is reserved for the repository, which
+    owns a stronger full-source validation lease around this call.
+    """
+
+    run = _collect_measurement_run(
+        manager,
+        image_provider,
+        at_channel=0,
+        progress_cb=progress_cb,
+        correction_method="blot",
+        validate_image_manifest=_validate_image_manifest,
+    )
+    result = _build_expression_measurement_family(
+        manager,
+        run.measurements,
+        source_revision=run.source_revision,
+        source_dependency_fingerprint=run.source_dependency_fingerprint,
+        source_calibration=run.source_calibration,
+    )
     return result
 
 
@@ -330,6 +364,7 @@ def _collect_measurement_run(
     at_channel: int,
     progress_cb: ProgressCallback | None,
     correction_method: str | None,
+    validate_image_manifest: bool = True,
 ) -> _MeasurementRun:
     """Compute all channel aggregates against one immutable source state."""
 
@@ -342,10 +377,14 @@ def _collect_measurement_run(
         for time, nuclei in enumerate(manager.nuclei_record, start=1)
         if nuclei
     )
-    image_manifest_before = image_source_manifest_token(
-        image_provider,
-        timepoints=measured_timepoints,
-        planes=None,
+    image_manifest_before = (
+        image_source_manifest_token(
+            image_provider,
+            timepoints=measured_timepoints,
+            planes=None,
+        )
+        if validate_image_manifest
+        else None
     )
     n_channels = image_provider.num_channels
     if not 0 <= at_channel < n_channels:
@@ -383,40 +422,67 @@ def _collect_measurement_run(
 
     # measurements[channel][t_0based] = per-nucleus measurement tuples.
     # Stored uniformly as 6-tuples; non-blot runs use zero blot aggregates.
-    measurements: list[list[list[MeasurementTuple]]] = []
-    for channel_index in range(n_channels):
-        per_channel: list[list[MeasurementTuple]] = []
-        for t0 in range(n_timepoints):
-            time = t0 + 1
-            nuclei = manager.nuclei_record[t0]
+    measurements: list[list[list[MeasurementTuple]]] = [
+        [] for _channel in range(n_channels)
+    ]
+    all_channel_loader = getattr(image_provider, "get_all_channel_stacks", None)
+    for t0 in range(n_timepoints):
+        time = t0 + 1
+        nuclei = manager.nuclei_record[t0]
+        shared_stacks = None
+        if nuclei and callable(all_channel_loader):
+            try:
+                shared_stacks = tuple(all_channel_loader(time))
+                if len(shared_stacks) != n_channels:
+                    raise ValueError(
+                        "get_all_channel_stacks returned "
+                        f"{len(shared_stacks)} stacks for {n_channels} channels"
+                    )
+            except Exception as error:  # noqa: BLE001 — optional compatibility path
+                # Bulk loading is an optional optimization.  Preserve the
+                # established per-channel API when a provider cannot use it.
+                logger.warning(
+                    "Bulk stack load failed at t=%d (%s); falling back to "
+                    "per-channel reads",
+                    time,
+                    error,
+                )
+
+        for channel_index in range(n_channels):
             if not nuclei:
-                per_channel.append([])
+                tuples: list[MeasurementTuple] = []
             else:
-                try:
-                    stack = image_provider.get_stack(time, channel_index)
-                except Exception as error:  # noqa: BLE001 — preserve partial coverage
+                stack = None
+                load_error: Exception | None = None
+                if shared_stacks is not None:
+                    stack = shared_stacks[channel_index]
+                else:
+                    try:
+                        stack = image_provider.get_stack(time, channel_index)
+                    except Exception as error:  # noqa: BLE001 — partial coverage
+                        load_error = error
+                if load_error is not None:
                     logger.warning(
                         "Failed to load stack t=%d channel=%d: %s; "
                         "emitting missing measurements for this timepoint",
                         time,
                         channel_index,
-                        error,
+                        load_error,
                     )
-                    per_channel.append([(0, 0, 0, 0, 0, 0)] * len(nuclei))
+                    tuples = [(0, 0, 0, 0, 0, 0)] * len(nuclei)
+                elif use_blot:
+                    tuples = measure_timepoint_with_blot(
+                        stack,
+                        nuclei,
+                        z_pix_res,
+                    )
                 else:
-                    if use_blot:
-                        tuples = measure_timepoint_with_blot(
-                            stack,
-                            nuclei,
-                            z_pix_res,
-                        )
-                    else:
-                        raw = measure_timepoint(stack, nuclei, z_pix_res)
-                        tuples = [
-                            (inner_sum, inner_count, ann_sum, ann_count, 0, 0)
-                            for inner_sum, inner_count, ann_sum, ann_count in raw
-                        ]
-                    per_channel.append(tuples)
+                    raw = measure_timepoint(stack, nuclei, z_pix_res)
+                    tuples = [
+                        (inner_sum, inner_count, ann_sum, ann_count, 0, 0)
+                        for inner_sum, inner_count, ann_sum, ann_count in raw
+                    ]
+            measurements[channel_index].append(tuples)
 
             if progress_cb is not None:
                 proceed = progress_cb(
@@ -427,7 +493,6 @@ def _collect_measurement_run(
                 )
                 if proceed is False:
                     raise RuntimeError("Measure cancelled by user")
-        measurements.append(per_channel)
 
     run = _MeasurementRun(
         measurements=measurements,
@@ -440,10 +505,14 @@ def _collect_measurement_run(
         source_dependency_fingerprint=source_dependency_fingerprint,
         source_calibration=source_calibration,
     )
-    image_manifest_after = image_source_manifest_token(
-        image_provider,
-        timepoints=measured_timepoints,
-        planes=None,
+    image_manifest_after = (
+        image_source_manifest_token(
+            image_provider,
+            timepoints=measured_timepoints,
+            planes=None,
+        )
+        if validate_image_manifest
+        else None
     )
     if (
         image_manifest_before is not None
@@ -544,6 +613,71 @@ def _build_expression_measurement_set(
         channels=tuple(channels),
         geometries=geometries,
         csv_paths=tuple(Path(path) for path in csv_paths),
+    )
+
+
+def _build_expression_measurement_family(
+    manager: NucleiManager,
+    measurements: list[list[list[MeasurementTuple]]],
+    *,
+    source_revision: int,
+    source_dependency_fingerprint: str,
+    source_calibration: tuple[float, float, int, float],
+) -> ExpressionMeasurementFamily:
+    """Build one aggregate store from an all-corrections measurement pass."""
+
+    geometries = {
+        (t0 + 1, int(nucleus.index)): NucleusGeometrySignature.from_nucleus(nucleus)
+        for t0, nuclei in enumerate(manager.nuclei_record)
+        for nucleus in nuclei
+        if nucleus.status >= 1
+    }
+    channels: list[MeasuredExpressionAggregateChannel] = []
+    for channel_index, per_timepoint in enumerate(measurements):
+        samples: dict[tuple[int, int], MeasuredExpressionAggregate] = {}
+        for t0, nuclei in enumerate(manager.nuclei_record):
+            if t0 >= len(per_timepoint):
+                continue
+            measured_nuclei = per_timepoint[t0]
+            for offset, nucleus in enumerate(nuclei):
+                if offset >= len(measured_nuclei):
+                    continue
+                (
+                    sum_in,
+                    count_in,
+                    sum_ann,
+                    count_ann,
+                    sum_blot,
+                    count_blot,
+                ) = measured_nuclei[offset]
+                if count_in <= 0:
+                    continue
+                samples[(t0 + 1, int(nucleus.index))] = MeasuredExpressionAggregate(
+                    raw=sum_in * SCALE / count_in,
+                    annulus_background=(
+                        sum_ann * SCALE / count_ann if count_ann > 0 else None
+                    ),
+                    blot_background=(
+                        sum_blot * SCALE / count_blot if count_blot > 0 else None
+                    ),
+                    inner_pixel_count=int(count_in),
+                    annulus_pixel_count=int(count_ann),
+                    blot_pixel_count=int(count_blot),
+                )
+        channels.append(
+            MeasuredExpressionAggregateChannel(
+                image_channel=channel_index,
+                label=f"Channel {channel_index + 1}",
+                samples=samples,
+            )
+        )
+
+    return ExpressionMeasurementFamily(
+        source_revision=source_revision,
+        source_dependency_fingerprint=source_dependency_fingerprint,
+        source_calibration=source_calibration,
+        channels=tuple(channels),
+        geometries=geometries,
     )
 
 

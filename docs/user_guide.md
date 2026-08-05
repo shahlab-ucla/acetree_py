@@ -835,7 +835,9 @@ canonical cell name. Open additional windows to compare other cells or to keep
 several independently styled or statistically configured views. All
 comparison windows share an application-level dataset repository and
 measurement cache, so an XML loaded or measured once can be reused without
-repeating expensive work.
+repeating expensive work. A portable frozen result is a different workflow:
+it embeds the already materialized comparison inputs in a `.aceexpr` file and
+can be reopened without the repository or source movies.
 
 The recommended workflow is:
 
@@ -869,13 +871,22 @@ The recommended workflow is:
      plot is only a preview. A CSV containing only unavailable-status records
      has no legacy numeric values to acknowledge.
    - **Recompute from images** selects a numbered image channel and background
-     correction, then measures all channels into an immutable in-memory
-     snapshot. This path does not write Measure CSVs, change legacy nucleus
-     fields, modify the detached manager, or alter the active AceTree document.
-     The chosen physical channel number is applied to every included dataset;
+     correction. The first recomputation for each dataset makes one pass over
+     its movie timepoints and collects every image channel together with
+     correction-neutral raw, global-annulus, and blot-annulus aggregates. For
+     combined/interleaved built-in image sources each timepoint is decoded once
+     and distributed to its channels; physically separate channel sources are
+     each read once within that same timepoint pass. **None**, **Global**, and
+     **Blot** are then derived from the shared aggregates. Compatible legacy
+     **Local** and **Cross** requests use the documented fresh Global fallback.
+     This path does not write Measure CSVs, change legacy nucleus fields,
+     modify the detached manager, or alter the active AceTree document. The
+     chosen physical channel number is applied to every included dataset;
      verify that those datasets use the same channel ordering and fluorophore.
-     **Prepare/Recompute** shows cancellable progress. Later plots, cells, and
-     windows reuse the all-channel snapshot for that dataset and correction.
+     **Prepare / recompute included datasets** shows cancellable progress.
+     After that first pass, changing the exact cell, image channel, correction,
+     or comparison window only extracts a new trace from the shared family; it
+     does not reread the movie.
    Missing cells, duplicate names, unavailable channels, and incomplete saved
    or recomputed traces remain selected as explicit acquisition-status records.
    They do not contribute invented values, and the CSV preserves why each
@@ -908,19 +919,38 @@ The recommended workflow is:
    comparison CSV…** exports the immutable numeric snapshot: native,
    aligned/display, availability-status, provenance, and group-summary records.
    Dataset labels and trace colors remain in those trace records, while
-   figure-only appearance controls are window-local rather than part of that
-   numeric data object. **Export plot as SVG…** (or the guarded toolbar Save) saves the
-   currently rendered figure after the same source validation. If every
-   included replicate is unavailable, the status-only CSV remains enabled but
-   SVG is disabled because there is no numeric plot to render.
+   figure-only appearance controls remain outside that numeric data object.
+   They are captured separately when a portable result is saved. **Export plot
+   as SVG…** (or the guarded toolbar Save) saves the currently rendered figure
+   after the same source validation. If every included replicate is
+   unavailable, the status-only CSV remains enabled but SVG is disabled
+   because there is no numeric plot to render.
+8. After preparing a live comparison, use **Save portable result…** to freeze
+   its materialized native values, unavailable statuses, provenance, dataset
+   membership and styling, numeric settings, and figure appearance in a
+   checksummed `.aceexpr` file. See the frozen workflow below. Saving is
+   explicit; the ordinary live cache is never converted to a sidecar
+   automatically.
 
 #### Cache validity and export safety
 
-The comparison cache lives only for the current AceTree application session;
-it is released, together with lazily opened image and ZIP handles, when AceTree
-closes. It is not reconstructed from Measure CSV files and it does not write a
-persistent sidecar. Restarting AceTree therefore requires loading the XMLs and,
-for verified values, recomputing them again.
+The live comparison cache lives only for the current AceTree application
+session; it is released, together with lazily opened image and ZIP handles,
+when AceTree closes. It is not reconstructed from Measure CSV files and it does
+not write a persistent sidecar. Restarting AceTree therefore requires loading
+the XMLs and, for verified values, recomputing them again unless you explicitly
+saved a portable `.aceexpr` result.
+
+For the built-in recomputation path, one immutable measurement family holds
+every image channel and every supported correction aggregate for a dataset.
+Once it exists, a different cell/channel/correction/window performs no image
+I/O. The family is bound to the detached dataset revision, calibration, all
+nucleus geometry that can affect sampling/blot masks, the XML/nuclei
+fingerprint, and the full image manifest. If any dependency is stale, the
+family is discarded. A cancellation or failed first pass publishes no partial
+family. If trace extraction finds an incomplete sample, AceTree discards the
+whole family so **Prepare / recompute included datasets** genuinely retries the
+movie instead of repeatedly serving known-incomplete data.
 
 Each loaded dataset receives a new session generation. Its snapshot token
 combines that generation with the XML/nuclei/source fingerprint and, once a
@@ -934,12 +964,71 @@ visible and selectable so **Reload selected** is always available; an existing
 figure may remain only as a visual reference, with export disabled.
 
 **Reload selected** closes that dataset's provider, clears its shared
-recomputation cache, and creates a new generation even when the on-disk file
-statistics happen to be identical. This deliberately invalidates snapshots in
-every other comparison window. Those windows do not need to browse for the XML
-again, but they must prepare the row against the new generation before export.
-This prevents a displayed plot from becoming exportable again under an old or
-mismatched provenance token.
+recomputation family and compatibility caches, and creates a new generation
+even when the on-disk file statistics happen to be identical. Removing the
+repository dataset or closing AceTree also releases the family. Reload
+deliberately invalidates snapshots in every other live comparison window.
+Those windows do not need to browse for the XML again, but they must prepare
+the row against the new generation before export. This prevents a displayed
+plot from becoming exportable again under an old or mismatched provenance
+token.
+
+#### Portable frozen results (`.aceexpr`)
+
+Use a portable result when you want to preserve a prepared comparison, share
+it, or make additional views without retaining access to the original movies:
+
+1. In a prepared live comparison, set the included datasets, labels, groups,
+   colors, time/statistics/smoothing choices, and appearance, then click **Save
+   portable result…**. All captured datasets remain embedded; each dataset's
+   **Use** state is stored separately so later exclusion does not delete its
+   native data.
+2. Open the file with **Window → Open Expression Result…**, the **Open frozen
+   result…** button at the bottom of any comparison window, or by dragging an
+   `.aceexpr` file onto a comparison window. The open dialog is titled **Open
+   portable expression result** and filters **AceTree expression results
+   (`*.aceexpr`)**. Each successful open creates a separate modeless window;
+   malformed, unsupported, or checksum-invalid files fail closed before a
+   window is registered. A prominent **FROZEN RESULT** notice marks the mode.
+   **Add XMLs…**, **Reload selected**, **Prepare / recompute included
+   datasets**, and the cell/source/channel/correction controls are disabled;
+   original source paths are shown as provenance only and are never opened or
+   revalidated. The current UI accepts the workflow's explicit boundary of
+   exactly one canonical cell per portable result.
+3. You may still change **Use**, dataset labels/groups/colors, absolute versus
+   birth-relative versus normalized time, grid settings, Gaussian smoothing,
+   compatible center/error statistics, and all plot appearance controls. **Save
+   portable result…** opens **Save portable expression result** and creates a
+   new result revision while retaining the original capture timestamp,
+   acquisition provenance, and parent-result chain.
+4. **Save exact comparison CSV…** rebuilds native/aligned/display/summary rows
+   from the embedded values, and **Export plot as SVG…** or toolbar Save writes
+   the current rendering. These actions require no pixel recomputation, XML,
+   image movie, or live repository validation. A capture containing only
+   unavailable-status records can still be saved and export its status CSV,
+   but SVG and toolbar image save remain disabled because there is no numeric
+   plot. A saved/mixed capture containing legacy numeric values without a
+   recorded provenance acknowledgement remains viewable but fails closed for
+   CSV, SVG, and portable resave; regenerate it from an acknowledged live
+   comparison.
+
+The file stores materialized native absolute times and values (including
+explicit gaps, birth/end bounds, labels and colors), acquisition statuses,
+dataset group/source provenance, the complete comparison specification,
+source/acquisition metadata, legacy acknowledgement, inclusion and appearance
+settings, capture/save timestamps, producer/calculation versions, and
+result/parent identifiers. Aligned grids, smoothing, and summary rows are
+derived again from those frozen native inputs, so they remain tunable. The
+file does **not** contain movie pixels, a full nuclei archive, or a reusable
+all-cell/all-channel measurement cache; its cell and expression source are
+therefore frozen.
+
+Every `.aceexpr` file has a versioned schema and SHA-256 payload checksum.
+Loading rejects malformed JSON, duplicate keys, invalid/non-finite values,
+unsupported versions, and checksum mismatches. The checksum is an integrity
+check, **not** a digital signature or proof of authenticity: only open captures
+from a source you trust. The frozen banner and retained provenance prevent an
+offline result from being mistaken for a newly validated live measurement.
 
 ---
 

@@ -13,13 +13,18 @@ import acetree_py.analysis.measure_runner as measure_runner
 from acetree_py.analysis.expression_measurements import legacy_expression_coverage
 from acetree_py.analysis.measure_runner import (
     SCALE,
+    measure_expression_family,
     measure_expression_set,
     run_measure,
 )
 from acetree_py.core.nuclei_manager import NucleiManager
 from acetree_py.core.nucleus import Nucleus
 from acetree_py.io.config import AceTreeConfig
-from acetree_py.io.image_provider import NumpyProvider
+from acetree_py.io.image_provider import (
+    NumpyProvider,
+    SplitChannelProvider,
+    StackTiffProvider,
+)
 
 
 def _manager() -> NucleiManager:
@@ -663,3 +668,240 @@ def test_unknown_correction_method_is_rejected(tmp_path: Path):
             0,
             correction_method="mystery",
         )
+
+
+class _AllChannelCountingProvider:
+    def __init__(self, data: np.ndarray) -> None:
+        self.data = data
+        self.all_channel_calls: list[int] = []
+        self.single_channel_calls: list[tuple[int, int]] = []
+
+    @property
+    def num_channels(self) -> int:
+        return int(self.data.shape[1])
+
+    @property
+    def num_timepoints(self) -> int:
+        return int(self.data.shape[0])
+
+    @property
+    def num_planes(self) -> int:
+        return int(self.data.shape[2])
+
+    @property
+    def image_shape(self) -> tuple[int, int]:
+        return (int(self.data.shape[-2]), int(self.data.shape[-1]))
+
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        self.all_channel_calls.append(time)
+        return tuple(self.data[time - 1, channel] for channel in range(self.num_channels))
+
+    def get_stack(self, time: int, channel: int) -> np.ndarray:
+        self.single_channel_calls.append((time, channel))
+        return self.data[time - 1, channel]
+
+
+def test_measurement_family_loads_once_per_time_and_derives_all_corrections():
+    manager = _two_timepoint_manager()
+    data = np.empty((2, 2, 5, 16, 16), dtype=np.uint16)
+    data[:, 0] = 100
+    data[:, 1] = 250
+    provider = _AllChannelCountingProvider(data)
+    progress: list[tuple[int, int, int, int]] = []
+
+    family = measure_expression_family(
+        manager,
+        provider,
+        progress_cb=lambda *args: progress.append(args) or True,
+    )
+
+    assert provider.all_channel_calls == [1, 2]
+    assert provider.single_channel_calls == []
+    assert progress == [
+        (0, 2, 1, 2),
+        (1, 2, 1, 2),
+        (0, 2, 2, 2),
+        (1, 2, 2, 2),
+    ]
+    nucleus = manager.nuclei_record[0][0]
+    sample = family.sample(manager, 1, 1, nucleus)
+    assert sample is not None
+    assert sample.raw == pytest.approx(250 * SCALE)
+    global_value = sample.raw - (sample.annulus_background or 0.0)
+    blot_value = sample.raw - (
+        sample.blot_background
+        if sample.blot_background is not None
+        else (sample.annulus_background or 0.0)
+    )
+    assert sample.corrected_value("none") == pytest.approx(sample.raw)
+    assert sample.corrected_value("global") == pytest.approx(global_value)
+    assert sample.corrected_value("local") == pytest.approx(global_value)
+    assert sample.corrected_value("cross") == pytest.approx(global_value)
+    assert sample.corrected_value("blot") == pytest.approx(blot_value)
+
+
+def test_measurement_family_fallback_provider_is_read_in_time_major_order():
+    manager = _two_timepoint_manager()
+    data = np.full((2, 2, 5, 16, 16), 100, dtype=np.uint16)
+
+    class FallbackProvider:
+        num_channels = 2
+        num_timepoints = 2
+        num_planes = 5
+        image_shape = (16, 16)
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, int]] = []
+
+        def get_stack(self, time: int, channel: int) -> np.ndarray:
+            self.calls.append((time, channel))
+            return data[time - 1, channel]
+
+    provider = FallbackProvider()
+    measure_expression_family(manager, provider)
+    assert provider.calls == [(1, 0), (1, 1), (2, 0), (2, 1)]
+
+
+def test_measurement_family_bulk_failure_falls_back_to_per_channel_reads():
+    manager = _two_timepoint_manager()
+    data = np.full((2, 2, 5, 16, 16), 100, dtype=np.uint16)
+
+    class OptionalBulkProvider:
+        num_channels = 2
+        num_timepoints = 2
+        num_planes = 5
+        image_shape = (16, 16)
+
+        def __init__(self) -> None:
+            self.bulk_calls: list[int] = []
+            self.channel_calls: list[tuple[int, int]] = []
+
+        def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+            self.bulk_calls.append(time)
+            raise NotImplementedError("bulk loading is unavailable")
+
+        def get_stack(self, time: int, channel: int) -> np.ndarray:
+            self.channel_calls.append((time, channel))
+            return data[time - 1, channel]
+
+    provider = OptionalBulkProvider()
+    family = measure_expression_family(manager, provider)
+
+    assert provider.bulk_calls == [1, 2]
+    assert provider.channel_calls == [(1, 0), (1, 1), (2, 0), (2, 1)]
+    assert family.sample(manager, 0, 1, manager.nuclei_record[0][0]) is not None
+
+
+def test_measurement_family_cancellation_stops_before_publication():
+    manager = _two_timepoint_manager()
+    data = np.full((2, 2, 5, 16, 16), 100, dtype=np.uint16)
+    provider = _AllChannelCountingProvider(data)
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        measure_expression_family(
+            manager,
+            provider,
+            progress_cb=lambda *_args: False,
+        )
+
+    assert provider.all_channel_calls == [1]
+    assert manager.expression_measurements is None
+
+
+def test_split_channel_family_reads_the_raw_stack_once():
+    manager = _manager()
+    raw = np.empty((5, 16, 32), dtype=np.uint16)
+    raw[..., :16] = 10
+    raw[..., 16:] = 20
+
+    class InnerProvider:
+        num_channels = 1
+        num_timepoints = 1
+        num_planes = 5
+        image_shape = (16, 32)
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, int]] = []
+
+        def get_stack(self, time: int, channel: int) -> np.ndarray:
+            self.calls.append((time, channel))
+            return raw
+
+    inner = InnerProvider()
+    family = measure_expression_family(
+        manager,
+        SplitChannelProvider(inner, split=True, flip=False),
+    )
+
+    assert inner.calls == [(1, 0)]
+    nucleus = manager.nuclei_record[0][0]
+    assert family.sample(manager, 0, 1, nucleus).raw == pytest.approx(10 * SCALE)
+    assert family.sample(manager, 1, 1, nucleus).raw == pytest.approx(20 * SCALE)
+
+
+def test_stack_tiff_all_channel_fast_path_decodes_each_page_once(tmp_path: Path):
+    class Page:
+        def __init__(self, value: int) -> None:
+            self.value = value
+            self.calls = 0
+
+        def asarray(self) -> np.ndarray:
+            self.calls += 1
+            return np.full((3, 4), self.value, dtype=np.uint16)
+
+    pages = [Page(value) for value in (10, 20, 30, 40)]
+    fake_tiff = type("FakeTiff", (), {"pages": pages})()
+    provider = StackTiffProvider(
+        tmp_path,
+        num_channels=2,
+        channel_order="CZ",
+    )
+    provider._get_tiff_handle = lambda _time: fake_tiff
+
+    channels = provider.get_all_channel_stacks(1)
+
+    assert [page.calls for page in pages] == [1, 1, 1, 1]
+    assert channels[0][:, 0, 0].tolist() == [10, 30]
+    assert channels[1][:, 0, 0].tolist() == [20, 40]
+
+
+def test_measurement_family_matches_single_correction_backends_on_nonuniform_data():
+    manager = _manager_with_neighbor()
+    z, y, x = np.indices((5, 16, 16))
+    stack = (17 * z + 11 * y + 3 * x).astype(np.uint16)
+    provider = NumpyProvider(stack[np.newaxis, np.newaxis, ...])
+    family = measure_expression_family(manager, provider)
+
+    for method in ("none", "global", "blot"):
+        reference = measure_expression_set(
+            manager,
+            provider,
+            correction_method=method,
+        )
+        for nucleus in manager.nuclei_record[0]:
+            expected = reference.sample(manager, 0, 1, nucleus)
+            assert expected is not None
+            assert family.corrected_value(
+                manager,
+                0,
+                1,
+                nucleus,
+                method,
+            ) == pytest.approx(expected.value)
+
+
+def test_stack_tiff_all_channel_fast_path_rejects_rgb_as_z_stack(tmp_path: Path):
+    class RgbPage:
+        samplesperpixel = 3
+
+        @staticmethod
+        def asarray() -> np.ndarray:
+            return np.zeros((3, 8, 6), dtype=np.uint16)
+
+    provider = StackTiffProvider(tmp_path)
+    provider._get_tiff_handle = lambda _time: type(
+        "FakeTiff", (), {"pages": [RgbPage()]}
+    )()
+
+    with pytest.raises(ValueError, match="RGB TIFF page"):
+        provider.get_all_channel_stacks(1)

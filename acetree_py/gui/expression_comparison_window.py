@@ -16,9 +16,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 if TYPE_CHECKING:
     from .app import AceTreeApp
@@ -63,6 +65,7 @@ except ImportError:
 from ..analysis.expression_comparison import (
     BandStatistic,
     CenterStatistic,
+    ComparisonSpec,
     DatasetAcquisitionStatus,
     DatasetExpressionTrace,
     DatasetProvenance,
@@ -75,6 +78,16 @@ from ..analysis.expression_comparison import (
     SummarySpec,
     TraceAvailability,
     export_expression_comparison_tidy_csv,
+)
+from ..analysis.expression_comparison_result import (
+    APPEARANCE_INCLUDED_DATASET_IDS,
+    EXPRESSION_COMPARISON_RESULT_SUFFIX,
+    ExpressionComparisonResult,
+    ExpressionComparisonSourceMode,
+    build_expression_comparison_data,
+    capture_expression_comparison_result,
+    revise_expression_comparison_result,
+    save_expression_comparison_result,
 )
 from ..analysis.expression_dataset_repository import (
     CanonicalCellAmbiguousError,
@@ -147,19 +160,27 @@ _MEDIAN_BAND_OPTIONS = (
 
 @dataclass(slots=True)
 class _DatasetViewState:
-    """Per-window state for one repository-owned dataset."""
+    """Per-window presentation state for one live or frozen dataset."""
 
-    path: Path
-    repository_status: ExpressionDatasetStatus
+    dataset_id: str
+    source_uri: str
     included: bool
     label: str
     group_id: str
     color: str
+    path: Path | None = None
+    repository_status: ExpressionDatasetStatus | None = None
+    frozen_dataset: ExpressionDataset | None = None
     trace: NativeExpressionTrace | None = None
     request_key: tuple[object, ...] | None = None
     resolution: str = "unprepared"  # unprepared, ready, acquisition_status, error
     availability: TraceAvailability | None = None
     message: str = "Needs preparation"
+
+
+class _WindowDataMode(str, Enum):
+    LIVE = "live"
+    FROZEN = "frozen"
 
 
 class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
@@ -176,22 +197,30 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     def __init__(
         self,
         app: AceTreeApp,
-        repository: ExpressionDatasetRepository,
+        repository: ExpressionDatasetRepository | None = None,
         window_number: int = 1,
         parent: QWidget | None = None,
+        *,
+        result: ExpressionComparisonResult | None = None,
+        result_path: str | None = None,
     ) -> None:
         if not _GUI_AVAILABLE:
             raise ImportError("Expression Comparison requires 'acetree-py[gui]'")
         super().__init__(parent)
         self.app = app
+        if result is None and repository is None:
+            raise ValueError("a live comparison requires an expression repository")
         self.repository = repository
+        self._data_mode = (
+            _WindowDataMode.FROZEN if result is not None else _WindowDataMode.LIVE
+        )
+        self._portable_result = result
+        self._result_path = result_path
         self.window_number = int(window_number)
         self.setWindowFlags(Qt.Window)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.setAcceptDrops(True)
-        self.setWindowTitle(
-            f"AceTree — Expression Comparison {self.window_number}"
-        )
+        self._update_window_title()
         self.resize(1320, 820)
 
         self._datasets: dict[str, _DatasetViewState] = {}
@@ -204,13 +233,18 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._active_progress: QProgressDialog | None = None
 
         self._build_ui()
-        self._sync_source_controls()
-        self._on_plot_option_changed()
-        self._on_center_changed()
-        self._on_show_traces_toggled(True)
-        self._add_session_datasets()
-        self._add_current_dataset_if_available()
-        self._refresh_cell_selector()
+        if self._data_mode is _WindowDataMode.FROZEN:
+            assert result is not None
+            self._load_frozen_result(result)
+            self._configure_frozen_ui(result)
+        else:
+            self._sync_source_controls()
+            self._on_plot_option_changed()
+            self._on_center_changed()
+            self._on_show_traces_toggled(True)
+            self._add_session_datasets()
+            self._add_current_dataset_if_available()
+            self._refresh_cell_selector()
         self._refresh_plot()
 
     # -- UI construction -------------------------------------------------
@@ -220,15 +254,15 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         outer.setContentsMargins(7, 7, 7, 7)
         outer.setSpacing(6)
 
-        intro = QLabel(
+        self._intro_label = QLabel(
             "Compare one exact cell across independent AceTree XML datasets. "
             "Saved legacy expression is previewable but has unknown channel, "
             "correction, and freshness provenance; image recomputation is cached "
             "in the shared session repository. Comparison reads saved XML/ZIP "
             "snapshots, so save any main-window edits that should be included."
         )
-        intro.setWordWrap(True)
-        outer.addWidget(intro)
+        self._intro_label.setWordWrap(True)
+        outer.addWidget(self._intro_label)
 
         dataset_group = QGroupBox("1. Datasets")
         dataset_layout = QVBoxLayout(dataset_group)
@@ -249,7 +283,8 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._btn_reload.clicked.connect(self.reload_selected_datasets)
         self._btn_prepare = QPushButton("Prepare included datasets")
         self._btn_prepare.setToolTip(
-            "Extract saved values or recompute image measurements for every checked row"
+            "Extract saved values or, on the first image recompute, read each movie "
+            "once and cache every channel and correction for every checked row"
         )
         self._btn_prepare.clicked.connect(self.prepare_included_datasets)
         dataset_buttons.addWidget(self._btn_add)
@@ -310,6 +345,7 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
 
         data_group = QGroupBox("2. Exact cell and expression source")
         data_form = QFormLayout(data_group)
+        self._data_form = data_form
         self._cell_combo = QComboBox()
         self._cell_combo.setEditable(True)
         self._cell_combo.setInsertPolicy(QComboBox.NoInsert)
@@ -586,21 +622,313 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         layout.addWidget(self._toolbar)
         layout.addWidget(self._canvas, 1)
         exports = QHBoxLayout()
-        exports.addStretch(1)
+        self._btn_open_result = QPushButton("Open frozen result…")
+        self._btn_open_result.setToolTip(
+            "Open an .aceexpr capture in a new, source-independent comparison window"
+        )
+        self._btn_open_result.clicked.connect(self._open_frozen_result)
+        self._btn_save_result = QPushButton("Save portable result…")
+        self._btn_save_result.setToolTip(
+            "Save native traces, statuses, provenance, settings, and plot appearance"
+        )
+        self._btn_save_result.clicked.connect(self._choose_result_path)
         self._btn_export_csv = QPushButton("Save exact comparison CSV…")
         self._btn_export_svg = QPushButton("Export plot as SVG…")
         self._btn_export_csv.clicked.connect(self._choose_csv_path)
         self._btn_export_svg.clicked.connect(self._choose_svg_path)
+        exports.addWidget(self._btn_open_result)
+        exports.addWidget(self._btn_save_result)
+        exports.addStretch(1)
         exports.addWidget(self._btn_export_csv)
         exports.addWidget(self._btn_export_svg)
         layout.addLayout(exports)
         return area
+
+    def _update_window_title(self) -> None:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            name = _display_filename(self._result_path) or "unsaved result"
+            self.setWindowTitle(
+                f"AceTree — Frozen Expression Result: {name} "
+                f"({self.window_number})"
+            )
+            return
+        self.setWindowTitle(f"AceTree — Expression Comparison {self.window_number}")
+
+    def _load_frozen_result(self, result: ExpressionComparisonResult) -> None:
+        """Materialise a portable result without touching repository/source paths."""
+
+        if len(result.spec.cell_names) != 1:
+            raise ValueError(
+                "Expression Comparison currently opens portable results containing "
+                "exactly one canonical cell."
+            )
+        appearance = result.appearance
+        included_value = appearance.get(APPEARANCE_INCLUDED_DATASET_IDS)
+        included_ids = (
+            {str(value) for value in included_value}
+            if isinstance(included_value, (tuple, list))
+            else {dataset.provenance.dataset_id for dataset in result.datasets}
+        )
+        overrides = appearance.get("dataset_overrides")
+        if not isinstance(overrides, Mapping):
+            overrides = {}
+
+        for index, dataset in enumerate(result.datasets):
+            provenance = dataset.provenance
+            override = overrides.get(provenance.dataset_id, {})
+            if not isinstance(override, Mapping):
+                override = {}
+            trace = dataset.traces[0] if dataset.traces else None
+            color = trace.color if trace is not None and trace.color else None
+            candidate_color = override.get("color", color)
+            if not _valid_color(candidate_color):
+                candidate_color = _DEFAULT_COLORS[index % len(_DEFAULT_COLORS)]
+            label = _nonblank_string(override.get("label"), provenance.label)
+            group = _nonblank_string(override.get("group_id"), provenance.group_id)
+            included = provenance.dataset_id in included_ids
+            if type(override.get("included")) is bool:
+                included = bool(override["included"])
+            if dataset.traces:
+                resolution = "ready"
+                availability = None
+                message = "Frozen native values — source files are not required"
+            elif dataset.acquisition_statuses:
+                resolution = "acquisition_status"
+                availability = dataset.acquisition_statuses[0].availability
+                message = dataset.acquisition_statuses[0].message
+            else:
+                resolution = "error"
+                availability = None
+                message = "Frozen result contains neither values nor an acquisition status"
+            self._datasets[provenance.dataset_id] = _DatasetViewState(
+                dataset_id=provenance.dataset_id,
+                source_uri=provenance.source_uri,
+                included=included,
+                label=label,
+                group_id=group,
+                color=str(candidate_color),
+                frozen_dataset=dataset,
+                request_key=("frozen", result.result_id),
+                resolution=resolution,
+                availability=availability,
+                message=message,
+            )
+
+        self._apply_result_controls(result)
+        self._rebuild_dataset_table()
+
+    def _apply_result_controls(self, result: ExpressionComparisonResult) -> None:
+        self._updating_controls = True
+        try:
+            spec = result.spec
+            self._cell_combo.clear()
+            self._cell_combo.addItem(spec.cell_names[0])
+            self._cell_combo.setCurrentIndex(0)
+            source_mode = result.source_mode.value
+            if self._source_combo.findData(source_mode) < 0:
+                self._source_combo.addItem("Mixed captured sources", source_mode)
+            _select_combo_data(self._source_combo, source_mode)
+            metadata = result.acquisition_metadata
+            saved_channel = metadata.get("saved_channel_key")
+            if isinstance(saved_channel, str):
+                _select_combo_data(self._saved_channel_combo, saved_channel)
+            image_channel = metadata.get("image_channel_one_based")
+            if type(image_channel) is int and image_channel >= 1:
+                self._image_channel.setMaximum(
+                    max(self._image_channel.maximum(), image_channel)
+                )
+                self._image_channel.setValue(image_channel)
+            correction = metadata.get("correction_method")
+            if isinstance(correction, str):
+                _select_combo_data(self._correction_combo, correction)
+            _select_combo_data(self._time_combo, spec.time_mode.value)
+            _select_combo_data(self._grid_domain, spec.grid.domain.value)
+            if spec.grid.step is not None:
+                self._grid_step.setValue(spec.grid.step)
+                if not math.isclose(
+                    self._grid_step.value(),
+                    spec.grid.step,
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                ):
+                    raise ValueError(
+                        f"Grid step {spec.grid.step!r} is outside the range or "
+                        "precision supported by this AceTree UI."
+                    )
+            elif spec.time_mode is not TimeAxisMode.NORMALIZED:
+                raise ValueError(
+                    "Automatic grid step is not editable in this AceTree UI; "
+                    "save the result with an explicit step."
+                )
+            self._normalized_points.setValue(spec.grid.normalized_points)
+            if self._normalized_points.value() != spec.grid.normalized_points:
+                raise ValueError(
+                    f"Normalized point count {spec.grid.normalized_points!r} is "
+                    "outside the range supported by this AceTree UI."
+                )
+            self._smoothing_check.setChecked(spec.smoothing.sigma > 0)
+            if spec.smoothing.sigma > 0:
+                self._smoothing_sigma.setValue(spec.smoothing.sigma)
+                if not math.isclose(
+                    self._smoothing_sigma.value(),
+                    spec.smoothing.sigma,
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                ):
+                    raise ValueError(
+                        f"Smoothing sigma {spec.smoothing.sigma!r} is outside the "
+                        "range or precision supported by this AceTree UI."
+                    )
+            _select_combo_data(self._center_combo, spec.summary.center.value)
+            self._populate_band_options(previous=spec.summary.band.value)
+            _select_combo_data(self._band_combo, spec.summary.band.value)
+            self._apply_appearance(result.appearance)
+            self._on_plot_option_changed()
+            self._on_center_changed()
+            self._on_show_traces_toggled(self._show_traces.isChecked())
+            self._on_smoothing_toggled(self._smoothing_check.isChecked())
+            self._on_auto_x_changed(self._auto_x.isChecked())
+            self._on_auto_y_changed(self._auto_y.isChecked())
+        finally:
+            self._updating_controls = False
+
+    def _apply_appearance(self, appearance: Mapping[str, Any]) -> None:
+        """Apply known appearance keys defensively; unknown/future keys are ignored."""
+
+        bool_controls = {
+            "show_traces": self._show_traces,
+            "show_legend": self._legend_check,
+            "show_grid": self._grid_check,
+            "auto_x": self._auto_x,
+            "auto_y": self._auto_y,
+        }
+        for key, control in bool_controls.items():
+            value = appearance.get(key)
+            if type(value) is bool:
+                control.setChecked(value)
+        text_controls = {
+            "title": self._title_edit,
+            "x_label": self._x_label_edit,
+            "y_label": self._y_label_edit,
+            "legend_title": self._legend_title,
+        }
+        for key, control in text_controls.items():
+            value = appearance.get(key)
+            if isinstance(value, str):
+                control.setText(value)
+        combo_controls = {
+            "trace_line_style": self._trace_line_style,
+            "center_line_style": self._center_line_style,
+            "marker": self._marker_combo,
+            "legend_location": self._legend_location,
+            "y_scale": self._y_scale,
+        }
+        for key, control in combo_controls.items():
+            value = appearance.get(key)
+            if isinstance(value, str):
+                _select_combo_data(control, value)
+        numeric_controls = {
+            "trace_opacity": self._trace_opacity,
+            "band_opacity": self._band_opacity,
+            "trace_width": self._trace_width,
+            "center_width": self._center_width,
+            "marker_size": self._marker_size,
+            "font_size": self._font_size,
+            "title_size": self._title_size,
+            "legend_columns": self._legend_columns,
+            "x_min": self._x_min,
+            "x_max": self._x_max,
+            "y_min": self._y_min,
+            "y_max": self._y_max,
+        }
+        for key, control in numeric_controls.items():
+            value = appearance.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                try:
+                    control.setValue(value)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        for key, attribute in (
+            ("figure_background", "_figure_background"),
+            ("axes_background", "_axes_background"),
+            ("text_color", "_text_color"),
+        ):
+            value = appearance.get(key)
+            if _valid_color(value):
+                setattr(self, attribute, str(value))
+
+    def _configure_frozen_ui(self, result: ExpressionComparisonResult) -> None:
+        self._intro_label.setText(
+            "FROZEN RESULT — all native expression values and acquisition statuses "
+            "are embedded in this portable capture. Original XML/image paths below "
+            "are provenance only and are never opened or validated."
+        )
+        self._intro_label.setStyleSheet(
+            "QLabel { background: #e8f2ff; border: 1px solid #4d86b8; "
+            "padding: 6px; font-weight: bold; }"
+        )
+        self._dataset_table.setHorizontalHeaderItem(
+            self.COL_CACHE, QTableWidgetItem("Frozen capture")
+        )
+        self._dataset_table.setHorizontalHeaderItem(
+            self.COL_XML, QTableWidgetItem("Original source (provenance only)")
+        )
+        for widget in (
+            self._btn_add,
+            self._btn_remove,
+            self._btn_reload,
+            self._btn_prepare,
+        ):
+            widget.setVisible(False)
+            widget.setEnabled(False)
+        for widget in (
+            self._cell_combo,
+            self._source_combo,
+            self._saved_channel_combo,
+            self._image_channel,
+            self._correction_combo,
+            self._legacy_ack,
+        ):
+            widget.setEnabled(False)
+        mode = result.source_mode
+        row_visibility = {
+            self._saved_channel_combo: mode is ExpressionComparisonSourceMode.SAVED,
+            self._image_channel: mode is ExpressionComparisonSourceMode.RECOMPUTED,
+            self._correction_combo: mode is ExpressionComparisonSourceMode.RECOMPUTED,
+        }
+        for widget, visible in row_visibility.items():
+            widget.setVisible(visible)
+            label = self._data_form.labelForField(widget)
+            if label is not None:
+                label.setVisible(visible)
+        self._legacy_ack.setVisible(False)
+        legacy = "yes" if result.legacy_acknowledged else "no"
+        self._cell_availability.setText(
+            f"Capture {result.result_id[:8]} · captured {result.captured_at} · "
+            f"source mode {result.source_mode.value} · producer {result.producer_version} · "
+            f"legacy acknowledgement recorded: {legacy}"
+        )
+        self._update_window_title()
+
+    def _open_frozen_result(self) -> None:
+        opener = getattr(self.app, "open_expression_comparison_result_window", None)
+        if callable(opener):
+            opener()
+            return
+        QMessageBox.warning(
+            self,
+            "Cannot open result",
+            "This application instance does not expose the portable-result opener.",
+        )
 
     # -- Dataset membership ---------------------------------------------
 
     def _add_session_datasets(self) -> None:
         """Prepopulate later windows from the shared application repository."""
 
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return
+        assert self.repository is not None
         try:
             session_statuses = getattr(self.repository, "session_statuses", None)
             statuses = (
@@ -629,6 +957,8 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             self._rebuild_dataset_table()
 
     def _add_current_dataset_if_available(self) -> None:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return
         manager = getattr(self.app, "manager", None)
         config = getattr(manager, "config", None)
         path = getattr(config, "config_file", None)
@@ -649,6 +979,8 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                 self._rebuild_dataset_table()
 
     def _choose_dataset_paths(self) -> None:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return
         paths, _selected_filter = QFileDialog.getOpenFileNames(
             self,
             "Add AceTree expression datasets",
@@ -666,6 +998,9 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     ) -> int:
         """Add and locally deduplicate XMLs; repository ownership is shared."""
 
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return 0
+        assert self.repository is not None
         added = 0
         errors: list[str] = []
         for raw_path in paths:
@@ -730,12 +1065,14 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                 existing.message = stale_message
             return False
         state = _DatasetViewState(
-            path=status.config_path,
-            repository_status=status,
+            dataset_id=_dataset_id(status.config_path),
+            source_uri=str(status.config_path),
             included=True,
             label=self._unique_dataset_label(status.config_path.stem),
             group_id="all",
             color=_DEFAULT_COLORS[len(self._datasets) % len(_DEFAULT_COLORS)],
+            path=status.config_path,
+            repository_status=status,
         )
         if stale_message:
             state.resolution = "error"
@@ -764,6 +1101,12 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     def reload_selected_datasets(self) -> None:
         """Reload selected shared entries and invalidate this window's traces."""
 
+        if self._data_mode is _WindowDataMode.FROZEN:
+            self._status_label.setText(
+                "Frozen results are source-independent and cannot be reloaded."
+            )
+            return
+        assert self.repository is not None
         rows = sorted(
             {index.row() for index in self._dataset_table.selectionModel().selectedRows()}
         )
@@ -778,6 +1121,7 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             if not 0 <= row < len(keys):
                 continue
             state = self._datasets[keys[row]]
+            assert state.path is not None
             try:
                 state.repository_status = self.repository.reload_dataset(state.path)
             except Exception as error:  # noqa: BLE001 - report each selected source
@@ -847,21 +1191,40 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             status_item = QTableWidgetItem(state.message)
             status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
             status_item.setData(Qt.UserRole, key)
-            status_item.setToolTip(
-                f"Source fingerprint: {state.repository_status.source_fingerprint}\n"
-                f"Session snapshot: {state.repository_status.snapshot_token}"
-            )
+            if state.repository_status is not None:
+                status_item.setToolTip(
+                    f"Source fingerprint: {state.repository_status.source_fingerprint}\n"
+                    f"Session snapshot: {state.repository_status.snapshot_token}"
+                )
+            elif state.frozen_dataset is not None:
+                provenance = state.frozen_dataset.provenance
+                status_item.setToolTip(
+                    "Embedded portable capture\n"
+                    f"Source fingerprint: {provenance.source_fingerprint or 'not recorded'}\n"
+                    f"Source revision: {provenance.source_revision!s}"
+                )
             self._dataset_table.setItem(row, self.COL_STATUS, status_item)
 
-            cache_item = QTableWidgetItem(_cache_label(state.repository_status))
+            cache_item = QTableWidgetItem(
+                _cache_label(state.repository_status)
+                if state.repository_status is not None
+                else "Embedded; offline-ready"
+            )
             cache_item.setFlags(cache_item.flags() & ~Qt.ItemIsEditable)
             cache_item.setData(Qt.UserRole, key)
             self._dataset_table.setItem(row, self.COL_CACHE, cache_item)
 
-            path_item = QTableWidgetItem(str(state.path))
+            path_item = QTableWidgetItem(state.source_uri)
             path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
             path_item.setData(Qt.UserRole, key)
-            path_item.setToolTip(str(state.path))
+            path_item.setToolTip(
+                state.source_uri
+                + (
+                    "\nProvenance only; this path is never opened in frozen mode."
+                    if self._data_mode is _WindowDataMode.FROZEN
+                    else ""
+                )
+            )
             self._dataset_table.setItem(row, self.COL_XML, path_item)
         self._dataset_table.blockSignals(False)
         self._building_table = False
@@ -880,7 +1243,7 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         elif item.column() == self.COL_LABEL:
             label = item.text().strip()
             if not label:
-                label = state.path.stem
+                label = state.label or state.dataset_id
                 item.setText(label)
             state.label = label
         elif item.column() == self.COL_GROUP:
@@ -912,10 +1275,13 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     # -- Cell/channel request -------------------------------------------
 
     def _refresh_cell_selector(self) -> None:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return
         previous = self._cell_combo.currentText().strip()
         states = self._included_states() or tuple(self._datasets.values())
         availability: dict[str, int] = {}
         for state in states:
+            assert state.repository_status is not None
             for name in state.repository_status.cell_names:
                 availability[name] = availability.get(name, 0) + 1
 
@@ -935,10 +1301,13 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._update_cell_availability()
 
     def _update_cell_availability(self) -> None:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return
         cell = self._cell_combo.currentText().strip()
         states = self._included_states()
         available = 0
         for state in states:
+            assert state.repository_status is not None
             if cell in state.repository_status.cell_names:
                 available += 1
         if not states:
@@ -952,12 +1321,16 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._cell_availability.setText(text)
 
     def _refresh_image_channel_range(self) -> None:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return
+        assert self.repository is not None
         # Saved legacy fields never require opening an image provider.  Keep
         # provider discovery behind the user's explicit recompute choice.
         if self._source_mode() != "recomputed":
             return
         channel_counts: list[int] = []
         for state in self._included_states():
+            assert state.path is not None
             try:
                 channel_counts.append(
                     max(1, int(self.repository.image_channel_count(state.path)))
@@ -969,6 +1342,8 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._image_channel.setMaximum(min(channel_counts, default=1))
 
     def _on_source_changed(self, *_args) -> None:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return
         self._sync_source_controls()
         if self._source_mode() == "saved":
             self._legacy_ack.setChecked(False)
@@ -979,6 +1354,8 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     def _sync_source_controls(self) -> None:
         """Keep source-specific controls readable without changing data state."""
 
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return
         saved = self._source_mode() == "saved"
         self._saved_channel_combo.setEnabled(saved)
         self._legacy_ack.setEnabled(saved)
@@ -990,7 +1367,7 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         )
 
     def _on_trace_request_changed(self, *_args) -> None:
-        if self._updating_controls:
+        if self._updating_controls or self._data_mode is _WindowDataMode.FROZEN:
             return
         self._update_cell_availability()
         if self._source_mode() == "saved":
@@ -998,6 +1375,8 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._invalidate_local_traces()
 
     def _invalidate_local_traces(self) -> None:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            return
         for state in self._datasets.values():
             state.trace = None
             state.request_key = None
@@ -1008,9 +1387,15 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._refresh_plot()
 
     def _source_mode(self) -> str:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            assert self._portable_result is not None
+            return self._portable_result.source_mode.value
         return str(self._source_combo.currentData() or "saved")
 
     def _request_key(self) -> tuple[object, ...]:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            assert self._portable_result is not None
+            return ("frozen", self._portable_result.result_id)
         cell = self._cell_combo.currentText().strip()
         if self._source_mode() == "saved":
             return ("saved", cell, str(self._saved_channel_combo.currentData()))
@@ -1026,6 +1411,12 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     def prepare_included_datasets(self) -> None:
         """Resolve every included trace, measuring images when requested."""
 
+        if self._data_mode is _WindowDataMode.FROZEN:
+            self._status_label.setText(
+                "Frozen results already contain their native values and statuses."
+            )
+            return
+        assert self.repository is not None
         if self._preparing:
             return
         states = self._included_states()
@@ -1122,19 +1513,24 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                     state.availability = None
                     state.message = "Source was reloaded; preparing again"
 
+                completed_steps = 0
+
                 def progress_cb(
                     channel_index: int,
                     num_channels: int,
                     timepoint: int,
                     num_timepoints: int,
                 ) -> bool:
+                    nonlocal completed_steps
                     local_total = max(1, int(num_channels) * int(num_timepoints))
-                    local_done = int(channel_index) * int(num_timepoints) + int(timepoint)
-                    fraction = (dataset_index + min(1.0, local_done / local_total)) / total
+                    completed_steps += 1
+                    fraction = (
+                        dataset_index + min(1.0, completed_steps / local_total)
+                    ) / total
                     progress.setValue(min(999, int(1000 * fraction)))
                     progress.setLabelText(
-                        f"{state.label}: channel {channel_index + 1}/{num_channels}, "
-                        f"timepoint {timepoint}/{num_timepoints}"
+                        f"{state.label}: reading movie once for all channels and "
+                        f"corrections ({completed_steps}/{local_total})"
                     )
                     QApplication.processEvents()
                     return not progress.wasCanceled()
@@ -1142,7 +1538,12 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                 try:
                     # Another already-open comparison may have populated the
                     # shared cache since this row was last refreshed.
-                    state.repository_status = self.repository.status(state.path)
+                    status_reader = getattr(
+                        self.repository,
+                        "session_status",
+                        self.repository.status,
+                    )
+                    state.repository_status = status_reader(state.path)
                     before_cache = set(state.repository_status.cached_corrections)
                     if self._source_mode() == "saved":
                         trace = self.repository.extract_saved_trace(
@@ -1252,7 +1653,12 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                     state.message = f"Error: {error}"
 
                 try:
-                    state.repository_status = self.repository.status(state.path)
+                    status_reader = getattr(
+                        self.repository,
+                        "session_status",
+                        self.repository.status,
+                    )
+                    state.repository_status = status_reader(state.path)
                 except Exception as error:  # noqa: BLE001 - source revalidation is fail closed
                     state.trace = None
                     state.resolution = "error"
@@ -1391,7 +1797,7 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             self._refresh_plot()
 
     def _refresh_plot(self, *_args) -> None:
-        if not hasattr(self, "_axes"):
+        if not hasattr(self, "_axes") or self._updating_controls:
             return
         states = self._included_states()
         request_key = self._request_key()
@@ -1403,7 +1809,12 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         ]
         if not states:
             self._plot_data = None
-            self._draw_empty("Add and check one or more AceTree XML datasets.")
+            message = (
+                "Check one or more datasets embedded in this frozen result."
+                if self._data_mode is _WindowDataMode.FROZEN
+                else "Add and check one or more AceTree XML datasets."
+            )
+            self._draw_empty(message)
             self._set_export_enabled(False)
             self._status_label.setText("No datasets included in this comparison.")
             return
@@ -1424,55 +1835,39 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             )
             return
 
-        datasets = tuple(self._expression_dataset(state) for state in states)
-        trace = next((state.trace for state in states if state.trace is not None), None)
-        if trace is not None:
-            channel_key = trace.channel_key
-            channel_label = trace.channel_label
-            channel_unit = trace.channel_unit
-        elif self._source_mode() == "saved":
-            channel_key = str(self._saved_channel_combo.currentData())
-            selected = next(
-                channel for channel in DEFAULT_EXPRESSION_CHANNELS
-                if channel.key == channel_key
-            )
-            channel_label = selected.label
-            channel_unit = selected.unit
-        else:
-            channel_key = f"measured_channel_{self._image_channel.value()}"
-            channel_label = f"Channel {self._image_channel.value()}"
-            channel_unit = "scaled mean intensity"
         try:
-            center = CenterStatistic(str(self._center_combo.currentData()))
-            band = BandStatistic(str(self._band_combo.currentData()))
-            if center is CenterStatistic.NONE:
-                band = BandStatistic.NONE
-            data = self._service.build(
-                datasets,
-                cell_names=[self._cell_combo.currentText().strip()],
-                channel_key=channel_key,
-                channel_label=channel_label,
-                channel_unit=channel_unit,
-                time_mode=TimeAxisMode(str(self._time_combo.currentData())),
-                grid=GridSpec(
-                    domain=GridDomain(str(self._grid_domain.currentData())),
-                    step=(
-                        None
-                        if str(self._time_combo.currentData())
-                        == TimeAxisMode.NORMALIZED.value
-                        else self._grid_step.value()
-                    ),
-                    normalized_points=self._normalized_points.value(),
-                ),
-                smoothing=SmoothingSpec(
-                    sigma=(
-                        self._smoothing_sigma.value()
-                        if self._smoothing_check.isChecked()
-                        else 0.0
-                    )
-                ),
-                summary=SummarySpec(center=center, band=band),
-            )
+            datasets = tuple(self._expression_dataset(state) for state in states)
+            spec = self._current_spec(states)
+            if self._data_mode is _WindowDataMode.FROZEN:
+                assert self._portable_result is not None
+                all_datasets = tuple(
+                    self._expression_dataset(state)
+                    for state in self._datasets.values()
+                )
+                transient = revise_expression_comparison_result(
+                    self._portable_result,
+                    datasets=all_datasets,
+                    spec=spec,
+                    appearance=self._current_appearance(),
+                )
+                data = build_expression_comparison_data(
+                    transient,
+                    included_dataset_ids=[state.dataset_id for state in states],
+                )
+            else:
+                data = self._service.build(
+                    datasets,
+                    cell_names=spec.cell_names,
+                    channel_key=spec.channel_key,
+                    channel_label=spec.channel_label,
+                    channel_unit=spec.channel_unit,
+                    time_mode=spec.time_mode,
+                    grid=spec.grid,
+                    smoothing=spec.smoothing,
+                    summary=spec.summary,
+                    channel_bindings=spec.channel_bindings,
+                    cell_aliases=spec.cell_aliases,
+                )
         except Exception as error:  # noqa: BLE001 - show model validation in-window
             logger.exception("Could not build expression comparison")
             self._plot_data = None
@@ -1494,14 +1889,111 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             f"{missing} explicit unavailable/acquisition status record(s)."
         )
         if legacy_blocked:
-            message += " Check the legacy provenance acknowledgement to enable export."
+            if self._data_mode is _WindowDataMode.FROZEN:
+                message += (
+                    " Export is disabled because this capture contains legacy "
+                    "numeric values without a recorded provenance acknowledgement."
+                )
+            else:
+                message += " Check the legacy provenance acknowledgement to enable export."
         if data.has_data and not has_visible_artists:
             message += " Enable individual traces or a center line to export an SVG."
         if data.warnings:
             message += f" {len(data.warnings)} model warning(s)."
         self._status_label.setText(message)
 
+    def _current_spec(
+        self, states: tuple[_DatasetViewState, ...]
+    ) -> ComparisonSpec:
+        center = CenterStatistic(str(self._center_combo.currentData()))
+        band = BandStatistic(str(self._band_combo.currentData()))
+        if center is CenterStatistic.NONE:
+            band = BandStatistic.NONE
+        time_mode = TimeAxisMode(str(self._time_combo.currentData()))
+        if self._data_mode is _WindowDataMode.FROZEN:
+            assert self._portable_result is not None
+            base = self._portable_result.spec
+            channel_key = base.channel_key
+            channel_label = base.channel_label
+            channel_unit = base.channel_unit
+            cell_names = base.cell_names
+            channel_bindings = base.channel_bindings
+            cell_aliases = base.cell_aliases
+            grid_start = base.grid.start
+            grid_end = base.grid.end
+            max_points = base.grid.max_points
+            truncate = base.smoothing.truncate
+        else:
+            trace = next((state.trace for state in states if state.trace is not None), None)
+            if trace is not None:
+                channel_key = trace.channel_key
+                channel_label = trace.channel_label
+                channel_unit = trace.channel_unit
+            elif self._source_mode() == "saved":
+                channel_key = str(self._saved_channel_combo.currentData())
+                selected = next(
+                    channel for channel in DEFAULT_EXPRESSION_CHANNELS
+                    if channel.key == channel_key
+                )
+                channel_label = selected.label
+                channel_unit = selected.unit
+            else:
+                channel_key = f"measured_channel_{self._image_channel.value()}"
+                channel_label = f"Channel {self._image_channel.value()}"
+                channel_unit = "scaled mean intensity"
+            cell_names = (self._cell_combo.currentText().strip(),)
+            channel_bindings = ()
+            cell_aliases = ()
+            grid_start = None
+            grid_end = None
+            max_points = 1_000_000
+            truncate = 4.0
+        return ComparisonSpec(
+            cell_names=cell_names,
+            channel_key=channel_key,
+            channel_label=channel_label,
+            channel_unit=channel_unit,
+            time_mode=time_mode,
+            grid=GridSpec(
+                domain=GridDomain(str(self._grid_domain.currentData())),
+                step=None if time_mode is TimeAxisMode.NORMALIZED else self._grid_step.value(),
+                normalized_points=self._normalized_points.value(),
+                start=grid_start,
+                end=grid_end,
+                max_points=max_points,
+            ),
+            smoothing=SmoothingSpec(
+                sigma=(
+                    self._smoothing_sigma.value()
+                    if self._smoothing_check.isChecked()
+                    else 0.0
+                ),
+                truncate=truncate,
+            ),
+            summary=SummarySpec(center=center, band=band),
+            channel_bindings=channel_bindings,
+            cell_aliases=cell_aliases,
+        )
+
     def _expression_dataset(self, state: _DatasetViewState) -> ExpressionDataset:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            if state.frozen_dataset is None:
+                raise RuntimeError(f"Frozen dataset {state.dataset_id!r} is unavailable")
+            dataset = state.frozen_dataset
+            return replace(
+                dataset,
+                provenance=replace(
+                    dataset.provenance,
+                    label=state.label,
+                    group_id=state.group_id,
+                ),
+                traces=tuple(
+                    replace(trace, series_label=state.label, color=state.color)
+                    for trace in dataset.traces
+                ),
+            )
+        assert state.repository_status is not None
+        assert state.path is not None
         traces: tuple[DatasetExpressionTrace, ...]
         acquisition_statuses: tuple[DatasetAcquisitionStatus, ...] = ()
         if state.trace is None:
@@ -1569,7 +2061,7 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             metadata += (("legacy_acknowledgement", "true"),)
         return ExpressionDataset(
             provenance=DatasetProvenance(
-                dataset_id=_dataset_id(state.path),
+                dataset_id=state.dataset_id,
                 label=state.label,
                 group_id=state.group_id,
                 source_uri=str(state.path),
@@ -1725,9 +2217,93 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
 
     # -- Export ----------------------------------------------------------
 
+    def _current_appearance(
+        self,
+        states: Iterable[_DatasetViewState] | None = None,
+    ) -> dict[str, Any]:
+        selected = tuple(self._datasets.values() if states is None else states)
+        current = {
+            APPEARANCE_INCLUDED_DATASET_IDS: [
+                state.dataset_id for state in selected if state.included
+            ],
+            "dataset_overrides": {
+                state.dataset_id: {
+                    "included": state.included,
+                    "label": state.label,
+                    "group_id": state.group_id,
+                    "color": state.color,
+                }
+                for state in selected
+            },
+            "show_traces": self._show_traces.isChecked(),
+            "trace_opacity": self._trace_opacity.value(),
+            "band_opacity": self._band_opacity.value(),
+            "title": self._title_edit.text(),
+            "x_label": self._x_label_edit.text(),
+            "y_label": self._y_label_edit.text(),
+            "trace_line_style": str(self._trace_line_style.currentData()),
+            "center_line_style": str(self._center_line_style.currentData()),
+            "marker": str(self._marker_combo.currentData()),
+            "trace_width": self._trace_width.value(),
+            "center_width": self._center_width.value(),
+            "marker_size": self._marker_size.value(),
+            "font_size": self._font_size.value(),
+            "title_size": self._title_size.value(),
+            "show_legend": self._legend_check.isChecked(),
+            "legend_location": str(self._legend_location.currentData()),
+            "legend_title": self._legend_title.text(),
+            "legend_columns": self._legend_columns.value(),
+            "show_grid": self._grid_check.isChecked(),
+            "y_scale": str(self._y_scale.currentData()),
+            "auto_x": self._auto_x.isChecked(),
+            "x_min": self._x_min.value(),
+            "x_max": self._x_max.value(),
+            "auto_y": self._auto_y.isChecked(),
+            "y_min": self._y_min.value(),
+            "y_max": self._y_max.value(),
+            "figure_background": self._figure_background,
+            "axes_background": self._axes_background,
+            "text_color": self._text_color,
+        }
+        if (
+            self._data_mode is _WindowDataMode.FROZEN
+            and self._portable_result is not None
+        ):
+            preserved = dict(self._portable_result.appearance)
+            previous_overrides = preserved.get("dataset_overrides")
+            current_overrides = current["dataset_overrides"]
+            if isinstance(previous_overrides, Mapping):
+                merged_overrides: dict[str, Any] = {}
+                for dataset_id, values in current_overrides.items():
+                    previous = previous_overrides.get(dataset_id)
+                    merged = dict(previous) if isinstance(previous, Mapping) else {}
+                    merged.update(values)
+                    merged_overrides[dataset_id] = merged
+                current["dataset_overrides"] = merged_overrides
+            preserved.update(current)
+            return preserved
+        return current
+
     def _legacy_export_unacknowledged(
         self, states: tuple[_DatasetViewState, ...]
     ) -> bool:
+        if self._data_mode is _WindowDataMode.FROZEN:
+            result = self._portable_result
+            if result is None or result.legacy_acknowledged:
+                return False
+            for state in states:
+                dataset = state.frozen_dataset
+                if dataset is None or not dataset.traces:
+                    continue
+                if result.source_mode is ExpressionComparisonSourceMode.SAVED:
+                    return True
+                if result.source_mode is ExpressionComparisonSourceMode.MIXED:
+                    metadata = dict(dataset.provenance.metadata)
+                    source = metadata.get("trace_source")
+                    if source != ExpressionTraceSource.RECOMPUTED.value:
+                        # Known legacy or absent/future provenance fails closed.
+                        return True
+            return False
         return any(
             state.trace is not None
             and state.trace.provenance.source is ExpressionTraceSource.SAVED_LEGACY
@@ -1737,8 +2313,10 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     def _set_export_enabled(
         self, enabled: bool, *, csv_enabled: bool | None = None
     ) -> None:
-        self._btn_export_csv.setEnabled(enabled if csv_enabled is None else csv_enabled)
+        csv_state = enabled if csv_enabled is None else csv_enabled
+        self._btn_export_csv.setEnabled(csv_state)
         self._btn_export_svg.setEnabled(enabled)
+        self._btn_save_result.setEnabled(csv_state)
         self._toolbar.set_save_enabled(enabled)
 
     def _exportable_snapshot(
@@ -1750,7 +2328,34 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         request_key = self._request_key()
         if not states:
             raise RuntimeError("No datasets are included in this comparison.")
+        if self._data_mode is _WindowDataMode.FROZEN:
+            if self._legacy_export_unacknowledged(states):
+                self._set_export_enabled(False)
+                raise RuntimeError(
+                    "This frozen result contains legacy numeric values without a "
+                    "recorded provenance acknowledgement. Reopen the source comparison, "
+                    "acknowledge its legacy provenance, and save a new portable result."
+                )
+            unresolved = [
+                state
+                for state in states
+                if state.request_key != request_key
+                or state.resolution not in ("ready", "acquisition_status")
+            ]
+            if unresolved:
+                self._set_export_enabled(False)
+                raise RuntimeError("The frozen result contains an unresolved dataset.")
+            if self._plot_data is None or (
+                not allow_status_only and not self._plot_data.has_data
+            ):
+                raise RuntimeError("There is no frozen expression comparison to export.")
+            if allow_status_only and not self._plot_data.statuses:
+                raise RuntimeError("There are no frozen dataset statuses to export.")
+            return self._plot_data
+        assert self.repository is not None
         for state in states:
+            assert state.path is not None
+            assert state.repository_status is not None
             if self._current_dataset_has_unsaved_edits(state):
                 state.trace = None
                 state.request_key = None
@@ -1821,6 +2426,138 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             raise RuntimeError("There are no prepared dataset statuses to export.")
         return self._plot_data
 
+    def _portable_result_for_save(self) -> ExpressionComparisonResult:
+        """Create a portable revision after the same fail-closed export checks."""
+
+        data = self._exportable_snapshot(allow_status_only=True)
+        if self._data_mode is _WindowDataMode.FROZEN:
+            assert self._portable_result is not None
+            datasets = tuple(
+                self._expression_dataset(state) for state in self._datasets.values()
+            )
+            return revise_expression_comparison_result(
+                self._portable_result,
+                datasets=datasets,
+                spec=data.spec,
+                appearance=self._current_appearance(),
+            )
+
+        assert self.repository is not None
+        request_key = self._request_key()
+        capture_states: list[_DatasetViewState] = []
+        for state in self._datasets.values():
+            if state.request_key != request_key or state.resolution not in (
+                "ready",
+                "acquisition_status",
+            ):
+                # An unchecked, never-prepared row is not part of this capture.
+                if state.included:
+                    raise RuntimeError(
+                        f"Dataset {state.label!r} is unresolved; prepare it first."
+                    )
+                continue
+            if not state.included:
+                assert state.path is not None
+                assert state.repository_status is not None
+                try:
+                    current = self.repository.status(state.path)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"Excluded dataset {state.label!r} changed after preparation; "
+                        "reload it or remove it before saving the portable result."
+                    ) from error
+                expected = (
+                    state.trace.dataset_snapshot_token
+                    if state.trace is not None
+                    else state.repository_status.snapshot_token
+                )
+                if current.snapshot_token != expected:
+                    raise RuntimeError(
+                        f"Excluded dataset {state.label!r} no longer matches its "
+                        "prepared snapshot."
+                    )
+                state.repository_status = current
+            capture_states.append(state)
+        if not capture_states:
+            raise RuntimeError("No prepared datasets are available to capture.")
+        datasets = tuple(self._expression_dataset(state) for state in capture_states)
+        source_mode = ExpressionComparisonSourceMode(self._source_mode())
+        acquisition_metadata: dict[str, Any] = {
+            "cell_name": self._cell_combo.currentText().strip(),
+            "source_mode": self._source_mode(),
+        }
+        if source_mode is ExpressionComparisonSourceMode.SAVED:
+            acquisition_metadata["saved_channel_key"] = str(
+                self._saved_channel_combo.currentData()
+            )
+        else:
+            acquisition_metadata.update(
+                {
+                    "image_channel_one_based": self._image_channel.value(),
+                    "correction_method": str(self._correction_combo.currentData()),
+                }
+            )
+        captured = capture_expression_comparison_result(
+            datasets,
+            data.spec,
+            source_mode=source_mode,
+            acquisition_metadata=acquisition_metadata,
+            legacy_acknowledged=self._legacy_ack.isChecked(),
+            appearance=self._current_appearance(capture_states),
+        )
+        if (
+            self._portable_result is not None
+            and self._portable_result.source_mode is source_mode
+        ):
+            try:
+                return revise_expression_comparison_result(
+                    self._portable_result,
+                    datasets=datasets,
+                    spec=data.spec,
+                    appearance=self._current_appearance(capture_states),
+                )
+            except ValueError:
+                # Changed native values or request identity start a new
+                # capture; presentation-only resaves remain linked revisions.
+                pass
+        return captured
+
+    def _choose_result_path(self) -> None:
+        default_name = _display_filename(self._result_path) or (
+            "expression_comparison" + EXPRESSION_COMPARISON_RESULT_SUFFIX
+        )
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save portable expression result",
+            default_name,
+            "AceTree expression results (*.aceexpr)",
+        )
+        if not path:
+            return
+        try:
+            self.save_portable_result(path)
+        except Exception as error:  # noqa: BLE001 - validation and filesystem failures
+            logger.exception("Could not save portable expression result")
+            QMessageBox.warning(self, "Cannot save portable result", str(error))
+
+    def save_portable_result(self, path: str | Path) -> Path:
+        result = self._portable_result_for_save()
+        saved = save_expression_comparison_result(path, result)
+        self._portable_result = saved.result
+        self._result_path = str(saved.path)
+        if self._data_mode is _WindowDataMode.FROZEN:
+            by_id = {
+                dataset.provenance.dataset_id: dataset
+                for dataset in saved.result.datasets
+            }
+            for state in self._datasets.values():
+                state.frozen_dataset = by_id[state.dataset_id]
+                state.request_key = ("frozen", saved.result.result_id)
+            self._configure_frozen_ui(saved.result)
+            self._refresh_plot()
+        self._status_label.setText(f"Saved portable result: {saved.path}")
+        return saved.path
+
     def _choose_csv_path(self) -> None:
         path, _selected_filter = QFileDialog.getSaveFileName(
             self,
@@ -1868,19 +2605,37 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
 
     def dragEnterEvent(self, event) -> None:
         urls = event.mimeData().urls() if event.mimeData() is not None else ()
-        if any(Path(url.toLocalFile()).suffix.lower() == ".xml" for url in urls):
+        accepted_suffixes = {EXPRESSION_COMPARISON_RESULT_SUFFIX}
+        if self._data_mode is _WindowDataMode.LIVE:
+            accepted_suffixes.add(".xml")
+        if any(
+            Path(url.toLocalFile()).suffix.lower() in accepted_suffixes
+            for url in urls
+        ):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event) -> None:
-        paths = [
+        urls = event.mimeData().urls() if event.mimeData() is not None else ()
+        result_paths = [
+            url.toLocalFile()
+            for url in urls
+            if Path(url.toLocalFile()).suffix.lower()
+            == EXPRESSION_COMPARISON_RESULT_SUFFIX
+        ]
+        opener = getattr(self.app, "open_expression_comparison_result_window", None)
+        for result_path in result_paths:
+            if callable(opener):
+                opener(result_path)
+        xml_paths = [
             Path(url.toLocalFile())
-            for url in event.mimeData().urls()
+            for url in urls
             if Path(url.toLocalFile()).suffix.lower() == ".xml"
         ]
-        if paths:
-            self.add_dataset_paths(paths)
+        if xml_paths and self._data_mode is _WindowDataMode.LIVE:
+            self.add_dataset_paths(xml_paths)
+        if result_paths or (xml_paths and self._data_mode is _WindowDataMode.LIVE):
             event.acceptProposedAction()
 
     def closeEvent(self, event) -> None:
@@ -1907,6 +2662,8 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self,
         state: _DatasetViewState,
     ) -> bool:
+        if self._data_mode is _WindowDataMode.FROZEN or state.path is None:
+            return False
         manager = getattr(self.app, "manager", None)
         config = getattr(manager, "config", None)
         current_path = getattr(config, "config_file", None)
@@ -1977,6 +2734,30 @@ def _with_suffix(path: str | Path, suffix: str) -> Path:
     if destination.suffix.lower() != suffix:
         destination = destination.with_suffix(suffix)
     return destination
+
+
+def _display_filename(path: str | None) -> str:
+    """Return a display-only basename without filesystem/path resolution."""
+
+    if not path:
+        return ""
+    return str(path).replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _nonblank_string(value: object, fallback: str) -> str:
+    return value.strip() if isinstance(value, str) and value.strip() else fallback
+
+
+def _valid_color(value: object) -> bool:
+    return isinstance(value, str) and QColor(value).isValid()
+
+
+def _select_combo_data(combo: QComboBox, value: object) -> bool:
+    index = combo.findData(value)
+    if index < 0:
+        return False
+    combo.setCurrentIndex(index)
+    return True
 
 
 __all__ = ["ExpressionComparisonWindow"]

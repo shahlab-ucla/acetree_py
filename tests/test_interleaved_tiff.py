@@ -130,6 +130,18 @@ class TestStackTiffProviderInterleavedCZ:
         for z in range(num_planes):
             assert stack[z, 0, 0] == sentinel[z, 1]
 
+    def test_get_all_channel_stacks_matches_individual_stacks(
+        self, provider_and_sentinel
+    ):
+        provider, _, _, num_channels = provider_and_sentinel
+        together = provider.get_all_channel_stacks(1)
+        assert len(together) == num_channels
+        for channel in range(num_channels):
+            np.testing.assert_array_equal(
+                together[channel],
+                provider.get_stack(1, channel),
+            )
+
     def test_get_plane_out_of_range_channel_raises(self, provider_and_sentinel):
         provider, _, _, num_channels = provider_and_sentinel
         with pytest.raises(IndexError):
@@ -186,6 +198,18 @@ class TestStackTiffProviderInterleavedZC:
             for z in range(num_planes):
                 assert stack[z, 0, 0] == sentinel[z, c]
 
+    def test_get_all_channel_stacks_matches_individual_stacks(
+        self, provider_and_sentinel
+    ):
+        provider, _, _, num_channels = provider_and_sentinel
+        together = provider.get_all_channel_stacks(1)
+        assert len(together) == num_channels
+        for channel in range(num_channels):
+            np.testing.assert_array_equal(
+                together[channel],
+                provider.get_stack(1, channel),
+            )
+
 
 # ── StackTiffProvider: 3-channel CZ ───────────────────────────────
 
@@ -211,6 +235,12 @@ class TestStackTiffProvider3Channel:
             stack = provider.get_stack(time=1, channel=c)
             for z in range(num_planes):
                 assert stack[z, 0, 0] == sentinel[z, c]
+        together = provider.get_all_channel_stacks(1)
+        for channel in range(num_channels):
+            np.testing.assert_array_equal(
+                together[channel],
+                provider.get_stack(1, channel),
+            )
 
 
 # ── StackTiffProvider: backward compatibility (single channel) ────

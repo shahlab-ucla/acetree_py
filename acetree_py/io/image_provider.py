@@ -89,6 +89,15 @@ class ImageProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class AllChannelStackProvider(Protocol):
+    """Optional fast path for loading every channel of one timepoint."""
+
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Return channel-ordered ``(Z, Y, X)`` stacks for one timepoint."""
+        ...
+
+
 def enumerate_image_source_files(
     provider: ImageProvider,
     *,
@@ -682,6 +691,58 @@ class StackTiffProvider:
             self._update_shape(img[0])
         return img
 
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Decode every TIFF page once and distribute it across channels."""
+
+        tif = self._get_tiff_handle(time)
+        n_pages = len(tif.pages)
+        if n_pages == 0:
+            raise FileNotFoundError(f"Empty TIFF stack for time={time}")
+
+        if n_pages == 1:
+            page = tif.pages[0]
+            image = page.asarray()
+            if image.ndim == 2 and self._num_channels == 1:
+                image = image[np.newaxis, ...]
+                channels = (image,)
+            elif image.ndim == 3 and self._num_channels == 1:
+                samples_per_pixel = int(getattr(page, "samplesperpixel", 1) or 1)
+                if samples_per_pixel > 1:
+                    raise ValueError(
+                        "Cannot treat a sample-bearing RGB TIFF page as a Z stack"
+                    )
+                channels = (image,)
+            elif image.ndim == 4 and image.shape[0] == self._num_channels:
+                channels = tuple(image[channel] for channel in range(self._num_channels))
+            else:
+                raise ValueError(
+                    "Cannot map single-page TIFF shape "
+                    f"{image.shape} to {self._num_channels} channels"
+                )
+            self._num_planes_cached = int(channels[0].shape[0])
+            self._update_shape(channels[0][0])
+            return channels
+
+        if n_pages % self._num_channels:
+            raise ValueError(
+                f"TIFF has {n_pages} pages, not divisible by "
+                f"{self._num_channels} channels"
+            )
+        num_planes = n_pages // self._num_channels
+        by_channel: list[list[np.ndarray]] = [
+            [] for _channel in range(self._num_channels)
+        ]
+        for page_index, page in enumerate(tif.pages):
+            if self._channel_order == "CZ":
+                channel = page_index % self._num_channels
+            else:
+                channel = page_index // num_planes
+            by_channel[channel].append(page.asarray())
+        channels = tuple(np.stack(planes) for planes in by_channel)
+        self._num_planes_cached = num_planes
+        self._update_shape(channels[0][0])
+        return channels
+
     @property
     def num_timepoints(self) -> int:
         if self._num_timepoints is not None:
@@ -837,6 +898,18 @@ class OmeTiffProvider:
         else:
             raise ValueError(f"Unexpected data shape: {self._data.shape}")
 
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Return direct channel views from the already-loaded OME array."""
+
+        self._ensure_loaded()
+        assert self._data is not None
+        time_data = self._data[time - 1]
+        if self._data.ndim == 5:
+            return tuple(time_data[channel] for channel in range(self._n_channels))
+        if self._data.ndim == 4:
+            return (time_data,)
+        raise ValueError(f"Unexpected data shape: {self._data.shape}")
+
     @property
     def num_timepoints(self) -> int:
         self._ensure_loaded()
@@ -936,6 +1009,34 @@ class SplitChannelProvider:
             return np.ascontiguousarray(raw[..., ::-1])
         else:
             return raw
+
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Split one raw stack once instead of reloading it per channel."""
+
+        if not self._split:
+            loader = getattr(self._inner, "get_all_channel_stacks", None)
+            if callable(loader):
+                channels = tuple(loader(time))
+            else:
+                channels = tuple(
+                    self._inner.get_stack(time, channel)
+                    for channel in range(self._inner.num_channels)
+                )
+            if self._flip:
+                return tuple(
+                    np.ascontiguousarray(channel[..., ::-1]) for channel in channels
+                )
+            return channels
+
+        raw = self._inner.get_stack(time, 0)
+        half_width = raw.shape[-1] // 2
+        if self._flip:
+            green = np.ascontiguousarray(raw[..., half_width:][..., ::-1])
+            red = np.ascontiguousarray(raw[..., :half_width][..., ::-1])
+        else:
+            green = raw[..., :half_width]
+            red = raw[..., half_width:]
+        return (green, red)
 
     @property
     def num_timepoints(self) -> int:
@@ -1551,6 +1652,14 @@ class NumpyProvider:
         if self._data.ndim == 5:
             return self._data[t_idx, channel]
         return self._data[t_idx]
+
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Return direct channel views without copying the backing array."""
+
+        time_data = self._data[time - 1]
+        if self._data.ndim == 5:
+            return tuple(time_data[channel] for channel in range(self._n_channels))
+        return (time_data,)
 
     @property
     def num_timepoints(self) -> int:
