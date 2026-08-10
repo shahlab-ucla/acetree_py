@@ -835,14 +835,16 @@ canonical cell name. Open additional windows to compare other cells or to keep
 several independently styled or statistically configured views. All
 comparison windows share an application-level dataset repository and
 measurement cache, so an XML loaded or measured once can be reused without
-repeating expensive work. A portable frozen result is a different workflow:
-it embeds the already materialized comparison inputs in a `.aceexpr` file and
-can be reopened without the repository or source movies.
+repeating expensive work. A schema-v2 `.aceexpr` measurement set can persist
+that full cache for use after restart: it contains every named cell and every
+measured image channel, not only the trace currently plotted. Older schema-v1
+`.aceexpr` captures remain readable but contain one fixed measurement request.
 
 The recommended workflow is:
 
-1. Use **Add XMLs…** to select one or more AceTree configuration files. Each
-   XML is opened as a detached, read-only dataset; comparison never replaces or
+1. Use **Add XMLs…**, or drag `.xml` files onto the window, to select one or more
+   AceTree configuration files. Each XML is opened as a detached, read-only
+   dataset; comparison never replaces or
    mutates the dataset in the main viewer. The detached copy always comes from
    the XML/ZIP on disk. If that same dataset is active in the main viewer and
    has unsaved edit-history or configuration changes, preparation and export
@@ -853,7 +855,9 @@ The recommended workflow is:
    so making the same dataset set for another cell does not require browsing
    for the files again. Re-adding the same resolved path is deduplicated.
    Removing a row excludes it from that plot, while the shared cached dataset
-   remains available to other comparison windows.
+   remains available to other comparison windows. In an opened measurement-set
+   window, adding an XML either attaches a matching source to its portable row
+   or appends a new dataset that can be measured into the set.
 2. Enter or select one canonical cell name. Matching is exact and
    case-sensitive in every dataset; partial names and internal hash keys are
    not substituted. Missing and duplicate names are reported per dataset
@@ -861,7 +865,10 @@ The recommended workflow is:
    replicates and edit each replicate's display label, **Condition / group**,
    and color. Datasets with the same nonblank group label are summarized
    together; changing a label, group, or color redraws immediately and does not
-   require recomputation.
+   require recomputation. **Use** controls participation in the current plot,
+   group summary, CSV, and SVG; unchecking it does not delete the dataset's
+   measurements, omit an existing cache from **Save measurement set…**, or keep
+   an attached row out of a recomputation batch.
 3. Choose the expression source:
    - **Saved legacy values** reads a complete built-in legacy expression field
      from each nuclei archive. Legacy files do not record trustworthy source
@@ -870,10 +877,11 @@ The recommended workflow is:
      requires an explicit acknowledgement before export; the unacknowledged
      plot is only a preview. A CSV containing only unavailable-status records
      has no legacy numeric values to acknowledge.
-   - **Recompute from images** selects a numbered image channel and background
-     correction. The first recomputation for each dataset makes one pass over
-     its movie timepoints and collects every image channel together with
-     correction-neutral raw, global-annulus, and blot-annulus aggregates. For
+   - **Recompute from image channel** selects a numbered image channel and
+     background correction for the current view. The first full recomputation
+     for each dataset makes one pass over its movie timepoints and collects
+     every named cell and every image channel together with correction-neutral
+     raw, global-annulus, and blot-annulus aggregates. For
      combined/interleaved built-in image sources each timepoint is decoded once
      and distributed to its channels; physically separate channel sources are
      each read once within that same timepoint pass. **None**, **Global**, and
@@ -883,10 +891,16 @@ The recommended workflow is:
      modify the detached manager, or alter the active AceTree document. The
      chosen physical channel number is applied to every included dataset;
      verify that those datasets use the same channel ordering and fluorophore.
-     **Prepare / recompute included datasets** shows cancellable progress.
-     After that first pass, changing the exact cell, image channel, correction,
-     or comparison window only extracts a new trace from the shared family; it
-     does not reread the movie.
+     In a live comparison, **Prepare / recompute included datasets** starts the
+     cancellable full-cache pass. Once full caches are present, the button is
+     labeled **Recompute new or stale**: it visits every attached row and
+     computes only a missing cache or one whose source/algorithm dependencies
+     are stale. **Recompute all…** asks for confirmation, then rereads every
+     attached movie and attempts to replace all of its cached measurements.
+     Both policies are independent of **Use**. An unattached portable row keeps
+     its offline cache. After a completed pass, changing the exact cell, image
+     channel, correction, or comparison window only materializes a new trace
+     from the shared family; it does not reread the movie.
    Missing cells, duplicate names, unavailable channels, and incomplete saved
    or recomputed traces remain selected as explicit acquisition-status records.
    They do not contribute invented values, and the CSV preserves why each
@@ -920,17 +934,21 @@ The recommended workflow is:
    aligned/display, availability-status, provenance, and group-summary records.
    Dataset labels and trace colors remain in those trace records, while
    figure-only appearance controls remain outside that numeric data object.
-   They are captured separately when a portable result is saved. **Export plot
-   as SVG…** (or the guarded toolbar Save) saves the currently rendered figure
+   They are captured separately when a portable result or measurement set is
+   saved. **Export plot as SVG…** (or the guarded toolbar Save) saves the
+   currently rendered figure
    after the same source validation. If every included replicate is
    unavailable, the status-only CSV remains enabled but SVG is disabled
    because there is no numeric plot to render.
-8. After preparing a live comparison, use **Save portable result…** to freeze
-   its materialized native values, unavailable statuses, provenance, dataset
-   membership and styling, numeric settings, and figure appearance in a
-   checksummed `.aceexpr` file. See the frozen workflow below. Saving is
-   explicit; the ordinary live cache is never converted to a sidecar
-   automatically.
+8. After image recomputation, use **Save measurement set…** to write every
+   completed all-named-cell/all-channel cache, the current default view,
+   provenance, inclusion and styling, numeric settings, and figure appearance
+   to a checksummed schema-v2 `.aceexpr` file. Saving does not reread images and
+   remains available when the current selector has no numeric plot; CSV and SVG
+   still describe only the current materialized view. A newly added dataset
+   with no completed cache is not written, while every existing cache is kept
+   even if its **Use** box is unchecked. Saving is explicit; AceTree does not
+   create a sidecar automatically.
 
 #### Cache validity and export safety
 
@@ -938,19 +956,21 @@ The live comparison cache lives only for the current AceTree application
 session; it is released, together with lazily opened image and ZIP handles,
 when AceTree closes. It is not reconstructed from Measure CSV files and it does
 not write a persistent sidecar. Restarting AceTree therefore requires loading
-the XMLs and, for verified values, recomputing them again unless you explicitly
-saved a portable `.aceexpr` result.
+the XMLs and recomputing verified values unless you explicitly saved a
+schema-v2 `.aceexpr` measurement set.
 
 For the built-in recomputation path, one immutable measurement family holds
-every image channel and every supported correction aggregate for a dataset.
-Once it exists, a different cell/channel/correction/window performs no image
-I/O. The family is bound to the detached dataset revision, calibration, all
-nucleus geometry that can affect sampling/blot masks, the XML/nuclei
-fingerprint, and the full image manifest. If any dependency is stale, the
-family is discarded. A cancellation or failed first pass publishes no partial
-family. If trace extraction finds an incomplete sample, AceTree discards the
-whole family so **Prepare / recompute included datasets** genuinely retries the
-movie instead of repeatedly serving known-incomplete data.
+every named cell, every image channel, and the aggregates needed for every
+supported correction. Once it exists, a different
+cell/channel/correction/window performs no image I/O. The family is bound to
+the detached dataset revision, calibration, all nucleus geometry that can
+affect sampling/blot masks, the XML/nuclei fingerprint, and the full image
+manifest. If any dependency is stale, ordinary new/stale recomputation replaces
+it. Cancellation or failure before a complete movie pass publishes no
+replacement. A completed pass remains authoritative when individual samples
+are unavailable: those samples stay as explicit gaps. Use **Recompute all…**
+when you intentionally want to force another pass rather than reuse a completed
+cache containing gaps.
 
 Each loaded dataset receives a new session generation. Its snapshot token
 combines that generation with the XML/nuclei/source fingerprint and, once a
@@ -963,72 +983,102 @@ disappeared, the affected comparison fails closed. The stale row remains
 visible and selectable so **Reload selected** is always available; an existing
 figure may remain only as a visual reference, with export disabled.
 
-**Reload selected** closes that dataset's provider, clears its shared
-recomputation family and compatibility caches, and creates a new generation
-even when the on-disk file statistics happen to be identical. Removing the
-repository dataset or closing AceTree also releases the family. Reload
-deliberately invalidates snapshots in every other live comparison window.
-Those windows do not need to browse for the XML again, but they must prepare
-the row against the new generation before export. This prevents a displayed
-plot from becoming exportable again under an old or mismatched provenance
-token.
+In a live comparison, **Reload selected** closes that dataset's provider,
+clears its shared repository family and compatibility caches, and creates a new
+generation even when the on-disk file statistics happen to be identical.
+Removing the repository dataset or closing AceTree also releases the family.
+Reload deliberately invalidates snapshots in every other live comparison
+window. In an opened measurement set, the immutable portable cache remains
+available offline while **Reload selected** refreshes an attached source; a
+changed fingerprint/manifest is then replaced by **Recompute new or stale**,
+and **Recompute all…** is available when a forced replacement is intended.
 
-#### Portable frozen results (`.aceexpr`)
+#### Portable measurement sets and legacy fixed results (`.aceexpr`)
 
-Use a portable result when you want to preserve a prepared comparison, share
-it, or make additional views without retaining access to the original movies:
+The `.aceexpr` extension has two intentionally different compatibility modes:
 
-1. In a prepared live comparison, set the included datasets, labels, groups,
-   colors, time/statistics/smoothing choices, and appearance, then click **Save
-   portable result…**. All captured datasets remain embedded; each dataset's
-   **Use** state is stored separately so later exclusion does not delete its
-   native data.
-2. Open the file with **Window → Open Expression Result…**, the **Open frozen
-   result…** button at the bottom of any comparison window, or by dragging an
-   `.aceexpr` file onto a comparison window. The open dialog is titled **Open
-   portable expression result** and filters **AceTree expression results
-   (`*.aceexpr`)**. Each successful open creates a separate modeless window;
-   malformed, unsupported, or checksum-invalid files fail closed before a
-   window is registered. A prominent **FROZEN RESULT** notice marks the mode.
-   **Add XMLs…**, **Reload selected**, **Prepare / recompute included
-   datasets**, and the cell/source/channel/correction controls are disabled;
-   original source paths are shown as provenance only and are never opened or
-   revalidated. The current UI accepts the workflow's explicit boundary of
-   exactly one canonical cell per portable result.
-3. You may still change **Use**, dataset labels/groups/colors, absolute versus
-   birth-relative versus normalized time, grid settings, Gaussian smoothing,
-   compatible center/error statistics, and all plot appearance controls. **Save
-   portable result…** opens **Save portable expression result** and creates a
-   new result revision while retaining the original capture timestamp,
-   acquisition provenance, and parent-result chain.
-4. **Save exact comparison CSV…** rebuilds native/aligned/display/summary rows
-   from the embedded values, and **Export plot as SVG…** or toolbar Save writes
-   the current rendering. These actions require no pixel recomputation, XML,
-   image movie, or live repository validation. A capture containing only
-   unavailable-status records can still be saved and export its status CSV,
-   but SVG and toolbar image save remain disabled because there is no numeric
-   plot. A saved/mixed capture containing legacy numeric values without a
-   recorded provenance acknowledgement remains viewable but fails closed for
-   CSV, SVG, and portable resave; regenerate it from an acknowledged live
-   comparison.
+- A **schema-v2 measurement set** embeds correction-neutral full-dataset caches
+  for every completed row. Each cache covers every named observed cell, every
+  measured image channel, and the raw/global-annulus/blot-annulus aggregates
+  needed to derive **None**, **Global**, and **Blot**. **Local** and **Cross**
+  remain the documented fresh Global fallback. Its saved cell/channel/correction
+  is only the initial view.
+- A **fixed result** embeds the materialized trace or unavailable status for one
+  cell/channel/correction request. This includes schema-v1 legacy files and any
+  cacheless selected-trace capture. It remains readable and restylable, but it
+  is not promoted into a full cache during load.
 
-The file stores materialized native absolute times and values (including
-explicit gaps, birth/end bounds, labels and colors), acquisition statuses,
-dataset group/source provenance, the complete comparison specification,
-source/acquisition metadata, legacy acknowledgement, inclusion and appearance
-settings, capture/save timestamps, producer/calculation versions, and
-result/parent identifiers. Aligned grids, smoothing, and summary rows are
-derived again from those frozen native inputs, so they remain tunable. The
-file does **not** contain movie pixels, a full nuclei archive, or a reusable
-all-cell/all-channel measurement cache; its cell and expression source are
-therefore frozen.
+Use the workflow as follows:
 
-Every `.aceexpr` file has a versioned schema and SHA-256 payload checksum.
-Loading rejects malformed JSON, duplicate keys, invalid/non-finite values,
-unsupported versions, and checksum mismatches. The checksum is an integrity
-check, **not** a digital signature or proof of authenticity: only open captures
-from a source you trust. The frozen banner and retained provenance prevent an
-offline result from being mistaken for a newly validated live measurement.
+1. In a recomputed live comparison, click **Save measurement set…**. AceTree
+   writes every completed full cache, including unchecked rows, plus the current
+   default comparison, labels/groups/colors, **Use** states, time/statistics/
+   smoothing settings, appearance, and provenance. Saving never launches a
+   measurement pass and remains enabled when a cache exists even if the current
+   cell/channel selection has no numeric plot. A newly added row is omitted
+   until its first full recomputation succeeds. A selected-trace-only comparison
+   instead offers **Save portable result…** and retains the fixed boundary.
+2. Reopen either kind through **Window → Open Expression Measurement Set /
+   Result…**, **Open measurement set / result…** at the bottom of a comparison
+   window, or `.aceexpr` drag/drop. The dialog is titled **Open expression
+   measurement set or legacy result** and filters **AceTree expression sets and
+   results (`*.aceexpr`)**. Loading validates the entire file before registering
+   a new modeless window; malformed, unsupported, oversized, or
+   checksum-invalid files fail closed.
+3. A v2 file opens with a green **MEASUREMENT SET** notice. Change the exact cell,
+   image channel, or correction at will: AceTree materializes the requested
+   trace from every portable cache immediately and does not open an XML, ZIP, or
+   movie. A cache without the selected channel, a dataset without the selected
+   exact cell, duplicate exact cell names, and unmeasurable individual samples
+   remain explicit statuses or gaps. AceTree neither guesses a duplicate nor
+   interpolates a missing sample.
+4. To extend a v2 set, use **Add XMLs…** or drop XML files onto the window. A
+   matching source is attached to its existing portable row; a new source is
+   appended as a row without a cache. **Recompute new or stale** measures only
+   attached rows whose full cache is absent or out of date, while **Recompute
+   all…** forces every attached movie to be reread. Both include unchecked rows.
+   Source-independent rows are left unchanged. Cache replacement is atomic per
+   dataset: if one row fails or cancellation is requested, its previous good
+   cache remains available and completed replacements for other rows are not
+   rolled back. Select **Reload selected** after an attached XML/source changes,
+   then use new/stale replacement; use recompute-all when an unconditional
+   remeasurement is intended.
+5. A fixed/cacheless file, including schema v1, opens with a blue **FROZEN
+   RESULT** notice. The exact
+   cell/source/channel/correction controls and Add/Reload/recompute actions are
+   disabled. **Use**, dataset labels/groups/colors, time alignment, grid,
+   smoothing, compatible summaries, and plot appearance remain editable. A v2
+   file may also retain a fixed selected-trace/status row alongside full-cache
+   rows. That fixed row works only for the captured default request; after
+   switching cell/channel/correction, uncheck or remove it, or attach its XML
+   and recompute it, before saving the retargeted set.
+6. **Save exact comparison CSV…** exports the current offline materialized data
+   and explicit status rows. **Export plot as SVG…** and toolbar Save export the
+   current rendering when it contains numeric artists. **Save measurement
+   set…** remains independent of those plot-export conditions and can save the
+   full caches without source files or recomputation. A status-only view can
+   export CSV but not SVG. A fixed saved/mixed row containing legacy numeric
+   values without a recorded provenance acknowledgement remains viewable but
+   fails closed for CSV, SVG, and portable resave.
+
+Both schemas store the materialized default view, explicit gaps and statuses,
+dataset/source provenance, the comparison specification, inclusion and
+appearance settings, capture/save versions and timestamps, and result/parent
+identifiers. Schema v2 additionally stores named-cell sample indexes,
+correction-neutral channel aggregates, measurement provenance, geometry
+signatures, and missing reasons. It contains neither movie pixels nor a full
+nuclei archive. Schema v1, and any cacheless result, contains no reusable
+all-cell/all-channel cache and therefore remains fixed to its captured
+measurement request.
+
+Every `.aceexpr` file is one monolithic UTF-8 JSON document with a versioned
+schema, a SHA-256 payload checksum, and a current encoded-size limit of 256 MiB.
+Split large cohorts into multiple measurement sets before they reach that cap;
+the current format does not shard payloads. Loading rejects malformed JSON,
+duplicate keys, invalid/non-finite values, unsupported versions, files over the
+cap, and checksum mismatches. The checksum is an integrity check, **not** a
+digital signature or proof of authenticity: only open files from a source you
+trust.
 
 ---
 

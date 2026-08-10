@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -14,7 +15,7 @@ try:
     from acetree_py.gui.expression_comparison_window import ExpressionComparisonWindow
     from acetree_py.gui.app import AceTreeApp
     from qtpy.QtCore import Qt
-    from qtpy.QtWidgets import QMainWindow
+    from qtpy.QtWidgets import QMainWindow, QMessageBox
 
     _GUI_AVAILABLE = True
 except ImportError:
@@ -41,6 +42,12 @@ from acetree_py.analysis.expression_dataset_repository import (
     ExpressionTraceProvenance,
     ExpressionTraceSource,
     NativeExpressionTrace,
+)
+from acetree_py.analysis.expression_measurements import (
+    FrozenCellMeasurements,
+    FrozenDatasetMeasurementCache,
+    MeasuredExpressionAggregate,
+    MeasuredExpressionAggregateChannel,
 )
 
 
@@ -221,6 +228,98 @@ class _FakeRepository:
             dataset_generation=status.generation,
             image_manifest_token=status.image_manifest_token,
         )
+
+
+class _FullCacheRepository(_FakeRepository):
+    """Fake production-family boundary for hybrid cache-set UI tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.full_caches: dict[str, FrozenDatasetMeasurementCache] = {}
+        self.cache_prepare_calls: list[tuple[str, bool]] = []
+        self.cache_revision = 0
+        self.cache_channel_counts: dict[str, int] = {}
+
+    def load_dataset(self, path: str | Path) -> ExpressionDatasetStatus:
+        status = super().load_dataset(path)
+        key = self._key(path)
+        self.cells[key] = ("ABa", "ABp")
+        updated = replace(status, num_cells=2, cell_names=self.cells[key])
+        self._statuses[key] = updated
+        return updated
+
+    def prepare_recomputed_cache(
+        self,
+        path: str | Path,
+        *,
+        force: bool = False,
+        progress_cb=None,
+    ) -> FrozenDatasetMeasurementCache:
+        key = self._key(path)
+        if not force and key in self.full_caches:
+            return self.full_caches[key]
+        self.cache_prepare_calls.append((key, force))
+        if progress_cb is not None:
+            for timepoint in (1, 2, 3):
+                for channel in (0, 1):
+                    assert progress_cb(channel, 2, timepoint, 3)
+        self.cache_revision += 1
+        status = self._statuses[key]
+        sample_keys_a = ((1, 1), (2, 1), (3, 1))
+        sample_keys_p = ((1, 2), (2, 2), (3, 2))
+        channels = []
+        for channel in range(self.cache_channel_counts.get(key, 2)):
+            samples = {}
+            for time, index in sample_keys_a + sample_keys_p:
+                raw = float(1000 * (channel + 1) + 100 * index + time)
+                samples[(time, index)] = MeasuredExpressionAggregate(
+                    raw=raw,
+                    annulus_background=10.0,
+                    blot_background=20.0,
+                    inner_pixel_count=8,
+                    annulus_pixel_count=12,
+                    blot_pixel_count=10,
+                )
+            channels.append(
+                MeasuredExpressionAggregateChannel(
+                    image_channel=channel,
+                    label=f"Channel {channel + 1}",
+                    samples=samples,
+                )
+            )
+        path_id = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
+        cache = FrozenDatasetMeasurementCache(
+            dataset_id=path_id,
+            source_uri=str(Path(path).resolve()),
+            source_fingerprint=status.source_fingerprint,
+            snapshot_token=status.snapshot_token,
+            dataset_generation=status.generation,
+            image_manifest_token=status.image_manifest_token,
+            measured_at=f"2026-08-09T00:00:{self.cache_revision:02d}Z",
+            measurement_algorithm_version=1,
+            source_revision=status.generation,
+            source_dependency_fingerprint="dependency",
+            source_calibration=(1.0, 1.0, 3, 1.0),
+            channels=tuple(channels),
+            cells=(
+                FrozenCellMeasurements("ABa-id", "ABa", 1, 3, sample_keys_a),
+                FrozenCellMeasurements("ABp-id", "ABp", 1, 3, sample_keys_p),
+            ),
+            geometries={},
+            missing_reasons={},
+        )
+        self.full_caches[key] = cache
+        self._statuses[key] = replace(
+            status,
+            image_provider_loaded=True,
+            cached_corrections=cache.available_corrections,
+        )
+        return cache
+
+    def snapshot_recomputed_cache(
+        self, path: str | Path
+    ) -> FrozenDatasetMeasurementCache:
+        return self.full_caches[self._key(path)]
 
 
 class _ExplodingRepository:
@@ -484,6 +583,488 @@ def test_portable_result_is_offline_retunable_and_resaves_as_child(
     )
     assert sentinel.calls == 0
 
+
+def test_full_measurement_set_retargets_cell_channel_and_correction_offline(
+    qtbot, tmp_path
+):
+    repository = _FullCacheRepository()
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    source = _xml(tmp_path, "full-cache")
+    live.add_dataset_paths([source], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+
+    assert len(repository.cache_prepare_calls) == 1
+    assert next(iter(live._datasets.values())).measurement_cache is not None
+    saved_path = live.save_portable_result(tmp_path / "full-cache-set")
+    result = load_expression_comparison_result(saved_path)
+    assert len(result.measurement_caches) == 1
+    assert live._data_mode.value == "cache_set"
+    assert not live._source_combo.isEnabled()
+    assert live._source_mode() == "recomputed"
+    assert "Expression Measurement Set" in live.windowTitle()
+
+    offline_repository = _FullCacheRepository()
+    frozen = ExpressionComparisonWindow(
+        _app(),
+        repository=offline_repository,
+        result=result,
+        result_path=str(saved_path),
+    )
+    qtbot.addWidget(frozen)
+
+    assert "Expression Measurement Set" in frozen.windowTitle()
+    assert "MEASUREMENT SET" in frozen._intro_label.text()
+    assert frozen._btn_add.isEnabled()
+    assert frozen._btn_prepare.text() == "Recompute new or stale"
+    assert not frozen._btn_recompute_all.isHidden()
+    assert frozen._cell_combo.isEnabled()
+    assert frozen._image_channel.isEnabled()
+    assert frozen._correction_combo.isEnabled()
+    assert frozen._btn_save_result.isEnabled()
+
+    frozen._cell_combo.setEditText("ABp")
+    frozen._image_channel.setValue(2)
+    frozen._correction_combo.setCurrentIndex(
+        frozen._correction_combo.findData("none")
+    )
+
+    assert offline_repository.cache_prepare_calls == []
+    assert frozen._plot_data is not None
+    assert frozen._plot_data.has_data
+    trace = frozen._plot_data.native_traces[0]
+    assert trace.cell_name == "ABp"
+    assert trace.values == pytest.approx((2201.0, 2202.0, 2203.0))
+    assert frozen.export_csv(tmp_path / "offline-full-cache").is_file()
+    assert frozen.export_svg(tmp_path / "offline-full-cache").is_file()
+    retargeted_path = frozen.save_portable_result(tmp_path / "offline-retargeted")
+    retargeted = load_expression_comparison_result(retargeted_path)
+    assert offline_repository.cache_prepare_calls == []
+    assert retargeted.measurement_caches == result.measurement_caches
+    assert retargeted.acquisition_metadata["cell_name"] == "ABp"
+    assert retargeted.acquisition_metadata["image_channel_one_based"] == 2
+    assert retargeted.acquisition_metadata["correction_method"] == "none"
+
+    # Saving a full set is independent of the currently rendered plot.  A
+    # blank editable selector falls back deterministically to the first cached
+    # canonical name without touching the repository.
+    frozen._cell_combo.setEditText("")
+    blank_saved = load_expression_comparison_result(
+        frozen.save_portable_result(tmp_path / "offline-blank-cell")
+    )
+    assert offline_repository.cache_prepare_calls == []
+    assert blank_saved.acquisition_metadata["cell_name"] == "ABa"
+    assert blank_saved.spec.cell_names == ("ABa",)
+
+
+def test_cache_set_appends_new_only_then_recomputes_all_attached_rows(
+    qtbot, tmp_path, monkeypatch
+):
+    original_repository = _FullCacheRepository()
+    live = ExpressionComparisonWindow(_app(), original_repository)
+    qtbot.addWidget(live)
+    original = _xml(tmp_path, "original")
+    live.add_dataset_paths([original], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    saved = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "appendable")
+    )
+
+    repository = _FullCacheRepository()
+    window = ExpressionComparisonWindow(_app(), repository, result=saved)
+    qtbot.addWidget(window)
+    new_path = _xml(tmp_path, "new-dataset")
+    assert window.add_dataset_paths([original, new_path], show_errors=False) == 2
+
+    # A newly attached, not-yet-measured row is an explicit status; it does
+    # not blank or block export of the already frozen comparison.
+    assert window._plot_data is not None
+    assert window._plot_data.has_data
+    assert window._btn_export_csv.isEnabled()
+    assert window._btn_export_svg.isEnabled()
+    window.prepare_included_datasets()
+
+    original_key = repository._key(original)
+    new_key = repository._key(new_path)
+    assert repository.cache_prepare_calls == [(new_key, False)]
+    assert all(
+        state.measurement_cache is not None
+        for state in window._datasets.values()
+    )
+    appended = load_expression_comparison_result(
+        window.save_portable_result(tmp_path / "appended")
+    )
+    assert len(appended.measurement_caches) == 2
+
+    # Plot Use affects statistics only; Recompute all covers every attached
+    # dataset in the measurement set, including unchecked rows.
+    window._dataset_table.item(0, window.COL_USE).setCheckState(Qt.Unchecked)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.Yes,
+    )
+    window.recompute_all_datasets()
+    assert repository.cache_prepare_calls[-2:] == [
+        (original_key, True),
+        (new_key, True),
+    ]
+
+
+def test_cache_set_channel_selector_uses_union_and_reports_missing_rows(
+    qtbot, tmp_path
+):
+    repository = _FullCacheRepository()
+    two_channel = _xml(tmp_path, "two-channel-cache")
+    one_channel = _xml(tmp_path, "one-channel-cache")
+    one_key = repository._key(one_channel)
+    repository.cache_channel_counts[one_key] = 1
+    repository.image_channel_counts[one_key] = 1
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([two_channel, one_channel], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    result = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "heterogeneous-channels")
+    )
+
+    cached = ExpressionComparisonWindow(
+        _app(), repository=_FullCacheRepository(), result=result
+    )
+    qtbot.addWidget(cached)
+    assert cached._image_channel.maximum() == 2
+    cached._image_channel.setValue(2)
+
+    assert cached._plot_data is not None
+    assert len(cached._plot_data.aligned_traces) == 1
+    assert any(
+        status.availability.value == "missing_channel"
+        for status in cached._plot_data.statuses
+    )
+
+
+def test_cache_set_membership_fallback_rematerializes_the_new_cell(
+    qtbot, tmp_path
+):
+    repository = _FullCacheRepository()
+    first = _xml(tmp_path, "only-aba")
+    second = _xml(tmp_path, "only-abp")
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([first, second], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    states = tuple(live._datasets.values())
+    states[0].measurement_cache = replace(
+        states[0].measurement_cache,
+        cells=(states[0].measurement_cache.cells[0],),
+    )
+    states[1].measurement_cache = replace(
+        states[1].measurement_cache,
+        cells=(states[1].measurement_cache.cells[1],),
+    )
+    live._refresh_cell_selector()
+    live._materialize_cached_request()
+    result = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "heterogeneous-cells")
+    )
+
+    cached = ExpressionComparisonWindow(
+        _app(), repository=_FullCacheRepository(), result=result
+    )
+    qtbot.addWidget(cached)
+    assert cached._cell_combo.currentText() == "ABa"
+    aba_key = next(
+        key
+        for key, state in cached._datasets.items()
+        if state.measurement_cache.cell_names == ("ABa",)
+    )
+    aba_row = list(cached._datasets).index(aba_key)
+    cached._dataset_table.item(aba_row, cached.COL_USE).setCheckState(
+        Qt.Unchecked
+    )
+
+    assert cached._cell_combo.currentText() == "ABp"
+    assert cached._plot_data is not None and cached._plot_data.has_data
+    assert len(cached._plot_data.native_traces) == 1
+    assert cached._plot_data.native_traces[0].cell_name == "ABp"
+    assert cached._btn_export_csv.isEnabled()
+    assert cached.export_csv(tmp_path / "membership-fallback").is_file()
+
+
+def test_cache_set_keeps_stale_and_failed_recompute_warnings_visible(
+    qtbot, tmp_path, monkeypatch
+):
+    source_repository = _FullCacheRepository()
+    source = _xml(tmp_path, "warning-source")
+    live = ExpressionComparisonWindow(_app(), source_repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([source], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    result = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "warning-set")
+    )
+
+    repository = _FullCacheRepository()
+    window = ExpressionComparisonWindow(_app(), repository, result=result)
+    qtbot.addWidget(window)
+    window.add_dataset_paths([source], show_errors=False)
+    window._dataset_table.selectRow(0)
+    window.reload_selected_datasets()
+    state = next(iter(window._datasets.values()))
+
+    assert "Attached source changed" in state.message
+    assert "frozen cache retained" in state.message
+    assert window._plot_data is not None and window._plot_data.has_data
+    assert window._btn_export_csv.isEnabled()
+    assert window._btn_save_result.isEnabled()
+
+    def fail_recompute(*_args, **_kwargs):
+        raise RuntimeError("synthetic measurement failure")
+
+    monkeypatch.setattr(repository, "prepare_recomputed_cache", fail_recompute)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args, **_kwargs: None)
+    window.prepare_included_datasets()
+    assert "Recompute failed: synthetic measurement failure" in state.message
+    assert "previous cache retained" in state.message
+    assert window._plot_data is not None and window._plot_data.has_data
+
+    new_source = _xml(tmp_path, "warning-new")
+    window.add_dataset_paths([new_source], show_errors=False)
+    window.prepare_included_datasets()
+    new_state = next(
+        item for item in window._datasets.values() if item.path == new_source.resolve()
+    )
+    assert "Recompute failed: synthetic measurement failure" in new_state.message
+    assert "no cache is available" in new_state.message
+    assert window._plot_data is not None and window._plot_data.has_data
+
+    window.save_portable_result(tmp_path / "warning-resaved")
+    assert "attached source(s) have warnings" in window._status_label.text()
+
+
+def test_relocated_source_recompute_preserves_logical_dataset_identity(
+    qtbot, tmp_path, monkeypatch
+):
+    source_repository = _FullCacheRepository()
+    original = _xml(tmp_path, "original-location")
+    live = ExpressionComparisonWindow(_app(), source_repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([original], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    result = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "relocatable")
+    )
+    logical_id = result.measurement_caches[0].dataset_id
+    original_fingerprint = result.measurement_caches[0].source_fingerprint
+
+    relocated_repository = _FullCacheRepository()
+    relocated = _xml(tmp_path, "relocated-copy")
+    relocated_repository.load_dataset(relocated)
+    relocated_key = relocated_repository._key(relocated)
+    relocated_repository._statuses[relocated_key] = replace(
+        relocated_repository._statuses[relocated_key],
+        source_fingerprint=original_fingerprint,
+    )
+    # Simulate another open comparison already measuring the relocated source.
+    # Its repository cache uses a path-derived id and must be retagged even on
+    # the cheap snapshot-reuse path.
+    relocated_repository.prepare_recomputed_cache(relocated)
+    window = ExpressionComparisonWindow(
+        _app(), repository=relocated_repository, result=result
+    )
+    qtbot.addWidget(window)
+
+    assert window.add_dataset_paths([relocated], show_errors=False) == 1
+    window.prepare_included_datasets()
+    state = next(iter(window._datasets.values()))
+    assert state.measurement_cache.dataset_id == logical_id
+    assert state.measurement_cache.source_uri == str(relocated.resolve())
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.Yes,
+    )
+    window.recompute_all_datasets()
+    assert state.measurement_cache.dataset_id == logical_id
+    assert state.measurement_cache.source_uri == str(relocated.resolve())
+
+    saved_path = window.save_portable_result(tmp_path / "relocated-resaved")
+    reloaded = load_expression_comparison_result(saved_path)
+    assert reloaded.measurement_caches[0].dataset_id == logical_id
+    reopened = ExpressionComparisonWindow(
+        _app(), repository=_FullCacheRepository(), result=reloaded
+    )
+    qtbot.addWidget(reopened)
+    assert reopened._plot_data is not None
+    assert reopened._plot_data.has_data
+
+
+def test_cache_set_accepts_xml_drag_and_drop(qtbot, tmp_path):
+    repository = _FullCacheRepository()
+    original = _xml(tmp_path, "drag-origin")
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([original], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    result = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "drag-set")
+    )
+    cached_repository = _FullCacheRepository()
+    cached = ExpressionComparisonWindow(
+        _app(), repository=cached_repository, result=result
+    )
+    qtbot.addWidget(cached)
+    added = _xml(tmp_path, "drag-added")
+
+    class Url:
+        def toLocalFile(self):
+            return str(added)
+
+    class Mime:
+        def urls(self):
+            return [Url()]
+
+    class Event:
+        accepted = False
+
+        def mimeData(self):
+            return Mime()
+
+        def acceptProposedAction(self):
+            self.accepted = True
+
+        def ignore(self):
+            self.accepted = False
+
+    event = Event()
+    cached.dragEnterEvent(event)
+    assert event.accepted
+    cached.dropEvent(event)
+    assert event.accepted
+    assert cached._dataset_table.rowCount() == 2
+
+
+def test_mixed_v2_preserves_fixed_row_only_for_its_captured_request(
+    qtbot, tmp_path
+):
+    repository = _FullCacheRepository()
+    source = _xml(tmp_path, "mixed-full")
+    live = ExpressionComparisonWindow(_app(), repository)
+    qtbot.addWidget(live)
+    live.add_dataset_paths([source], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    full = load_expression_comparison_result(
+        live.save_portable_result(tmp_path / "mixed-full")
+    )
+    fixed = replace(
+        full.datasets[0],
+        provenance=replace(
+            full.datasets[0].provenance,
+            dataset_id="legacy-fixed",
+            label="Legacy fixed row",
+            source_uri="legacy.xml",
+            metadata=(("trace_source", "saved_legacy"),),
+        ),
+    )
+    mixed = replace(
+        full,
+        source_mode=ExpressionComparisonSourceMode.MIXED,
+        legacy_acknowledged=True,
+        acquisition_metadata={
+            **dict(full.acquisition_metadata),
+            "future_acquisition_key": {"nested": [1, 2, 3]},
+        },
+        datasets=full.datasets + (fixed,),
+        appearance={
+            **dict(full.appearance),
+            "future_appearance_key": {"kept": True},
+            "dataset_overrides": {
+                **dict(full.appearance.get("dataset_overrides", {})),
+                full.datasets[0].provenance.dataset_id: {
+                    **dict(
+                        dict(full.appearance.get("dataset_overrides", {})).get(
+                            full.datasets[0].provenance.dataset_id,
+                            {},
+                        )
+                    ),
+                    "future_override_key": "kept",
+                },
+            },
+            "included_dataset_ids": (
+                full.datasets[0].provenance.dataset_id,
+                "legacy-fixed",
+            ),
+        },
+    )
+    window = ExpressionComparisonWindow(
+        _app(), repository=_FullCacheRepository(), result=mixed
+    )
+    qtbot.addWidget(window)
+
+    assert window._plot_data is not None
+    assert len(window._plot_data.aligned_traces) == 2
+    window._cell_combo.setEditText("ABp")
+    assert window._plot_data is not None
+    assert len(window._plot_data.aligned_traces) == 1
+    fixed_state = next(
+        state
+        for state in window._datasets.values()
+        if state.dataset_id == "legacy-fixed"
+    )
+    assert fixed_state.resolution == "acquisition_status"
+    window._cell_combo.setEditText("ABa")
+    assert window._plot_data is not None
+    assert len(window._plot_data.aligned_traces) == 2
+    assert fixed_state.message.startswith("Fixed captured trace")
+
+    window._cell_combo.setEditText("ABp")
+    with pytest.raises(RuntimeError, match="Uncheck or remove those rows"):
+        window.save_portable_result(tmp_path / "mixed-fixed-still-included")
+
+    fixed_key = next(
+        key
+        for key, state in window._datasets.items()
+        if state.dataset_id == "legacy-fixed"
+    )
+    fixed_row = list(window._datasets).index(fixed_key)
+    window._dataset_table.item(fixed_row, window.COL_USE).setCheckState(
+        Qt.Unchecked
+    )
+    cache_only_path = window.save_portable_result(
+        tmp_path / "mixed-fixed-excluded"
+    )
+    cache_only = load_expression_comparison_result(cache_only_path)
+    assert cache_only.parent_result_id == mixed.result_id
+    assert cache_only.source_mode is ExpressionComparisonSourceMode.RECOMPUTED
+    assert all(
+        dataset.provenance.dataset_id != "legacy-fixed"
+        for dataset in cache_only.datasets
+    )
+    assert cache_only.acquisition_metadata["cell_name"] == "ABp"
+    assert cache_only.acquisition_metadata["future_acquisition_key"] == {
+        "nested": (1, 2, 3)
+    }
+    assert cache_only.appearance["future_appearance_key"] == {"kept": True}
+    assert (
+        cache_only.appearance["dataset_overrides"]
+        [full.datasets[0].provenance.dataset_id]["future_override_key"]
+        == "kept"
+    )
+    reopened = ExpressionComparisonWindow(
+        _app(), repository=_FullCacheRepository(), result=cache_only
+    )
+    qtbot.addWidget(reopened)
+    assert reopened._plot_data is not None
+    assert len(reopened._plot_data.aligned_traces) == 1
+    assert reopened._plot_data.native_traces[0].cell_name == "ABp"
 
 def test_frozen_status_only_result_allows_csv_and_portable_save_not_svg(
     qtbot, tmp_path
@@ -1142,7 +1723,10 @@ def test_window_menu_exposes_multi_instance_expression_comparison(
     open_result_action = app._panel_menu_actions["open_expression_result"]
 
     assert "Expression Comparison" in action.text()
-    assert open_result_action.text() == "Open Expression Result…"
+    assert (
+        open_result_action.text()
+        == "Open Expression Measurement Set / Result…"
+    )
     assert ".aceexpr" in open_result_action.statusTip()
     assert "multiple AceTree XML datasets" in action.statusTip()
     dialog_calls = []
@@ -1206,6 +1790,33 @@ def test_app_opens_result_without_repository_and_malformed_open_is_atomic(
     assert tuple(app._expression_comparison_windows) == before_windows
     assert app._expression_comparison_window_counter == before_counter
     assert warnings and warnings[-1][0] == "Cannot open expression result"
+
+
+def test_app_opens_v2_measurement_set_with_shared_optional_repository(
+    qtbot, tmp_path
+):
+    source_repository = _FullCacheRepository()
+    live = ExpressionComparisonWindow(_app(), source_repository)
+    qtbot.addWidget(live)
+    source = _xml(tmp_path, "app-open-v2")
+    live.add_dataset_paths([source], show_errors=False)
+    _set_source(live, "recomputed")
+    live.prepare_included_datasets()
+    result_path = live.save_portable_result(tmp_path / "app-open-v2")
+
+    shared_repository = _FullCacheRepository()
+    manager = SimpleNamespace(nuclei_record=[], config=None)
+    app = AceTreeApp(manager)
+    app._expression_dataset_repository = shared_repository
+    app.viewer = None
+    window = app.open_expression_comparison_result_window(result_path)
+
+    assert window is not None
+    qtbot.addWidget(window)
+    assert window.repository is shared_repository
+    assert window._data_mode.value == "cache_set"
+    assert window._plot_data is not None and window._plot_data.has_data
+    assert shared_repository.cache_prepare_calls == []
 
 
 def test_panel_actions_create_window_menu_when_napari_has_none(qtbot):

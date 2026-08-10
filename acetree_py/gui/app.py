@@ -1867,11 +1867,13 @@ class AceTreeApp:
         window.show()
 
     def open_expression_comparison_result_window(self, path=None):
-        """Open a portable comparison in a new offline/frozen window.
+        """Open a portable comparison in a new source-independent window.
 
         Loading and validating the result happens before any window-list or
-        counter mutation. The shared live repository is intentionally not
-        instantiated for this workflow.
+        counter mutation. Legacy v1 captures remain fixed and never instantiate
+        the shared repository. Full v2 measurement sets use the application
+        repository only for optional XML attachment/recomputation; all plotting,
+        retargeting, and export remain available from embedded caches offline.
         """
 
         from qtpy.QtWidgets import QFileDialog, QMessageBox
@@ -1890,9 +1892,9 @@ class AceTreeApp:
         if path is None:
             path, _selected_filter = QFileDialog.getOpenFileName(
                 parent,
-                "Open portable expression result",
+                "Open expression measurement set or legacy result",
                 "",
-                "AceTree expression results (*.aceexpr)",
+                "AceTree expression sets and results (*.aceexpr)",
             )
             if not path:
                 return None
@@ -1901,7 +1903,17 @@ class AceTreeApp:
             next_number = self._expression_comparison_window_counter + 1
             window = ExpressionComparisonWindow(
                 self,
-                repository=None,
+                # Schema-v2 measurement sets remain source-independent for
+                # plotting, but they may be extended with new XML datasets or
+                # refreshed from attached sources.  Give those windows the
+                # same application-scoped repository as live comparisons.
+                # Legacy schema-v1 captures intentionally keep the old fixed,
+                # repository-free boundary.
+                repository=(
+                    self.expression_dataset_repository()
+                    if result.measurement_caches
+                    else None
+                ),
                 result=result,
                 result_path=str(path),
                 window_number=next_number,
@@ -3619,9 +3631,11 @@ class AceTreeApp:
         )
         comparison_action.triggered.connect(self.open_expression_comparison_window)
         window_menu.addAction(comparison_action)
-        open_comparison_result_action = QAction("Open Expression Result…", qt_window)
+        open_comparison_result_action = QAction(
+            "Open Expression Measurement Set / Result…", qt_window
+        )
         open_comparison_result_action.setStatusTip(
-            "Open an offline .aceexpr comparison capture without its source datasets"
+            "Open an offline .aceexpr full measurement set or legacy fixed comparison"
         )
         open_comparison_result_action.triggered.connect(
             lambda _checked=False: self.open_expression_comparison_result_window()

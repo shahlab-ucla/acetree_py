@@ -85,7 +85,9 @@ from ..analysis.expression_comparison_result import (
     ExpressionComparisonResult,
     ExpressionComparisonSourceMode,
     build_expression_comparison_data,
+    capture_expression_comparison_measurement_caches,
     capture_expression_comparison_result,
+    revise_expression_comparison_measurement_caches,
     revise_expression_comparison_result,
     save_expression_comparison_result,
 )
@@ -102,6 +104,7 @@ from ..analysis.expression_dataset_repository import (
     NativeExpressionTrace,
 )
 from ..analysis.expression_plot import DEFAULT_EXPRESSION_CHANNELS, TimeAxisMode
+from ..analysis.expression_measurements import EXPRESSION_MEASUREMENT_CACHE_VERSION
 from ..core.nucleus import RED_CORRECTIONS
 from .expression_plot_window import _ExpressionNavigationToolbar
 
@@ -171,16 +174,20 @@ class _DatasetViewState:
     path: Path | None = None
     repository_status: ExpressionDatasetStatus | None = None
     frozen_dataset: ExpressionDataset | None = None
+    measurement_cache: Any | None = None
+    materialized_dataset: ExpressionDataset | None = None
     trace: NativeExpressionTrace | None = None
     request_key: tuple[object, ...] | None = None
     resolution: str = "unprepared"  # unprepared, ready, acquisition_status, error
     availability: TraceAvailability | None = None
     message: str = "Needs preparation"
+    cache_warning: str = ""
 
 
 class _WindowDataMode(str, Enum):
     LIVE = "live"
     FROZEN = "frozen"
+    CACHE_SET = "cache_set"
 
 
 class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
@@ -212,7 +219,13 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             raise ValueError("a live comparison requires an expression repository")
         self.repository = repository
         self._data_mode = (
-            _WindowDataMode.FROZEN if result is not None else _WindowDataMode.LIVE
+            _WindowDataMode.LIVE
+            if result is None
+            else (
+                _WindowDataMode.CACHE_SET
+                if result.measurement_caches
+                else _WindowDataMode.FROZEN
+            )
         )
         self._portable_result = result
         self._result_path = result_path
@@ -237,6 +250,10 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             assert result is not None
             self._load_frozen_result(result)
             self._configure_frozen_ui(result)
+        elif self._data_mode is _WindowDataMode.CACHE_SET:
+            assert result is not None
+            self._load_measurement_cache_result(result)
+            self._configure_measurement_cache_ui(result)
         else:
             self._sync_source_controls()
             self._on_plot_option_changed()
@@ -287,11 +304,20 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             "once and cache every channel and correction for every checked row"
         )
         self._btn_prepare.clicked.connect(self.prepare_included_datasets)
+        self._btn_recompute_all = QPushButton("Recompute all…")
+        self._btn_recompute_all.setToolTip(
+            "Force a fresh all-cell, all-channel measurement pass for every "
+            "dataset whose XML/image source is attached, regardless of plot Use. "
+            "Existing frozen "
+            "measurements remain usable if a replacement fails or is canceled."
+        )
+        self._btn_recompute_all.clicked.connect(self.recompute_all_datasets)
         dataset_buttons.addWidget(self._btn_add)
         dataset_buttons.addWidget(self._btn_remove)
         dataset_buttons.addWidget(self._btn_reload)
         dataset_buttons.addStretch(1)
         dataset_buttons.addWidget(self._btn_prepare)
+        dataset_buttons.addWidget(self._btn_recompute_all)
         dataset_layout.addLayout(dataset_buttons)
 
         self._dataset_table = QTableWidget(0, 7)
@@ -622,9 +648,10 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         layout.addWidget(self._toolbar)
         layout.addWidget(self._canvas, 1)
         exports = QHBoxLayout()
-        self._btn_open_result = QPushButton("Open frozen result…")
+        self._btn_open_result = QPushButton("Open measurement set / result…")
         self._btn_open_result.setToolTip(
-            "Open an .aceexpr capture in a new, source-independent comparison window"
+            "Open an .aceexpr full measurement set or legacy fixed capture in a "
+            "new source-independent comparison window"
         )
         self._btn_open_result.clicked.connect(self._open_frozen_result)
         self._btn_save_result = QPushButton("Save portable result…")
@@ -645,6 +672,13 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         return area
 
     def _update_window_title(self) -> None:
+        if self._data_mode is _WindowDataMode.CACHE_SET:
+            name = _display_filename(self._result_path) or "unsaved measurement set"
+            self.setWindowTitle(
+                f"AceTree — Expression Measurement Set: {name} "
+                f"({self.window_number})"
+            )
+            return
         if self._data_mode is _WindowDataMode.FROZEN:
             name = _display_filename(self._result_path) or "unsaved result"
             self.setWindowTitle(
@@ -878,6 +912,7 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             self._btn_remove,
             self._btn_reload,
             self._btn_prepare,
+            self._btn_recompute_all,
         ):
             widget.setVisible(False)
             widget.setEnabled(False)
@@ -909,6 +944,88 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             f"legacy acknowledgement recorded: {legacy}"
         )
         self._update_window_title()
+
+    def _load_measurement_cache_result(
+        self, result: ExpressionComparisonResult
+    ) -> None:
+        """Load a v2 all-cell/all-channel set and materialise its default view."""
+
+        self._load_frozen_result(result)
+        caches = {cache.dataset_id: cache for cache in result.measurement_caches}
+        for state in self._datasets.values():
+            cache = caches.get(state.dataset_id)
+            if cache is None:
+                # A v2 result may retain a legacy/status-only default-view row.
+                # Keep that row explicit, but only full-cache rows can respond
+                # to cell/channel/correction changes.
+                state.message = "Fixed captured trace; no reusable measurement cache"
+                continue
+            state.measurement_cache = cache
+            state.materialized_dataset = None
+            state.trace = None
+            state.request_key = None
+            state.resolution = "unprepared"
+            state.availability = None
+            state.message = "Frozen all-cell/all-channel measurements"
+        self._refresh_cell_selector()
+        self._refresh_image_channel_range()
+        self._materialize_cached_request()
+
+    def _configure_measurement_cache_ui(
+        self, result: ExpressionComparisonResult
+    ) -> None:
+        """Expose offline selectors plus optional source attachment/recompute."""
+
+        self._intro_label.setText(
+            "MEASUREMENT SET — cached values cover every measured cell, image "
+            "channel, and supported correction. Change the cell, channel, or "
+            "correction without rereading a movie. Add XML datasets at any time, "
+            "then recompute only new/stale rows or explicitly recompute all."
+        )
+        self._intro_label.setStyleSheet(
+            "QLabel { background: #eaf7ec; border: 1px solid #4f9560; "
+            "padding: 6px; font-weight: bold; }"
+        )
+        self._dataset_table.setHorizontalHeaderItem(
+            self.COL_CACHE, QTableWidgetItem("Measurement cache")
+        )
+        recomputed_index = self._source_combo.findData("recomputed")
+        if recomputed_index >= 0:
+            # A v2 cache set is always recomputed data.  Do not let the combo's
+            # change signal invalidate the immutable caches that were just
+            # materialised while the window was being opened (especially for
+            # mixed v2 files whose captured source mode is ``mixed``).
+            was_blocked = self._source_combo.blockSignals(True)
+            try:
+                self._source_combo.setCurrentIndex(recomputed_index)
+            finally:
+                self._source_combo.blockSignals(was_blocked)
+        self._source_combo.setEnabled(False)
+        self._source_combo.setToolTip(
+            "Full measurement sets contain verified image recomputation only"
+        )
+        self._saved_channel_combo.setVisible(False)
+        saved_label = self._data_form.labelForField(self._saved_channel_combo)
+        if saved_label is not None:
+            saved_label.setVisible(False)
+        self._legacy_ack.setVisible(False)
+        self._image_channel.setVisible(True)
+        self._correction_combo.setVisible(True)
+        self._btn_prepare.setText("Recompute new or stale")
+        self._btn_prepare.setToolTip(
+            "Measure only attached datasets that do not yet have a cache or whose "
+            "source has changed; current and offline frozen caches are reused"
+        )
+        self._btn_recompute_all.setVisible(True)
+        self._btn_open_result.setText("Open measurement set…")
+        self._btn_save_result.setText("Save measurement set…")
+        self._btn_save_result.setToolTip(
+            "Save every available all-cell/all-channel cache plus the current "
+            "default plot and appearance; this does not trigger recomputation"
+        )
+        self._update_window_title()
+        self._rebuild_dataset_table()
+        self._materialize_cached_request()
 
     def _open_frozen_result(self) -> None:
         opener = getattr(self.app, "open_expression_comparison_result_window", None)
@@ -1032,7 +1149,10 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             self._rebuild_dataset_table()
             self._refresh_cell_selector()
             self._refresh_image_channel_range()
-            self._refresh_plot()
+            if self._data_mode is _WindowDataMode.CACHE_SET:
+                self._materialize_cached_request()
+            else:
+                self._refresh_plot()
         elif paths:
             self._status_label.setText("No new datasets were added (duplicates are ignored).")
         if errors and show_errors:
@@ -1055,15 +1175,68 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
 
         key = _path_key(status.config_path)
         existing = self._datasets.get(key)
+        if existing is None and self._data_mode is _WindowDataMode.CACHE_SET:
+            expected_id = _dataset_id(status.config_path)
+            existing = next(
+                (
+                    state
+                    for state in self._datasets.values()
+                    if state.dataset_id == expected_id
+                ),
+                None,
+            )
+            if existing is None:
+                fingerprint_matches = [
+                    state
+                    for state in self._datasets.values()
+                    if state.measurement_cache is not None
+                    and state.measurement_cache.source_fingerprint
+                    == status.source_fingerprint
+                ]
+                if len(fingerprint_matches) == 1:
+                    existing = fingerprint_matches[0]
         if existing is not None:
+            newly_attached = existing.path is None
             existing.repository_status = status
-            if stale_message:
+            existing.path = status.config_path
+            existing.source_uri = str(status.config_path)
+            if (
+                self._data_mode is _WindowDataMode.CACHE_SET
+                and existing.measurement_cache is not None
+                and (
+                    stale_message
+                    or existing.measurement_cache.source_fingerprint
+                    != status.source_fingerprint
+                )
+            ):
+                existing.cache_warning = (
+                    "Attached source changed; frozen cache retained—choose "
+                    "Recompute new or stale to update"
+                )
+                existing.message = existing.cache_warning
+            elif stale_message:
                 existing.trace = None
+                existing.materialized_dataset = None
                 existing.request_key = None
                 existing.resolution = "error"
                 existing.availability = None
                 existing.message = stale_message
-            return False
+            elif (
+                existing.measurement_cache is not None
+                and existing.measurement_cache.source_fingerprint
+                != status.source_fingerprint
+            ):
+                existing.message = (
+                    "Attached source differs from the frozen cache; choose "
+                    "Recompute new or stale to replace it"
+                )
+            else:
+                existing.cache_warning = ""
+                existing.message = "Source attached; frozen measurements remain ready"
+            return (
+                self._data_mode is _WindowDataMode.CACHE_SET
+                and newly_attached
+            )
         state = _DatasetViewState(
             dataset_id=_dataset_id(status.config_path),
             source_uri=str(status.config_path),
@@ -1096,7 +1269,10 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._rebuild_dataset_table()
         self._refresh_cell_selector()
         self._refresh_image_channel_range()
-        self._refresh_plot()
+        if self._data_mode is _WindowDataMode.CACHE_SET:
+            self._materialize_cached_request()
+        else:
+            self._refresh_plot()
 
     def reload_selected_datasets(self) -> None:
         """Reload selected shared entries and invalidate this window's traces."""
@@ -1121,7 +1297,11 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             if not 0 <= row < len(keys):
                 continue
             state = self._datasets[keys[row]]
-            assert state.path is not None
+            if state.path is None:
+                errors.append(
+                    f"{state.label}: no XML source is attached; use Add XMLs… first"
+                )
+                continue
             try:
                 state.repository_status = self.repository.reload_dataset(state.path)
             except Exception as error:  # noqa: BLE001 - report each selected source
@@ -1129,7 +1309,28 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                 state.resolution = "error"
                 state.availability = None
                 state.message = f"Reload failed: {error}"
+                if self._data_mode is _WindowDataMode.CACHE_SET:
+                    state.cache_warning = (
+                        f"Reload failed: {error}; frozen cache retained"
+                    )
                 errors.append(f"{state.label}: {error}")
+                continue
+            if self._data_mode is _WindowDataMode.CACHE_SET:
+                if (
+                    state.measurement_cache is not None
+                    and state.measurement_cache.source_fingerprint
+                    != state.repository_status.source_fingerprint
+                ):
+                    state.cache_warning = (
+                        "Attached source changed; frozen cache retained—choose "
+                        "Recompute new or stale to update"
+                    )
+                else:
+                    state.cache_warning = ""
+                state.message = (
+                    state.cache_warning
+                    or "Source reloaded; frozen measurements remain ready"
+                )
                 continue
             state.trace = None
             state.request_key = None
@@ -1139,7 +1340,10 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._rebuild_dataset_table()
         self._refresh_cell_selector()
         self._refresh_image_channel_range()
-        self._refresh_plot()
+        if self._data_mode is _WindowDataMode.CACHE_SET:
+            self._materialize_cached_request()
+        else:
+            self._refresh_plot()
         if errors:
             QMessageBox.warning(
                 self,
@@ -1206,9 +1410,13 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             self._dataset_table.setItem(row, self.COL_STATUS, status_item)
 
             cache_item = QTableWidgetItem(
-                _cache_label(state.repository_status)
-                if state.repository_status is not None
-                else "Embedded; offline-ready"
+                _measurement_cache_label(state.measurement_cache)
+                if state.measurement_cache is not None
+                else (
+                    _cache_label(state.repository_status)
+                    if state.repository_status is not None
+                    else "Fixed captured trace"
+                )
             )
             cache_item.setFlags(cache_item.flags() & ~Qt.ItemIsEditable)
             cache_item.setData(Qt.UserRole, key)
@@ -1240,6 +1448,20 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             state.included = item.checkState() == Qt.Checked
             self._refresh_cell_selector()
             self._refresh_image_channel_range()
+            if self._data_mode is _WindowDataMode.CACHE_SET or (
+                self._data_mode is _WindowDataMode.LIVE
+                and self._source_mode() == "recomputed"
+                and any(
+                    dataset.measurement_cache is not None
+                    for dataset in self._datasets.values()
+                )
+            ):
+                # Membership changes can force the editable selector to fall
+                # back to another cell or physical channel. Re-materialise the
+                # resulting request immediately instead of rendering datasets
+                # that still carry the previous request key.
+                self._materialize_cached_request()
+                return
         elif item.column() == self.COL_LABEL:
             label = item.text().strip()
             if not label:
@@ -1281,8 +1503,17 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         states = self._included_states() or tuple(self._datasets.values())
         availability: dict[str, int] = {}
         for state in states:
-            assert state.repository_status is not None
-            for name in state.repository_status.cell_names:
+            if state.measurement_cache is not None:
+                names = state.measurement_cache.cell_names
+            elif state.repository_status is not None:
+                names = state.repository_status.cell_names
+            elif state.frozen_dataset is not None:
+                names = tuple(
+                    trace.cell_name for trace in state.frozen_dataset.traces
+                )
+            else:
+                names = ()
+            for name in names:
                 availability[name] = availability.get(name, 0) + 1
 
         self._cell_combo.blockSignals(True)
@@ -1307,8 +1538,17 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         states = self._included_states()
         available = 0
         for state in states:
-            assert state.repository_status is not None
-            if cell in state.repository_status.cell_names:
+            if state.measurement_cache is not None:
+                names = state.measurement_cache.cell_names
+            elif state.repository_status is not None:
+                names = state.repository_status.cell_names
+            elif state.frozen_dataset is not None:
+                names = tuple(
+                    trace.cell_name for trace in state.frozen_dataset.traces
+                )
+            else:
+                names = ()
+            if cell in names:
                 available += 1
         if not states:
             text = "Check at least one loaded dataset."
@@ -1322,6 +1562,17 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
 
     def _refresh_image_channel_range(self) -> None:
         if self._data_mode is _WindowDataMode.FROZEN:
+            return
+        if self._data_mode is _WindowDataMode.CACHE_SET:
+            counts = [
+                len(state.measurement_cache.channels)
+                for state in self._included_states()
+                if state.measurement_cache is not None
+            ]
+            # Use the union. A cache without the selected channel contributes
+            # an explicit MISSING_CHANNEL status instead of preventing the
+            # channel from being compared in datasets that do contain it.
+            self._image_channel.setMaximum(max(counts, default=1))
             return
         assert self.repository is not None
         # Saved legacy fields never require opening an image provider.  Keep
@@ -1356,6 +1607,16 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
 
         if self._data_mode is _WindowDataMode.FROZEN:
             return
+        if self._data_mode is _WindowDataMode.CACHE_SET:
+            self._source_combo.setEnabled(False)
+            self._saved_channel_combo.setEnabled(False)
+            self._legacy_ack.setVisible(False)
+            self._image_channel.setEnabled(not self._preparing)
+            self._correction_combo.setEnabled(not self._preparing)
+            self._btn_prepare.setText("Recompute new or stale")
+            self._btn_recompute_all.setVisible(True)
+            self._btn_recompute_all.setEnabled(not self._preparing)
+            return
         saved = self._source_mode() == "saved"
         self._saved_channel_combo.setEnabled(saved)
         self._legacy_ack.setEnabled(saved)
@@ -1363,13 +1624,38 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._image_channel.setEnabled(not saved)
         self._correction_combo.setEnabled(not saved)
         self._btn_prepare.setText(
-            "Prepare included datasets" if saved else "Prepare / recompute included datasets"
+            "Prepare included datasets"
+            if saved
+            else "Recompute new or stale attached datasets"
         )
+        self._btn_prepare.setToolTip(
+            "Extract the selected saved field for checked plot rows"
+            if saved
+            else (
+                "Build full all-cell/all-channel caches for every attached "
+                "dataset that is new or stale; the Use checkbox affects only "
+                "the current plot"
+            )
+        )
+        self._btn_save_result.setText(
+            "Save portable result…" if saved else "Save measurement set…"
+        )
+        self._btn_recompute_all.setVisible(not saved)
+        self._btn_recompute_all.setEnabled(not saved and not self._preparing)
 
     def _on_trace_request_changed(self, *_args) -> None:
         if self._updating_controls or self._data_mode is _WindowDataMode.FROZEN:
             return
         self._update_cell_availability()
+        if self._data_mode is _WindowDataMode.CACHE_SET or (
+            self._source_mode() == "recomputed"
+            and any(
+                state.measurement_cache is not None
+                for state in self._datasets.values()
+            )
+        ):
+            self._materialize_cached_request()
+            return
         if self._source_mode() == "saved":
             self._legacy_ack.setChecked(False)
         self._invalidate_local_traces()
@@ -1379,6 +1665,7 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             return
         for state in self._datasets.values():
             state.trace = None
+            state.materialized_dataset = None
             state.request_key = None
             state.resolution = "unprepared"
             state.availability = None
@@ -1390,6 +1677,8 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         if self._data_mode is _WindowDataMode.FROZEN:
             assert self._portable_result is not None
             return self._portable_result.source_mode.value
+        if self._data_mode is _WindowDataMode.CACHE_SET:
+            return "recomputed"
         return str(self._source_combo.currentData() or "saved")
 
     def _request_key(self) -> tuple[object, ...]:
@@ -1406,9 +1695,203 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             str(self._correction_combo.currentData()),
         )
 
+    def _materialize_cached_request(self) -> None:
+        """Resolve the current selector tuple from immutable caches only."""
+
+        if self._data_mode is _WindowDataMode.FROZEN or (
+            self._data_mode is _WindowDataMode.LIVE
+            and self._source_mode() != "recomputed"
+        ):
+            return
+        cell = self._cell_combo.currentText().strip()
+        request_key = self._request_key()
+        if not cell:
+            for state in self._datasets.values():
+                state.materialized_dataset = None
+                state.request_key = None
+                state.resolution = "unprepared"
+                state.availability = None
+                state.message = "Choose an exact cell"
+            self._rebuild_dataset_table()
+            self._refresh_plot()
+            return
+        for state in self._datasets.values():
+            cache = state.measurement_cache
+            if cache is None:
+                if (
+                    state.frozen_dataset is not None
+                    and self._cache_request_matches_captured_default()
+                ):
+                    state.materialized_dataset = state.frozen_dataset
+                    state.request_key = request_key
+                    if state.frozen_dataset.traces:
+                        state.resolution = "ready"
+                        state.availability = None
+                        state.message = (
+                            "Fixed captured trace; this row has no reusable full cache"
+                        )
+                    elif state.frozen_dataset.acquisition_statuses:
+                        status = state.frozen_dataset.acquisition_statuses[0]
+                        state.resolution = "acquisition_status"
+                        state.availability = status.availability
+                        state.message = status.message
+                    else:
+                        state.resolution = "error"
+                        state.availability = None
+                        state.message = "Fixed capture contains no values or status"
+                    continue
+                source_fingerprint = (
+                    state.repository_status.source_fingerprint
+                    if state.repository_status is not None
+                    else ""
+                )
+                source_revision = (
+                    state.repository_status.generation
+                    if state.repository_status is not None
+                    else None
+                )
+                state.message = (
+                    "No full measurement cache; choose Recompute new or stale"
+                    if state.path is not None
+                    else "No full measurement cache; attach its XML and recompute"
+                )
+                state.materialized_dataset = ExpressionDataset(
+                    provenance=DatasetProvenance(
+                        dataset_id=state.dataset_id,
+                        label=state.label,
+                        group_id=state.group_id,
+                        source_uri=state.source_uri,
+                        source_fingerprint=source_fingerprint,
+                        source_revision=source_revision,
+                        metadata=(("trace_source", "not_measured"),),
+                    ),
+                    traces=(),
+                    acquisition_statuses=(
+                        DatasetAcquisitionStatus(
+                            cell_name=cell,
+                            channel_key=(
+                                f"measured_channel_{self._image_channel.value()}"
+                            ),
+                            availability=TraceAvailability.INCOMPLETE_DATA,
+                            message=state.message,
+                        ),
+                    ),
+                )
+                state.request_key = request_key
+                state.resolution = "acquisition_status"
+                state.availability = TraceAvailability.INCOMPLETE_DATA
+                continue
+            try:
+                dataset = cache.materialize_dataset(
+                    cell,
+                    self._image_channel.value() - 1,
+                    str(self._correction_combo.currentData()),
+                )
+            except Exception as error:  # noqa: BLE001 - one cache must not hide others
+                logger.exception(
+                    "Could not materialize cached expression dataset %s",
+                    state.dataset_id,
+                )
+                state.materialized_dataset = None
+                state.request_key = request_key
+                state.resolution = "error"
+                state.availability = None
+                state.message = f"Cached measurement error: {error}"
+                continue
+            state.materialized_dataset = dataset
+            state.trace = None
+            state.request_key = request_key
+            if dataset.traces:
+                state.resolution = "ready"
+                state.availability = None
+                state.message = (
+                    f"Cached all-cell measurements · channel "
+                    f"{self._image_channel.value()} · "
+                    f"{self._correction_combo.currentData()}"
+                )
+            elif dataset.acquisition_statuses:
+                status = dataset.acquisition_statuses[0]
+                state.resolution = "acquisition_status"
+                state.availability = status.availability
+                state.message = status.message
+            else:
+                state.resolution = "error"
+                state.availability = None
+                state.message = "Cache returned neither values nor a status"
+        for state in self._datasets.values():
+            if state.cache_warning:
+                state.message = f"{state.message} · {state.cache_warning}"
+        self._rebuild_dataset_table()
+        self._refresh_plot()
+
+    def _cache_request_matches_captured_default(self) -> bool:
+        result = self._portable_result
+        if result is None:
+            return False
+        metadata = result.acquisition_metadata
+        default_cell = str(
+            metadata.get("cell_name")
+            or (result.spec.cell_names[0] if result.spec.cell_names else "")
+        )
+        default_channel = metadata.get("image_channel_one_based")
+        if type(default_channel) is not int:
+            channel_key = result.spec.channel_key
+            prefix = "measured_channel_"
+            default_channel = (
+                int(channel_key[len(prefix) :])
+                if channel_key.startswith(prefix)
+                and channel_key[len(prefix) :].isdigit()
+                else 1
+            )
+        default_correction = str(metadata.get("correction_method") or "global")
+        return (
+            self._cell_combo.currentText().strip() == default_cell
+            and self._image_channel.value() == default_channel
+            and str(self._correction_combo.currentData()) == default_correction
+        )
+
     # -- Preparation -----------------------------------------------------
 
     def prepare_included_datasets(self) -> None:
+        """Populate only caches that are absent or stale, then resolve the view."""
+
+        self._prepare_included_datasets(force=False)
+
+    def recompute_all_datasets(self) -> None:
+        """Explicitly replace every recomputable attached measurement cache."""
+
+        if self._data_mode is _WindowDataMode.FROZEN:
+            self._status_label.setText(
+                "Legacy frozen results contain a fixed trace and cannot be recomputed."
+            )
+            return
+        if self._source_mode() != "recomputed":
+            self._status_label.setText(
+                "Choose 'Recompute from image channel' before recomputing image caches."
+            )
+            return
+        attached = sum(
+            1 for state in self._datasets.values() if state.path is not None
+        )
+        if attached == 0:
+            self._status_label.setText(
+                "No dataset has an attached XML/image source to recompute."
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Recompute all expression measurements?",
+            f"AceTree will reread {attached} attached movie(s) and replace their "
+            "all-cell, all-channel caches. Existing measurements are retained if "
+            "a replacement fails or is canceled. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._prepare_included_datasets(force=True)
+
+    def _prepare_included_datasets(self, *, force: bool) -> None:
         """Resolve every included trace, measuring images when requested."""
 
         if self._data_mode is _WindowDataMode.FROZEN:
@@ -1418,6 +1901,11 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             return
         assert self.repository is not None
         if self._preparing:
+            return
+        if self._source_mode() == "recomputed" and callable(
+            getattr(self.repository, "prepare_recomputed_cache", None)
+        ):
+            self._prepare_full_measurement_caches(force=force)
             return
         states = self._included_states()
         cell = self._cell_combo.currentText().strip()
@@ -1680,12 +2168,200 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                 self._close_when_ready = False
                 self.close()
 
+    def _prepare_full_measurement_caches(self, *, force: bool) -> None:
+        """Measure whole dataset families under the selected batch policy."""
+
+        assert self.repository is not None
+        candidates: list[_DatasetViewState] = []
+        errors: list[str] = []
+        for state in self._datasets.values():
+            if state.path is None:
+                continue
+            if self._current_dataset_has_unsaved_edits(state):
+                detail = (
+                    "save the active AceTree dataset, then reload its source "
+                    "before recomputing"
+                )
+                state.cache_warning = f"Recompute skipped: {detail}"
+                errors.append(f"{state.label}: {detail}")
+                continue
+            try:
+                current = self.repository.status(state.path)
+                state.repository_status = current
+            except Exception as error:  # noqa: BLE001 - retain old frozen cache
+                detail = f"source validation failed: {error}"
+                state.cache_warning = f"Recompute skipped: {detail}"
+                errors.append(f"{state.label}: {detail}")
+                continue
+            cache = state.measurement_cache
+            stale = cache is None or (
+                current.source_fingerprint != cache.source_fingerprint
+            )
+            if cache is not None:
+                stale = stale or (
+                    cache.measurement_algorithm_version
+                    != EXPRESSION_MEASUREMENT_CACHE_VERSION
+                )
+                stale = stale or (
+                    current.image_manifest_token is not None
+                    and cache.image_manifest_token is not None
+                    and current.image_manifest_token != cache.image_manifest_token
+                )
+                if not stale:
+                    try:
+                        session_cache = self.repository.snapshot_recomputed_cache(
+                            state.path
+                        )
+                    except Exception:
+                        # A portable cache does not need to be imported into the
+                        # session repository to remain current. Its source and
+                        # algorithm checks above are the offline authority.
+                        session_cache = None
+                    if session_cache is not None:
+                        state.measurement_cache = _measurement_cache_for_state(
+                            session_cache, state
+                        )
+            if force or stale:
+                candidates.append(state)
+
+        if not candidates:
+            self._materialize_cached_request()
+            message = (
+                "All attached datasets already have current full measurement caches."
+                if not errors
+                else errors[0]
+            )
+            self._status_label.setText(message)
+            if errors:
+                QMessageBox.warning(
+                    self,
+                    "Some expression sources need attention",
+                    "\n\n".join(errors),
+                )
+            return
+
+        progress = QProgressDialog(
+            "Recomputing full expression caches…",
+            "Cancel",
+            0,
+            1000,
+            self,
+        )
+        progress.setWindowTitle(
+            "Recompute all expression caches" if force else "Recompute new or stale"
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        self._active_progress = progress
+        self._preparing = True
+        self._set_preparing_controls(True)
+        cancelled = False
+        total = len(candidates)
+        try:
+            for dataset_index, state in enumerate(candidates):
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+                progress.setLabelText(f"{state.label}: loading all channels…")
+                progress.setValue(int(1000 * dataset_index / total))
+                QApplication.processEvents()
+                completed_steps = 0
+
+                def progress_cb(
+                    channel_index: int,
+                    num_channels: int,
+                    timepoint: int,
+                    num_timepoints: int,
+                ) -> bool:
+                    nonlocal completed_steps
+                    local_total = max(1, int(num_channels) * int(num_timepoints))
+                    completed_steps += 1
+                    fraction = (
+                        dataset_index + min(1.0, completed_steps / local_total)
+                    ) / total
+                    progress.setValue(min(999, int(1000 * fraction)))
+                    progress.setLabelText(
+                        f"{state.label}: all cells, channels, and corrections "
+                        f"({completed_steps}/{local_total})"
+                    )
+                    QApplication.processEvents()
+                    return not progress.wasCanceled()
+
+                previous_cache = state.measurement_cache
+                try:
+                    cache = self.repository.prepare_recomputed_cache(
+                        state.path,
+                        force=force,
+                        progress_cb=progress_cb,
+                    )
+                    if progress.wasCanceled():
+                        cancelled = True
+                        break
+                    cache = _measurement_cache_for_state(cache, state)
+                    state.measurement_cache = cache
+                    state.cache_warning = ""
+                    state.materialized_dataset = None
+                    state.trace = None
+                    state.request_key = None
+                    state.resolution = "unprepared"
+                    state.availability = None
+                    state.message = "Full measurement cache updated"
+                    status_reader = getattr(
+                        self.repository,
+                        "session_status",
+                        self.repository.status,
+                    )
+                    state.repository_status = status_reader(state.path)
+                except Exception as error:  # noqa: BLE001 - keep previous cache usable
+                    logger.exception(
+                        "Could not recompute full expression cache for %s",
+                        state.path,
+                    )
+                    state.measurement_cache = previous_cache
+                    state.cache_warning = (
+                        f"Recompute failed: {error}; "
+                        + (
+                            "previous cache retained"
+                            if previous_cache is not None
+                            else "no cache is available"
+                        )
+                    )
+                    errors.append(f"{state.label}: {error}")
+                progress.setValue(int(1000 * (dataset_index + 1) / total))
+                QApplication.processEvents()
+        finally:
+            progress.setValue(1000 if not cancelled else progress.value())
+            progress.close()
+            self._active_progress = None
+            self._preparing = False
+            self._set_preparing_controls(False)
+            self._refresh_cell_selector()
+            self._refresh_image_channel_range()
+            self._materialize_cached_request()
+            if self._close_when_ready:
+                self._close_when_ready = False
+                self.close()
+
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Some expression caches were not replaced",
+                "Existing cached measurements remain available.\n\n"
+                + "\n\n".join(errors),
+            )
+        elif cancelled:
+            self._status_label.setText(
+                "Recomputation canceled; existing measurement caches were retained."
+            )
+
     def _set_preparing_controls(self, preparing: bool) -> None:
         for widget in (
             self._btn_add,
             self._btn_remove,
             self._btn_reload,
             self._btn_prepare,
+            self._btn_recompute_all,
             self._dataset_table,
             self._cell_combo,
             self._source_combo,
@@ -1903,7 +2579,10 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         self._status_label.setText(message)
 
     def _current_spec(
-        self, states: tuple[_DatasetViewState, ...]
+        self,
+        states: tuple[_DatasetViewState, ...],
+        *,
+        cell_name: str | None = None,
     ) -> ComparisonSpec:
         center = CenterStatistic(str(self._center_combo.currentData()))
         band = BandStatistic(str(self._band_combo.currentData()))
@@ -1941,7 +2620,12 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                 channel_key = f"measured_channel_{self._image_channel.value()}"
                 channel_label = f"Channel {self._image_channel.value()}"
                 channel_unit = "scaled mean intensity"
-            cell_names = (self._cell_combo.currentText().strip(),)
+            selected_cell = (
+                self._cell_combo.currentText().strip()
+                if cell_name is None
+                else cell_name.strip()
+            )
+            cell_names = (selected_cell,)
             channel_bindings = ()
             cell_aliases = ()
             grid_start = None
@@ -1976,10 +2660,20 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         )
 
     def _expression_dataset(self, state: _DatasetViewState) -> ExpressionDataset:
-        if self._data_mode is _WindowDataMode.FROZEN:
-            if state.frozen_dataset is None:
-                raise RuntimeError(f"Frozen dataset {state.dataset_id!r} is unavailable")
-            dataset = state.frozen_dataset
+        if self._data_mode in (
+            _WindowDataMode.FROZEN,
+            _WindowDataMode.CACHE_SET,
+        ) or state.materialized_dataset is not None:
+            dataset = (
+                state.materialized_dataset
+                if state.materialized_dataset is not None
+                else state.frozen_dataset
+            )
+            if dataset is None:
+                raise RuntimeError(
+                    f"Cached dataset {state.dataset_id!r} is unavailable for the "
+                    "current request"
+                )
             return replace(
                 dataset,
                 provenance=replace(
@@ -2265,10 +2959,7 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             "axes_background": self._axes_background,
             "text_color": self._text_color,
         }
-        if (
-            self._data_mode is _WindowDataMode.FROZEN
-            and self._portable_result is not None
-        ):
+        if self._portable_result is not None:
             preserved = dict(self._portable_result.appearance)
             previous_overrides = preserved.get("dataset_overrides")
             current_overrides = current["dataset_overrides"]
@@ -2287,12 +2978,15 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     def _legacy_export_unacknowledged(
         self, states: tuple[_DatasetViewState, ...]
     ) -> bool:
-        if self._data_mode is _WindowDataMode.FROZEN:
+        if self._data_mode in (
+            _WindowDataMode.FROZEN,
+            _WindowDataMode.CACHE_SET,
+        ):
             result = self._portable_result
             if result is None or result.legacy_acknowledged:
                 return False
             for state in states:
-                dataset = state.frozen_dataset
+                dataset = state.materialized_dataset or state.frozen_dataset
                 if dataset is None or not dataset.traces:
                     continue
                 if result.source_mode is ExpressionComparisonSourceMode.SAVED:
@@ -2316,7 +3010,15 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         csv_state = enabled if csv_enabled is None else csv_enabled
         self._btn_export_csv.setEnabled(csv_state)
         self._btn_export_svg.setEnabled(enabled)
-        self._btn_save_result.setEnabled(csv_state)
+        has_full_cache = any(
+            state.measurement_cache is not None
+            for state in self._datasets.values()
+        )
+        self._btn_save_result.setEnabled(
+            has_full_cache
+            if self._data_mode is _WindowDataMode.CACHE_SET
+            else csv_state
+        )
         self._toolbar.set_save_enabled(enabled)
 
     def _exportable_snapshot(
@@ -2328,6 +3030,34 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         request_key = self._request_key()
         if not states:
             raise RuntimeError("No datasets are included in this comparison.")
+        if self._data_mode is _WindowDataMode.CACHE_SET:
+            if self._legacy_export_unacknowledged(states):
+                self._set_export_enabled(False)
+                raise RuntimeError(
+                    "This measurement set includes a fixed legacy trace without "
+                    "a recorded provenance acknowledgement. Uncheck or remove "
+                    "that row before exporting, or recreate the set from an "
+                    "acknowledged source comparison."
+                )
+            unresolved = [
+                state
+                for state in states
+                if state.request_key != request_key
+                or state.resolution not in ("ready", "acquisition_status")
+            ]
+            if unresolved:
+                self._set_export_enabled(False)
+                raise RuntimeError(
+                    "One or more measurement-set rows could not be resolved from "
+                    "their frozen cache. Recompute, repair, or uncheck those rows."
+                )
+            if self._plot_data is None or (
+                not allow_status_only and not self._plot_data.has_data
+            ):
+                raise RuntimeError("There is no cached expression comparison to export.")
+            if allow_status_only and not self._plot_data.statuses:
+                raise RuntimeError("There are no cached dataset statuses to export.")
+            return self._plot_data
         if self._data_mode is _WindowDataMode.FROZEN:
             if self._legacy_export_unacknowledged(states):
                 self._set_export_enabled(False)
@@ -2429,6 +3159,110 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     def _portable_result_for_save(self) -> ExpressionComparisonResult:
         """Create a portable revision after the same fail-closed export checks."""
 
+        cache_states = tuple(
+            state
+            for state in self._datasets.values()
+            if state.measurement_cache is not None
+        )
+        if cache_states and self._source_mode() == "recomputed":
+            caches = tuple(state.measurement_cache for state in cache_states)
+            cell = self._cell_combo.currentText().strip()
+            if not cell:
+                available = sorted(
+                    {
+                        name
+                        for state in cache_states
+                        for name in state.measurement_cache.cell_names
+                    },
+                    key=str.casefold,
+                )
+                if not available:
+                    raise RuntimeError(
+                        "The measurement caches contain no selectable named cells."
+                    )
+                cell = available[0]
+            spec = self._current_spec(cache_states, cell_name=cell)
+            appearance = self._current_appearance(cache_states)
+            overrides = {
+                state.dataset_id: {
+                    "label": state.label,
+                    "group_id": state.group_id,
+                    "series_label": state.label,
+                    "color": state.color,
+                }
+                for state in cache_states
+            }
+            request = {
+                "cell_name": cell,
+                "image_channel": self._image_channel.value() - 1,
+                "correction_method": str(self._correction_combo.currentData()),
+            }
+            if (
+                self._portable_result is not None
+                and self._portable_result.measurement_caches
+            ):
+                cached_ids = {
+                    cache.dataset_id
+                    for cache in self._portable_result.measurement_caches
+                }
+                uncached_ids = {
+                    dataset.provenance.dataset_id
+                    for dataset in self._portable_result.datasets
+                    if dataset.provenance.dataset_id not in cached_ids
+                }
+                if (
+                    uncached_ids
+                    and not self._cache_request_matches_captured_default()
+                ):
+                    included_fixed = [
+                        state.label
+                        for state in self._datasets.values()
+                        if state.dataset_id in uncached_ids and state.included
+                    ]
+                    if included_fixed:
+                        labels = ", ".join(included_fixed)
+                        raise RuntimeError(
+                            "The current cell/channel/correction cannot be applied "
+                            "to fixed selected-trace row(s): "
+                            f"{labels}. Uncheck or remove those rows, then save the "
+                            "retargeted full-cache measurement set."
+                        )
+                    # Every fixed row is now explicitly excluded (or removed),
+                    # so create a cache-only child instead of asking the result
+                    # merger to retarget data that cannot be retargeted.  The
+                    # parent link preserves the revision lineage while the new
+                    # default view contains only independently reusable caches.
+                    captured = capture_expression_comparison_measurement_caches(
+                        caches,
+                        spec,
+                        acquisition_metadata=dict(
+                            self._portable_result.acquisition_metadata
+                        ),
+                        appearance=appearance,
+                        overrides=overrides,
+                        **request,
+                    )
+                    return replace(
+                        captured,
+                        parent_result_id=self._portable_result.result_id,
+                    )
+                return revise_expression_comparison_measurement_caches(
+                    self._portable_result,
+                    caches,
+                    replace_existing=True,
+                    spec=spec,
+                    appearance=appearance,
+                    overrides=overrides,
+                    **request,
+                )
+            return capture_expression_comparison_measurement_caches(
+                caches,
+                spec,
+                appearance=appearance,
+                overrides=overrides,
+                **request,
+            )
+
         data = self._exportable_snapshot(allow_status_only=True)
         if self._data_mode is _WindowDataMode.FROZEN:
             assert self._portable_result is not None
@@ -2528,9 +3362,16 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         )
         path, _selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Save portable expression result",
+            (
+                "Save expression measurement set"
+                if any(
+                    state.measurement_cache is not None
+                    for state in self._datasets.values()
+                )
+                else "Save portable expression result"
+            ),
             default_name,
-            "AceTree expression results (*.aceexpr)",
+            "AceTree expression sets and results (*.aceexpr)",
         )
         if not path:
             return
@@ -2545,7 +3386,30 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
         saved = save_expression_comparison_result(path, result)
         self._portable_result = saved.result
         self._result_path = str(saved.path)
-        if self._data_mode is _WindowDataMode.FROZEN:
+        if (
+            self._data_mode is _WindowDataMode.LIVE
+            and saved.result.measurement_caches
+        ):
+            # A successful all-family save changes this window's authority:
+            # selectors and exports now use the immutable measurement set.
+            # Keeping it in LIVE would allow switching back to Saved legacy
+            # and overwriting the same file with a trace-only v1-style capture.
+            self._data_mode = _WindowDataMode.CACHE_SET
+            caches = {
+                cache.dataset_id: cache
+                for cache in saved.result.measurement_caches
+            }
+            frozen_by_id = {
+                dataset.provenance.dataset_id: dataset
+                for dataset in saved.result.datasets
+            }
+            for state in self._datasets.values():
+                if state.dataset_id in caches:
+                    state.measurement_cache = caches[state.dataset_id]
+                if state.dataset_id in frozen_by_id:
+                    state.frozen_dataset = frozen_by_id[state.dataset_id]
+            self._configure_measurement_cache_ui(saved.result)
+        elif self._data_mode is _WindowDataMode.FROZEN:
             by_id = {
                 dataset.provenance.dataset_id: dataset
                 for dataset in saved.result.datasets
@@ -2555,7 +3419,48 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                 state.request_key = ("frozen", saved.result.result_id)
             self._configure_frozen_ui(saved.result)
             self._refresh_plot()
-        self._status_label.setText(f"Saved portable result: {saved.path}")
+        elif self._data_mode is _WindowDataMode.CACHE_SET:
+            caches = {
+                cache.dataset_id: cache
+                for cache in saved.result.measurement_caches
+            }
+            for state in self._datasets.values():
+                if state.dataset_id in caches:
+                    state.measurement_cache = caches[state.dataset_id]
+            self._update_window_title()
+            self._materialize_cached_request()
+        pending = (
+            sum(
+                state.measurement_cache is None
+                for state in self._datasets.values()
+            )
+            if saved.result.measurement_caches
+            else 0
+        )
+        stale_attached = (
+            sum(
+                bool(state.cache_warning) and state.path is not None
+                for state in self._datasets.values()
+            )
+            if saved.result.measurement_caches
+            else 0
+        )
+        notes: list[str] = []
+        if pending:
+            notes.append(
+                f"{pending} added dataset(s) still need recomputation and were not saved"
+            )
+        if stale_attached:
+            notes.append(
+                f"{stale_attached} attached source(s) have warnings; frozen caches were saved"
+            )
+        suffix = f" ({'; '.join(notes)})" if notes else ""
+        noun = (
+            "expression measurement set"
+            if saved.result.measurement_caches
+            else "portable expression result"
+        )
+        self._status_label.setText(f"Saved {noun}: {saved.path}{suffix}")
         return saved.path
 
     def _choose_csv_path(self) -> None:
@@ -2606,7 +3511,10 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
     def dragEnterEvent(self, event) -> None:
         urls = event.mimeData().urls() if event.mimeData() is not None else ()
         accepted_suffixes = {EXPRESSION_COMPARISON_RESULT_SUFFIX}
-        if self._data_mode is _WindowDataMode.LIVE:
+        if self._data_mode in (
+            _WindowDataMode.LIVE,
+            _WindowDataMode.CACHE_SET,
+        ):
             accepted_suffixes.add(".xml")
         if any(
             Path(url.toLocalFile()).suffix.lower() in accepted_suffixes
@@ -2633,9 +3541,13 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             for url in urls
             if Path(url.toLocalFile()).suffix.lower() == ".xml"
         ]
-        if xml_paths and self._data_mode is _WindowDataMode.LIVE:
+        hybrid = self._data_mode in (
+            _WindowDataMode.LIVE,
+            _WindowDataMode.CACHE_SET,
+        )
+        if xml_paths and hybrid:
             self.add_dataset_paths(xml_paths)
-        if result_paths or (xml_paths and self._data_mode is _WindowDataMode.LIVE):
+        if result_paths or (xml_paths and hybrid):
             event.acceptProposedAction()
 
     def closeEvent(self, event) -> None:
@@ -2690,6 +3602,39 @@ def _cache_label(status: ExpressionDatasetStatus) -> str:
     if not status.cached_corrections:
         return "No recompute cache"
     return "Cached: " + ", ".join(status.cached_corrections)
+
+
+def _measurement_cache_label(cache: Any) -> str:
+    return (
+        f"Full cache: {len(cache.cell_names)} cells · "
+        f"{len(cache.channels)} channels · "
+        f"{len(cache.available_corrections)} corrections · {cache.measured_at}"
+    )
+
+
+def _measurement_cache_for_state(cache: Any, state: _DatasetViewState) -> Any:
+    """Keep a portable set's logical identity when a source is relocated.
+
+    Repository cache ids are derived from the current XML path.  Measurement
+    sets instead use an immutable logical dataset id, so every cache entering a
+    state through either the snapshot or recompute path must be retagged at the
+    UI merge boundary.  This also records the newly attached source URI without
+    mutating the repository-owned cache object.
+    """
+
+    desired_source_uri = (
+        str(state.path) if state.path is not None else state.source_uri
+    )
+    if (
+        cache.dataset_id == state.dataset_id
+        and cache.source_uri == desired_source_uri
+    ):
+        return cache
+    return replace(
+        cache,
+        dataset_id=state.dataset_id,
+        source_uri=desired_source_uri,
+    )
 
 
 def _double_spin(

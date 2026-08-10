@@ -19,6 +19,7 @@ from acetree_py.analysis.expression_comparison import (
     ExpressionComparisonService,
     ExpressionDataset,
     SummarySpec,
+    TraceAvailability,
     export_expression_comparison_tidy_csv,
 )
 from acetree_py.analysis.expression_dataset_repository import (
@@ -33,6 +34,7 @@ from acetree_py.analysis.expression_dataset_repository import (
     ExpressionTraceSource,
     ImageSourceUnavailableError,
     MeasurementComputationError,
+    RecomputedCacheUnavailableError,
     RepositoryClosedError,
     source_fingerprint_for_config,
 )
@@ -44,7 +46,7 @@ from acetree_py.analysis.expression_measurements import (
     expression_measurement_calibration,
     expression_measurement_dependency_fingerprint,
 )
-from acetree_py.core.nucleus import Nucleus
+from acetree_py.core.nucleus import RED_CORRECTIONS, Nucleus
 from acetree_py.io.config import AceTreeConfig, NamingMethod, load_config
 from acetree_py.io.config_writer import write_config_xml
 from acetree_py.io.nuclei_writer import write_nuclei_zip
@@ -474,6 +476,112 @@ def test_production_family_is_shared_across_cells_channels_and_corrections(
     assert entry.measurements_by_correction == {}
 
 
+def test_full_cache_materializes_every_cell_channel_and_correction_without_reread(
+    tmp_path: Path,
+):
+    xml_path = _write_dataset(tmp_path / "data", second_cell=True)
+    provider = _CountingFamilyProvider()
+    repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: provider
+    )
+    repository.load_dataset(xml_path)
+
+    with pytest.raises(RecomputedCacheUnavailableError):
+        repository.snapshot_recomputed_cache(xml_path)
+
+    cache = repository.prepare_recomputed_cache(xml_path)
+    assert set(cache.cell_names) == {"ABa", "ABp"}
+    assert len(cache.cells) == 2
+    assert len(cache.channels) == 2
+    assert cache.available_corrections == RED_CORRECTIONS
+    calls_after_prepare = list(provider.all_channel_calls)
+    assert calls_after_prepare == [1, 2]
+
+    for cell_name in cache.cell_names:
+        for image_channel in range(2):
+            cell = next(item for item in cache.cells if item.cell_name == cell_name)
+            channel = cache.channel(image_channel)
+            for correction in RED_CORRECTIONS:
+                dataset = cache.materialize_dataset(
+                    cell_name,
+                    image_channel,
+                    correction,
+                    {"label": "Frozen embryo", "group_id": "control"},
+                )
+                assert dataset.provenance.label == "Frozen embryo"
+                assert dataset.provenance.group_id == "control"
+                assert len(dataset.traces) == 1
+                expected = tuple(
+                    channel.samples[key].corrected_value(correction)
+                    for key in cell.sample_keys
+                )
+                assert dataset.traces[0].values == pytest.approx(expected)
+
+    assert provider.all_channel_calls == calls_after_prepare
+    assert repository.snapshot_recomputed_cache(xml_path) is cache
+
+
+def test_full_cache_preserves_duplicate_cells_and_missing_sample_reasons(
+    tmp_path: Path,
+):
+    duplicate_xml = _write_dataset(tmp_path / "duplicates", duplicate=True)
+    duplicate_provider = _CountingFamilyProvider()
+    duplicate_repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: duplicate_provider
+    )
+    duplicate_repository.load_dataset(duplicate_xml)
+    duplicate_cache = duplicate_repository.prepare_recomputed_cache(duplicate_xml)
+
+    assert [cell.cell_name for cell in duplicate_cache.cells] == ["ABa", "ABa"]
+    assert len({cell.cell_id for cell in duplicate_cache.cells}) == 2
+    ambiguous = duplicate_cache.materialize_dataset("ABa", 0, "global")
+    assert not ambiguous.traces
+    assert ambiguous.acquisition_statuses[0].availability is TraceAvailability.AMBIGUOUS
+
+    incomplete_xml = _write_dataset(tmp_path / "incomplete")
+    incomplete_provider = _CountingFamilyProvider(fail_second_time_once=True)
+    incomplete_repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: incomplete_provider
+    )
+    incomplete_repository.load_dataset(incomplete_xml)
+    incomplete_cache = incomplete_repository.prepare_recomputed_cache(incomplete_xml)
+    trace = incomplete_cache.materialize_dataset("ABa", 0, "global").traces[0]
+
+    assert trace.values[0] is not None
+    assert trace.values[1] is None
+    assert trace.missing_reasons[1] == "no measurable inner pixels"
+    calls = list(incomplete_provider.all_channel_calls)
+    incomplete_cache.materialize_dataset("ABa", 1, "blot")
+    assert incomplete_provider.all_channel_calls == calls
+
+
+def test_force_recompute_is_atomic_and_nonforce_reuses_snapshot(tmp_path: Path):
+    xml_path = _write_dataset(tmp_path / "data", second_cell=True)
+    provider = _CountingFamilyProvider()
+    repository = ExpressionDatasetRepository(
+        image_provider_factory=lambda _config: provider
+    )
+    repository.load_dataset(xml_path)
+    first = repository.prepare_recomputed_cache(xml_path)
+    first_calls = list(provider.all_channel_calls)
+
+    assert repository.prepare_recomputed_cache(xml_path) is first
+    assert provider.all_channel_calls == first_calls
+
+    with pytest.raises(MeasurementComputationError, match="cancelled"):
+        repository.prepare_recomputed_cache(
+            xml_path,
+            force=True,
+            progress_cb=lambda *_args: False,
+        )
+    assert repository.snapshot_recomputed_cache(xml_path) is first
+
+    replacement = repository.prepare_recomputed_cache(xml_path, force=True)
+    assert replacement is not first
+    assert replacement.measured_at != first.measured_at
+    assert repository.snapshot_recomputed_cache(xml_path) is replacement
+
+
 def test_cached_family_trace_performs_one_source_validation(tmp_path: Path, monkeypatch):
     xml_path = _write_dataset(tmp_path / "data")
     provider = _CountingFamilyProvider()
@@ -530,7 +638,9 @@ def test_fresh_family_uses_repository_manifest_lease(tmp_path: Path, monkeypatch
     assert manifest_calls == 3
 
 
-def test_incomplete_production_family_is_cleared_and_retried(tmp_path: Path):
+def test_incomplete_production_family_is_cached_until_explicit_force_retry(
+    tmp_path: Path,
+):
     xml_path = _write_dataset(tmp_path / "data")
     provider = _CountingFamilyProvider(fail_second_time_once=True)
     repository = ExpressionDatasetRepository(
@@ -543,8 +653,17 @@ def test_incomplete_production_family_is_cleared_and_retried(tmp_path: Path):
 
     assert provider.all_channel_calls == [1, 2]
     assert provider.single_channel_calls == [(2, 0), (2, 1)]
-    assert repository.status(xml_path).cached_corrections == ()
+    assert repository.status(xml_path).cached_corrections == (
+        "blot",
+        "cross",
+        "global",
+        "local",
+        "none",
+    )
+    cached = repository.snapshot_recomputed_cache(xml_path)
+    assert cached.materialize_dataset("ABa", 0, "global").traces[0].values[1] is None
 
+    repository.prepare_recomputed_cache(xml_path, force=True)
     trace = repository.extract_recomputed_trace(xml_path, "ABa", 0, "none")
     assert trace.values == pytest.approx((100_000.0, 100_000.0))
     assert provider.all_channel_calls == [1, 2, 1, 2]

@@ -752,8 +752,11 @@ window. Canonical resolved paths are deduplicated, image providers are created
 lazily, and provider access is serialized per dataset. `AceTreeApp` owns one
 repository shared by every modeless comparison window and closes it at
 application shutdown, releasing image and ZIP handles. Loaded managers and
-recomputed measurements are deliberately session-only; Measure CSVs are
-neither read as cache entries nor written by this workflow.
+repository measurement families are session-only; Measure CSVs are neither
+read as cache entries nor written by this workflow. A user can explicitly
+detach a completed family into a schema-v2 `.aceexpr` measurement set. That
+portable cache is a separate immutable authority and does not keep the source
+manager, provider, XML, ZIP, or movie open.
 
 Every load receives a monotonically increasing session generation. A snapshot
 token combines that generation with the fingerprint of the XML, nuclei, and
@@ -801,14 +804,16 @@ numeric values. There are two source boundaries:
   functions continue through the compatibility per-mode cache rather than
   being misrepresented as a family.
 
-The family is retained only after a complete successful pass. Cancellation or
-measurement failure publishes nothing. An incomplete extracted sample clears
-the family (and compatibility caches) so the next preparation retries instead
-of reusing known-incomplete data. A manager revision/calibration/geometry or
+The family is retained only after a complete movie pass. Cancellation or a
+failure before completion publishes no replacement. A successfully completed
+family remains authoritative even when individual nuclei could not be sampled;
+those samples are explicit gaps, and ordinary new/stale preparation reuses the
+completed family. **Recompute all…** is the explicit force-retry path when the
+user wants to remeasure such gaps. A manager revision/calibration/geometry or
 dependency mismatch drops it lazily; source fingerprint/manifest failure,
-explicit reload, dataset removal, and application shutdown clear it and close
-the corresponding provider. `cached_corrections` reports every supported
-derivation once the family is valid.
+explicit reload, dataset removal, and application shutdown clear the live
+repository copy and close the corresponding provider. `cached_corrections`
+reports every supported derivation once the family is valid.
 
 **Renderer-neutral comparison model:** `ExpressionComparisonService` consumes
 immutable native traces; the dataset is the replicate unit. It transforms
@@ -830,7 +835,8 @@ replicate counts. One global switch and opacity value control display of all
 included individual traces; a dataset's **Use** state instead controls its
 membership in both traces and summaries. Dataset colors and all other
 appearance settings remain window-local in a live comparison, or become
-explicit presentation metadata when the user saves a portable result.
+explicit presentation metadata when the user saves a portable result or
+measurement set.
 
 **Live snapshot and export:** Each render creates an immutable numeric
 `ExpressionComparisonData` containing the comparison specification,
@@ -847,50 +853,87 @@ revalidate repository generation/source tokens. A prepared comparison with only
 unavailable-status records may export CSV, but SVG/toolbar Save remain disabled
 because there is no numeric plot.
 
-**Portable result boundary:**
-`analysis/expression_comparison_result.py` persists the validated materialized
-`ExpressionDataset` inputs and full `ComparisonSpec`, rather than serializing
-derived aligned/smoothed/summary arrays as authority. The v1 `.aceexpr` JSON
-envelope also records source mode, acquisition metadata, legacy
-acknowledgement, all dataset provenance/status/group/label/color information,
-JSON-safe inclusion/appearance state, capture/save timestamps, producer and
-calculation versions, and result/parent UUIDs. This is sufficient to rebuild
-all supported time, grid, smoothing, and compatible summary modes without a
-repository. It intentionally is not an all-cell/all-channel movie cache, and
-the current comparison UI accepts exactly one canonical cell per result.
+**Portable result and measurement-set boundary:**
+`analysis/expression_comparison_result.py` reads both `.aceexpr` schema versions.
+A schema-v1 legacy capture contains validated materialized `ExpressionDataset`
+inputs and one fixed cell/channel/correction request. It can rebuild supported
+time, grid, smoothing, summary, inclusion, and appearance views without a
+repository, but it cannot answer a different measurement request. Those files
+remain read compatible and deliberately open with the cell and acquisition
+selectors disabled.
+
+A schema-v2 measurement set additionally embeds one
+`FrozenDatasetMeasurementCache` per fully measured dataset. Each cache is a
+correction-neutral snapshot of every named observed cell, every measured image
+channel, nucleus geometry/provenance, raw/global-annulus/blot-annulus
+aggregates, and explicit missing-sample reasons. The five UI correction choices
+are derived offline: `none`, `global`, and `blot` are direct derivations, while
+`local` and `cross` deliberately use the documented global fallback. The
+materialized default `ExpressionDataset` and `ComparisonSpec` remain in the
+file to define its initial plot; they are a view, not the measurement-cache
+authority. Changing the selected exact cell, physical channel, or correction
+materializes new datasets from the caches and performs no source or image I/O.
+Missing cells/channels/samples and duplicate exact cell names remain explicit
+acquisition statuses or gaps instead of being filled or chosen heuristically.
+
+The v2 cache workflow is hybrid. An opened set is immediately usable offline,
+but **Add XMLs…** or XML drag/drop may attach the original source to a cached row
+or add another dataset. **Recompute new or stale** visits attached rows
+regardless of their plot **Use** state and measures only rows without a current
+full cache; **Recompute all…** explicitly rereads every attached movie and
+attempts to replace all of those caches. Unattached rows retain their portable
+cache. Each dataset replacement is atomic: cancellation or failure keeps that
+row's previous good cache, and other completed rows remain published. Reloading
+an attached source creates a fresh repository generation; changed fingerprints
+or manifests make the row eligible for the new/stale pass, while recompute-all
+is the explicit force-refresh path.
+
+The **Use** checkbox controls only participation in the current plot, summaries,
+and plot/CSV export. It does not delete a cache, exclude it from measurement-set
+save, or suppress either recomputation policy. Consequently an unchecked
+dataset can be re-enabled or retargeted later without image I/O. A newly added
+row with no completed cache is omitted from a measurement-set save until it is
+recomputed; already cached rows can still be saved. Pure schema-v1 rows and
+fixed rows retained in a mixed v2 file answer only their captured default
+request. If the user changes cell/channel/correction, such a row must be
+unchecked, removed, or attached and recomputed before saving the retargeted
+measurement set.
 
 `capture_expression_comparison_result()` establishes the immutable native-data
-boundary. A presentation revision can change dataset labels/groups, trace
-labels/colors, inclusion, numeric-view settings, and appearance, but validation
-rejects changes to source provenance, native identities/times/values/gaps,
-acquisition statuses, or captured cell/channel mappings. Resaving a loaded
-result creates a child UUID while retaining original capture provenance.
-`build_expression_comparison_data()` consumes only embedded datasets and never
-dereferences `source_uri`.
+boundary for fixed captures;
+`capture_expression_comparison_measurement_caches()` and
+`revise_expression_comparison_measurement_caches()` capture and merge the v2
+cache authority. A presentation revision can change dataset labels/groups,
+trace labels/colors, inclusion, numeric-view settings, and appearance, while
+validation protects captured numbers and source provenance. Resaving creates a
+child UUID and retains the parent/capture lineage. CSV and SVG are generated
+from the currently materialized offline view; **Save measurement set…** is
+enabled whenever at least one full cache exists and does not require a valid
+numeric plot or trigger recomputation.
 
-Serialization uses strict finite RFC-compatible UTF-8 JSON, exact v1 fields,
-duplicate-key rejection, enum/UUID/timestamp validation, and a SHA-256 checksum
-over the canonical result payload. Writes stage a same-directory temporary
-file, flush/fsync it, preserve the destination mode, and commit with
-`os.replace`; failure leaves the previous file intact. The checksum detects
-corruption or modification but is not keyed, signed, or evidence of
-authenticity.
+Serialization uses strict finite RFC-compatible UTF-8 JSON, version-specific
+field validation, duplicate-key rejection, enum/UUID/timestamp validation, and
+a SHA-256 checksum over the canonical result payload. Writes stage a
+same-directory temporary file, flush/fsync it, preserve the destination mode,
+and commit with `os.replace`; failure leaves the previous file intact. The
+checksum detects corruption or modification but is not keyed, signed, or
+evidence of authenticity. The current format is one monolithic JSON document
+with a 256 MiB encoded-file cap. Large cohorts must be split across multiple
+measurement sets rather than relying on sharding or external payloads.
 
-**Frozen UI mode:** **Window → Open Expression Result…**, **Open frozen
-result…**, or `.aceexpr` drag/drop validates the complete capture before
-atomically registering an independent comparison window. A prominent frozen
-notice makes clear that XML/image paths are provenance-only. Add/Reload/Prepare
-and acquisition controls are disabled; Use/label/group/color,
-time/grid/smoothing/statistics, and appearance remain editable. CSV and SVG
-consume the repository-free rebuilt snapshot. Status-only captures permit
-portable resave and CSV, but have no SVG/toolbar image render. **Save portable
-result…** persists the current frozen presentation as a new revision. This is
-deliberately separate from the application-scoped live measurement family:
-live caches can answer new cells/channels but expire and revalidate sources,
-whereas portable results survive sessions but freeze their captured
-cell/source data. Numeric saved/mixed captures without a recorded legacy
-provenance acknowledgement remain viewable but fail closed for CSV, SVG, and
-portable resave.
+**Offline UI modes:** **Window → Open Expression Measurement Set / Result…**,
+the comparison window's open button, or `.aceexpr` drag/drop validates the
+complete file before atomically registering an independent window. Schema-v2
+sets show a **MEASUREMENT SET** notice, keep cell/channel/correction selectors
+active, expose Add/Reload and both recomputation policies, and permit offline
+CSV, SVG, and measurement-set saves. Fixed/cacheless files, including schema-v1
+legacy captures, show **FROZEN RESULT**; their Add/Reload/Prepare and acquisition
+controls are disabled, while
+Use/label/group/color, time/grid/smoothing/statistics, appearance, CSV, SVG, and
+presentation resave remain available within the captured request. Status-only
+views may save/export CSV but have no SVG/toolbar image render. Numeric fixed
+saved/mixed rows without recorded legacy-provenance acknowledgement remain
+viewable but fail closed for CSV, SVG, and portable resave.
 
 ---
 

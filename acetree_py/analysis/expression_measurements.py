@@ -18,15 +18,19 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Mapping, TYPE_CHECKING
+from typing import Any, Iterable, Mapping, TYPE_CHECKING
 
 from ..core.nucleus import RED_CORRECTIONS
 from .expression_plot import ExpressionChannel
+
+
+EXPRESSION_MEASUREMENT_CACHE_VERSION = 1
 
 if TYPE_CHECKING:
     from ..core.cell import Cell
     from ..core.nuclei_manager import NucleiManager
     from ..core.nucleus import Nucleus
+    from .expression_comparison import ExpressionDataset
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +251,273 @@ class ExpressionMeasurementFamily:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenCellMeasurements:
+    """Stable cell-to-sample index embedded in a full-dataset cache.
+
+    ``cell_id`` is independent of the displayed name so duplicate canonical
+    names remain separate, explicit records instead of being overwritten.
+    """
+
+    cell_id: str
+    cell_name: str
+    start_time: int
+    end_time: int
+    sample_keys: tuple[tuple[int, int], ...]
+
+    def __post_init__(self) -> None:
+        if not self.cell_id.strip():
+            raise ValueError("frozen cell_id cannot be blank")
+        if not self.cell_name.strip():
+            raise ValueError("frozen cell_name cannot be blank")
+        keys = tuple((int(time), int(index)) for time, index in self.sample_keys)
+        if not keys:
+            raise ValueError("a frozen cell requires at least one sample key")
+        if len(set(keys)) != len(keys):
+            raise ValueError("frozen cell sample keys must be unique")
+        if any(right[0] <= left[0] for left, right in zip(keys, keys[1:])):
+            raise ValueError("frozen cell sample times must be strictly increasing")
+        start = int(self.start_time)
+        end = int(self.end_time)
+        if end < start or keys[0][0] < start or keys[-1][0] > end:
+            raise ValueError("frozen cell samples must lie within its lifetime")
+        object.__setattr__(self, "start_time", start)
+        object.__setattr__(self, "end_time", end)
+        object.__setattr__(self, "sample_keys", keys)
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenDatasetMeasurementCache:
+    """Portable correction-neutral measurements for one complete dataset.
+
+    The cache contains every named observed cell and every measured image
+    channel.  Correction choices are derived from raw/global-annulus/blot
+    aggregates, so changing a plot request never needs image I/O.
+    """
+
+    dataset_id: str
+    source_uri: str
+    source_fingerprint: str
+    snapshot_token: str
+    dataset_generation: int
+    image_manifest_token: str | None
+    measured_at: str
+    measurement_algorithm_version: int
+    source_revision: int
+    source_dependency_fingerprint: str
+    source_calibration: tuple[float, float, int, float]
+    channels: tuple[MeasuredExpressionAggregateChannel, ...]
+    cells: tuple[FrozenCellMeasurements, ...]
+    geometries: Mapping[tuple[int, int], NucleusGeometrySignature]
+    missing_reasons: Mapping[tuple[int, int, int], str]
+
+    def __post_init__(self) -> None:
+        if not self.dataset_id.strip():
+            raise ValueError("frozen dataset_id cannot be blank")
+        if not self.source_fingerprint.strip():
+            raise ValueError("frozen source_fingerprint cannot be blank")
+        if not self.snapshot_token.strip():
+            raise ValueError("frozen snapshot_token cannot be blank")
+        if not self.measured_at.strip():
+            raise ValueError("frozen measured_at cannot be blank")
+        if int(self.measurement_algorithm_version) < 1:
+            raise ValueError("measurement_algorithm_version must be positive")
+        channels = tuple(self.channels)
+        channel_indices = [channel.image_channel for channel in channels]
+        if len(set(channel_indices)) != len(channel_indices):
+            raise ValueError("frozen measurement channel indices must be unique")
+        cells = tuple(self.cells)
+        cell_ids = [cell.cell_id for cell in cells]
+        if len(set(cell_ids)) != len(cell_ids):
+            raise ValueError("frozen cell ids must be unique")
+        missing = {
+            (int(channel), int(time), int(index)): str(reason)
+            for (channel, time, index), reason in self.missing_reasons.items()
+        }
+        if any(not reason.strip() for reason in missing.values()):
+            raise ValueError("frozen missing reasons cannot be blank")
+        object.__setattr__(self, "dataset_generation", int(self.dataset_generation))
+        object.__setattr__(self, "source_revision", int(self.source_revision))
+        object.__setattr__(
+            self,
+            "measurement_algorithm_version",
+            int(self.measurement_algorithm_version),
+        )
+        object.__setattr__(self, "channels", channels)
+        object.__setattr__(self, "cells", cells)
+        object.__setattr__(self, "geometries", MappingProxyType(dict(self.geometries)))
+        object.__setattr__(self, "missing_reasons", MappingProxyType(missing))
+
+    @property
+    def available_corrections(self) -> tuple[str, ...]:
+        return tuple(RED_CORRECTIONS)
+
+    @property
+    def cell_names(self) -> tuple[str, ...]:
+        """Return unique display names while retaining duplicates in ``cells``."""
+
+        return tuple(sorted({cell.cell_name for cell in self.cells}, key=str.casefold))
+
+    def channel(self, image_channel: int) -> MeasuredExpressionAggregateChannel:
+        for channel in self.channels:
+            if channel.image_channel == image_channel:
+                return channel
+        raise KeyError(f"No frozen expression channel {image_channel + 1}")
+
+    def is_current(self, manager: NucleiManager) -> bool:
+        """Return whether every dependency of this full cache still matches."""
+
+        return (
+            self.source_revision == int(getattr(manager, "data_revision", 0))
+            and self.source_calibration == expression_measurement_calibration(manager)
+            and self.source_dependency_fingerprint
+            == expression_measurement_dependency_fingerprint(manager)
+        )
+
+    def materialize_dataset(
+        self,
+        cell_name: str,
+        image_channel: int,
+        correction_method: str,
+        overrides: Mapping[str, object] | None = None,
+    ) -> ExpressionDataset:
+        """Materialize one comparison dataset without opening source files.
+
+        Missing samples remain explicit gaps.  Missing/duplicate cells and an
+        unavailable channel become acquisition-status records.
+        """
+
+        from .expression_comparison import (
+            DatasetAcquisitionStatus,
+            DatasetExpressionTrace,
+            DatasetProvenance,
+            ExpressionDataset,
+            TraceAvailability,
+        )
+
+        if not isinstance(cell_name, str) or not cell_name.strip():
+            raise ValueError("cell_name cannot be blank")
+        if isinstance(image_channel, bool) or not isinstance(image_channel, int):
+            raise TypeError("image_channel must be a zero-based integer")
+        if image_channel < 0:
+            raise ValueError("image_channel cannot be negative")
+        if correction_method not in RED_CORRECTIONS:
+            choices = ", ".join(RED_CORRECTIONS)
+            raise ValueError(
+                f"Unknown correction_method={correction_method!r}; "
+                f"choose one of: {choices}"
+            )
+        options: dict[str, Any] = dict(overrides or {})
+        dataset_id = str(options.pop("dataset_id", self.dataset_id))
+        label = str(options.pop("label", Path(self.source_uri).stem or dataset_id))
+        group_id = str(options.pop("group_id", "all"))
+        source_uri = str(options.pop("source_uri", self.source_uri))
+        series_label = options.pop("series_label", label)
+        color = options.pop("color", None)
+        if options:
+            raise ValueError(
+                "Unknown materialization override(s): " + ", ".join(sorted(options))
+            )
+
+        requested_channel = f"measured_channel_{image_channel + 1}"
+        matches = tuple(cell for cell in self.cells if cell.cell_name == cell_name)
+        status: DatasetAcquisitionStatus | None = None
+        measured_channel = None
+        if not matches:
+            status = DatasetAcquisitionStatus(
+                cell_name=cell_name,
+                channel_key=requested_channel,
+                availability=TraceAvailability.MISSING_CELL,
+                message=f"Cell {cell_name!r} is absent from this frozen dataset cache.",
+            )
+        elif len(matches) > 1:
+            status = DatasetAcquisitionStatus(
+                cell_name=cell_name,
+                channel_key=requested_channel,
+                availability=TraceAvailability.AMBIGUOUS,
+                message=(
+                    f"Cell {cell_name!r} has {len(matches)} cached lineages; "
+                    "repair duplicate names before exact comparison."
+                ),
+            )
+        else:
+            try:
+                measured_channel = self.channel(image_channel)
+            except KeyError:
+                status = DatasetAcquisitionStatus(
+                    cell_name=cell_name,
+                    channel_key=requested_channel,
+                    availability=TraceAvailability.MISSING_CHANNEL,
+                    message=(
+                        f"Image channel {image_channel + 1} is absent from this "
+                        "frozen dataset cache."
+                    ),
+                )
+
+        metadata = (
+            ("trace_source", "recomputed"),
+            ("trace_freshness", "frozen_cache"),
+            ("session_snapshot_token", self.snapshot_token),
+            ("image_manifest_token", self.image_manifest_token or ""),
+            ("image_channel", str(image_channel + 1)),
+            ("correction_method", correction_method),
+            (
+                "correction_exact",
+                "false" if correction_method in ("local", "cross") else "true",
+            ),
+            ("measurement_algorithm_version", str(self.measurement_algorithm_version)),
+            ("measured_at", self.measured_at),
+        )
+        provenance = DatasetProvenance(
+            dataset_id=dataset_id,
+            label=label,
+            group_id=group_id,
+            source_uri=source_uri,
+            source_fingerprint=self.source_fingerprint,
+            source_revision=self.dataset_generation,
+            metadata=metadata,
+        )
+        if status is not None:
+            return ExpressionDataset(
+                provenance=provenance,
+                traces=(),
+                acquisition_statuses=(status,),
+            )
+
+        assert measured_channel is not None and len(matches) == 1
+        cell = matches[0]
+        values: list[float | None] = []
+        reasons: list[str | None] = []
+        for time, index in cell.sample_keys:
+            aggregate = measured_channel.samples.get((time, index))
+            reason = self.missing_reasons.get((image_channel, time, index))
+            if aggregate is None:
+                values.append(None)
+                reasons.append(reason or "measurement unavailable")
+                continue
+            value, derived_reason = _frozen_corrected_value(
+                aggregate,
+                correction_method,
+            )
+            values.append(value)
+            reasons.append(derived_reason)
+        correction_label = _correction_label(correction_method)
+        trace = DatasetExpressionTrace(
+            cell_name=cell.cell_name,
+            channel_key=measured_channel.key,
+            channel_label=f"{measured_channel.label} ({correction_label})",
+            channel_unit="scaled mean intensity",
+            absolute_times=tuple(float(time) for time, _index in cell.sample_keys),
+            values=tuple(values),
+            birth_time=float(cell.start_time),
+            end_time=float(cell.end_time),
+            missing_reasons=tuple(reasons),
+            series_label=None if series_label is None else str(series_label),
+            color=None if color is None else str(color),
+        )
+        return ExpressionDataset(provenance=provenance, traces=(trace,))
+
+
+@dataclass(frozen=True, slots=True)
 class ExpressionMeasurementSet:
     """Immutable, revision-bound result of a successful Measure run."""
 
@@ -396,6 +667,103 @@ class ExpressionMeasurementSet:
                 if sample is not None and _sample_has_metric(sample, metric):
                     valid += 1
         return valid, expected
+
+
+def freeze_expression_measurement_family(
+    manager: NucleiManager,
+    family: ExpressionMeasurementFamily,
+    *,
+    dataset_id: str,
+    source_uri: str,
+    source_fingerprint: str,
+    snapshot_token: str,
+    dataset_generation: int,
+    image_manifest_token: str | None,
+    measured_at: str,
+) -> FrozenDatasetMeasurementCache:
+    """Detach a complete family from its manager for offline reuse."""
+
+    tree = manager.lineage_tree
+    if tree is None:
+        raise ValueError("cannot freeze expression measurements without a lineage tree")
+    if not family.is_current(manager):
+        raise ValueError("cannot freeze stale expression measurements")
+
+    cells: list[FrozenCellMeasurements] = []
+    used_ids: set[str] = set()
+    ordered_cells = sorted(
+        (cell for cell in tree.all_cells() if cell.name.strip() and cell.nuclei),
+        key=lambda cell: (
+            int(cell.start_time),
+            int(cell.nuclei[0][1].index) if cell.nuclei else -1,
+            cell.name.casefold(),
+            cell.hash_key or "",
+        ),
+    )
+    for cell in ordered_cells:
+        by_time: dict[int, list[int]] = {}
+        for time, nucleus in cell.nuclei:
+            by_time.setdefault(int(time), []).append(int(nucleus.index))
+        for indices in by_time.values():
+            indices.sort()
+        # Malformed legacy lineages can collapse two same-named nuclei at the
+        # same time into one Cell object. Preserve them as explicit duplicate
+        # cached cells rather than dropping one or creating duplicate X rows.
+        lane_count = max((len(indices) for indices in by_time.values()), default=0)
+        for lane in range(lane_count):
+            sample_keys = tuple(
+                (time, indices[lane])
+                for time, indices in sorted(by_time.items())
+                if lane < len(indices)
+            )
+            if not sample_keys:
+                continue
+            base_id = cell.hash_key or f"{sample_keys[0][0]}:{sample_keys[0][1]}"
+            if lane_count > 1:
+                base_id = f"{base_id}:duplicate-{lane + 1}"
+            cell_id = str(base_id)
+            if cell_id in used_ids:
+                suffix = 2
+                while f"{cell_id}#{suffix}" in used_ids:
+                    suffix += 1
+                cell_id = f"{cell_id}#{suffix}"
+            used_ids.add(cell_id)
+            cells.append(
+                FrozenCellMeasurements(
+                    cell_id=cell_id,
+                    cell_name=cell.name,
+                    start_time=min(int(cell.start_time), sample_keys[0][0]),
+                    end_time=max(int(cell.end_time), sample_keys[-1][0]),
+                    sample_keys=sample_keys,
+                )
+            )
+
+    missing: dict[tuple[int, int, int], str] = {}
+    for channel in family.channels:
+        for cell in cells:
+            for time, index in cell.sample_keys:
+                if (time, index) not in channel.samples:
+                    missing[(channel.image_channel, time, index)] = (
+                        "no measurable inner pixels"
+                    )
+
+    return FrozenDatasetMeasurementCache(
+        dataset_id=dataset_id,
+        source_uri=source_uri,
+        source_fingerprint=source_fingerprint,
+        snapshot_token=snapshot_token,
+        dataset_generation=dataset_generation,
+        image_manifest_token=image_manifest_token,
+        measured_at=measured_at,
+        measurement_algorithm_version=EXPRESSION_MEASUREMENT_CACHE_VERSION,
+        source_revision=family.source_revision,
+        source_dependency_fingerprint=family.source_dependency_fingerprint,
+        source_calibration=family.source_calibration,
+        channels=family.channels,
+        cells=tuple(cells),
+        geometries=family.geometries,
+        missing_reasons=missing,
+    )
 
 
 def legacy_expression_coverage(
@@ -584,6 +952,16 @@ def _sample_has_metric(sample: MeasuredExpressionSample, metric: str) -> bool:
     return False
 
 
+def _frozen_corrected_value(
+    sample: MeasuredExpressionAggregate,
+    correction_method: str,
+) -> tuple[float | None, str | None]:
+    # Delegate to the live family derivation so a frozen cache has exact
+    # parity for every RED_CORRECTIONS choice, including its documented
+    # absent-background and local/cross fallback semantics.
+    return float(sample.corrected_value(correction_method)), None
+
+
 def _correction_label(method: str) -> str:
     return {
         "none": "raw",
@@ -595,8 +973,11 @@ def _correction_label(method: str) -> str:
 
 
 __all__ = [
+    "EXPRESSION_MEASUREMENT_CACHE_VERSION",
     "ExpressionMeasurementFamily",
     "ExpressionMeasurementSet",
+    "FrozenCellMeasurements",
+    "FrozenDatasetMeasurementCache",
     "MeasuredExpressionAggregate",
     "MeasuredExpressionAggregateChannel",
     "MeasuredExpressionChannel",
@@ -606,5 +987,6 @@ __all__ = [
     "expression_document_fingerprint",
     "expression_measurement_calibration",
     "expression_measurement_dependency_fingerprint",
+    "freeze_expression_measurement_family",
     "legacy_expression_coverage",
 ]

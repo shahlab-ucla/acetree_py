@@ -4,6 +4,10 @@ An ``.aceexpr`` file stores the materialised native :class:`ExpressionDataset`
 inputs and the comparison specification, not aligned samples or summary rows.
 Consequently an imported capture can rebuild every supported time, grid,
 smoothing, and summary mode without reopening or validating the source XMLs.
+Schema v2 can additionally embed correction-neutral, all-cell/all-channel
+measurement caches.  Those caches allow the cell, physical channel, and
+correction to be changed offline; schema-v1 files remain fixed to their
+materialised trace request.
 
 The JSON envelope is checksummed, duplicate-key rejecting, and written by an
 atomic same-directory replacement.  Capture provenance is immutable across a
@@ -46,16 +50,31 @@ from .expression_comparison import (
     TraceAvailability,
 )
 from .expression_plot import TimeAxisMode
+from .expression_measurements import (
+    EXPRESSION_MEASUREMENT_CACHE_VERSION,
+    FrozenCellMeasurements,
+    FrozenDatasetMeasurementCache,
+    MeasuredExpressionAggregate,
+    MeasuredExpressionAggregateChannel,
+    NucleusGeometrySignature,
+)
 
 
 EXPRESSION_COMPARISON_RESULT_SCHEMA = "acetree.expression-comparison-result"
-EXPRESSION_COMPARISON_RESULT_VERSION = 1
+EXPRESSION_COMPARISON_RESULT_VERSION = 2
+EXPRESSION_COMPARISON_RESULT_LEGACY_VERSION = 1
 EXPRESSION_COMPARISON_RESULT_SUFFIX = ".aceexpr"
 EXPRESSION_COMPARISON_CALCULATION_VERSION = 1
 APPEARANCE_INCLUDED_DATASET_IDS = "included_dataset_ids"
 
 _MAX_FILE_BYTES = 256 * 1024 * 1024
 _MAX_JSON_DEPTH = 64
+_MAX_DATASETS = 10_000
+_MAX_CHANNELS_PER_CACHE = 256
+_MAX_CELLS_PER_CACHE = 2_000_000
+_MAX_SAMPLES_PER_CHANNEL = 100_000_000
+_MAX_GEOMETRIES_PER_CACHE = 100_000_000
+_MAX_MISSING_REASONS_PER_CACHE = 100_000_000
 _TIMESTAMP_PATTERN = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$"
 )
@@ -98,6 +117,7 @@ class ExpressionComparisonResult:
     spec: ComparisonSpec
     appearance: Mapping[str, Any]
     calculation_version: int = EXPRESSION_COMPARISON_CALCULATION_VERSION
+    measurement_caches: tuple[FrozenDatasetMeasurementCache, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "result_id", _uuid_string(self.result_id, "result_id"))
@@ -148,14 +168,63 @@ class ExpressionComparisonResult:
         datasets = tuple(self.datasets)
         if not datasets:
             raise ValueError("an expression comparison result requires datasets")
+        if len(datasets) > _MAX_DATASETS:
+            raise ValueError(f"at most {_MAX_DATASETS} datasets are supported")
         if any(not isinstance(item, ExpressionDataset) for item in datasets):
             raise TypeError("datasets must contain ExpressionDataset objects")
         object.__setattr__(self, "datasets", datasets)
-        _validate_appearance_dataset_inclusion(appearance, datasets)
+        dataset_ids = {
+            item.provenance.dataset_id: item
+            for item in datasets
+        }
+
+        caches = tuple(self.measurement_caches)
+        if len(caches) > _MAX_DATASETS:
+            raise ValueError(f"at most {_MAX_DATASETS} measurement caches are supported")
+        if any(not isinstance(item, FrozenDatasetMeasurementCache) for item in caches):
+            raise TypeError(
+                "measurement_caches must contain FrozenDatasetMeasurementCache objects"
+            )
+        cache_ids = tuple(item.dataset_id for item in caches)
+        if len(set(cache_ids)) != len(cache_ids):
+            raise ValueError("measurement_caches must have unique dataset ids")
+        orphan_cache_ids = set(cache_ids) - set(dataset_ids)
+        if orphan_cache_ids:
+            raise ValueError(
+                "measurement_caches require corresponding default-view datasets: "
+                f"{sorted(orphan_cache_ids)!r}"
+            )
+        for index, cache in enumerate(caches):
+            _timestamp(cache.measured_at, f"measurement_caches[{index}].measured_at")
+            default_dataset = dataset_ids[cache.dataset_id]
+            if (
+                default_dataset.provenance.source_fingerprint
+                != cache.source_fingerprint
+            ):
+                raise ValueError(
+                    "measurement cache source fingerprint does not match its "
+                    f"default-view dataset for {cache.dataset_id!r}"
+                )
+            if (
+                cache.measurement_algorithm_version
+                != EXPRESSION_MEASUREMENT_CACHE_VERSION
+            ):
+                raise ValueError(
+                    "unsupported frozen measurement algorithm version "
+                    f"{cache.measurement_algorithm_version}; expected "
+                    f"{EXPRESSION_MEASUREMENT_CACHE_VERSION}"
+                )
+        object.__setattr__(self, "measurement_caches", caches)
+        _validate_appearance_dataset_inclusion(
+            appearance,
+            datasets,
+            additional_dataset_ids=set(cache_ids),
+        )
 
         spec = _normalise_spec(self.spec)
         object.__setattr__(self, "spec", spec)
         _validate_materialised_inputs(datasets, spec)
+        _validate_cache_default_views(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +246,7 @@ def capture_expression_comparison_result(
     captured_at: str | None = None,
     producer_version: str = __version__,
     result_id: str | None = None,
+    measurement_caches: Iterable[FrozenDatasetMeasurementCache] = (),
 ) -> ExpressionComparisonResult:
     """Capture validated native inputs before their repository is released."""
 
@@ -195,6 +265,259 @@ def capture_expression_comparison_result(
         datasets=tuple(datasets),
         spec=spec,
         appearance=appearance or {},
+        measurement_caches=tuple(measurement_caches),
+    )
+
+
+def materialize_expression_measurement_caches(
+    result: ExpressionComparisonResult,
+    *,
+    cell_name: str,
+    image_channel: int,
+    correction_method: str,
+    dataset_ids: Iterable[str] | None = None,
+    overrides: Mapping[str, Mapping[str, object]] | None = None,
+) -> tuple[ExpressionDataset, ...]:
+    """Materialise one offline request from embedded full-dataset caches.
+
+    This operation is deliberately repository-free. Missing/ambiguous cells,
+    unavailable channels, and partial samples are represented by the cache
+    model as explicit statuses or gaps instead of aborting other datasets.
+    Schema-v1 results have no measurement caches and therefore cannot use this
+    retargeting boundary.
+    """
+
+    if not isinstance(result, ExpressionComparisonResult):
+        raise TypeError("result must be an ExpressionComparisonResult")
+    if not isinstance(cell_name, str) or not cell_name.strip():
+        raise ValueError("cell_name cannot be blank")
+    if type(image_channel) is not int or image_channel < 0:
+        raise ValueError("image_channel must be a non-negative integer")
+    if not isinstance(correction_method, str) or not correction_method.strip():
+        raise ValueError("correction_method cannot be blank")
+    if not result.measurement_caches:
+        raise ValueError(
+            "this result contains only selected traces and cannot change its "
+            "cell, channel, or correction offline"
+        )
+
+    by_id = {cache.dataset_id: cache for cache in result.measurement_caches}
+    selected_ids = tuple(by_id) if dataset_ids is None else tuple(dataset_ids)
+    _validate_dataset_id_selection(selected_ids, set(by_id), "dataset_ids")
+    override_map = _normalise_cache_overrides(overrides, set(by_id))
+    return tuple(
+        by_id[dataset_id].materialize_dataset(
+            cell_name,
+            image_channel,
+            correction_method,
+            overrides=override_map.get(dataset_id),
+        )
+        for dataset_id in selected_ids
+    )
+
+
+def capture_expression_comparison_measurement_caches(
+    measurement_caches: Iterable[FrozenDatasetMeasurementCache],
+    spec: ComparisonSpec,
+    *,
+    cell_name: str,
+    image_channel: int,
+    correction_method: str,
+    acquisition_metadata: Mapping[str, Any] | None = None,
+    appearance: Mapping[str, Any] | None = None,
+    overrides: Mapping[str, Mapping[str, object]] | None = None,
+    captured_at: str | None = None,
+    producer_version: str = __version__,
+    result_id: str | None = None,
+) -> ExpressionComparisonResult:
+    """Create a portable full-cache result with one editable default view."""
+
+    caches = _normalise_measurement_caches(measurement_caches)
+    if not caches:
+        raise ValueError("at least one measurement cache is required")
+    override_map = _normalise_cache_overrides(
+        overrides, {item.dataset_id for item in caches}
+    )
+    materialised = tuple(
+        cache.materialize_dataset(
+            cell_name,
+            image_channel,
+            correction_method,
+            overrides=override_map.get(cache.dataset_id),
+        )
+        for cache in caches
+    )
+    selected_spec = _spec_for_cache_request(
+        spec,
+        materialised,
+        cell_name=cell_name,
+        image_channel=image_channel,
+    )
+    metadata = dict(acquisition_metadata or {})
+    metadata.update(
+        {
+            "source_mode": ExpressionComparisonSourceMode.RECOMPUTED.value,
+            "cell_name": cell_name,
+            "image_channel_one_based": image_channel + 1,
+            "correction_method": correction_method,
+            "capture_scope": "all_cells_all_channels_all_corrections",
+        }
+    )
+    return capture_expression_comparison_result(
+        materialised,
+        selected_spec,
+        source_mode=ExpressionComparisonSourceMode.RECOMPUTED,
+        acquisition_metadata=metadata,
+        appearance=appearance,
+        captured_at=captured_at,
+        producer_version=producer_version,
+        result_id=result_id,
+        measurement_caches=caches,
+    )
+
+
+def revise_expression_comparison_measurement_caches(
+    result: ExpressionComparisonResult,
+    measurement_caches: Iterable[FrozenDatasetMeasurementCache],
+    *,
+    replace_existing: bool = False,
+    cell_name: str | None = None,
+    image_channel: int | None = None,
+    correction_method: str | None = None,
+    spec: ComparisonSpec | None = None,
+    appearance: Mapping[str, Any] | object = _UNSET,
+    overrides: Mapping[str, Mapping[str, object]] | None = None,
+) -> ExpressionComparisonResult:
+    """Append or explicitly replace immutable dataset caches as a child result.
+
+    Existing cache objects and their acquisition provenance are retained
+    unchanged unless their dataset id is present in ``measurement_caches`` and
+    ``replace_existing`` is true. A conflicting id otherwise fails closed.
+    """
+
+    if not isinstance(result, ExpressionComparisonResult):
+        raise TypeError("result must be an ExpressionComparisonResult")
+    incoming = _normalise_measurement_caches(measurement_caches)
+    existing_by_id = {
+        cache.dataset_id: cache for cache in result.measurement_caches
+    }
+    incoming_by_id = {cache.dataset_id: cache for cache in incoming}
+    conflicts = {
+        dataset_id
+        for dataset_id, cache in incoming_by_id.items()
+        if dataset_id in existing_by_id and existing_by_id[dataset_id] != cache
+    }
+    if conflicts and not replace_existing:
+        raise ValueError(
+            "measurement cache dataset ids already exist with different content: "
+            f"{sorted(conflicts)!r}; pass replace_existing=True to replace them"
+        )
+
+    merged: list[FrozenDatasetMeasurementCache] = []
+    for cache in result.measurement_caches:
+        replacement = incoming_by_id.get(cache.dataset_id)
+        merged.append(replacement if replacement is not None else cache)
+    existing_ids = set(existing_by_id)
+    merged.extend(cache for cache in incoming if cache.dataset_id not in existing_ids)
+    merged_caches = tuple(merged)
+    if not merged_caches:
+        raise ValueError("a cache revision requires at least one measurement cache")
+
+    default_cell, default_channel, default_correction = _default_cache_request(result)
+    selected_cell = default_cell if cell_name is None else cell_name
+    selected_channel = default_channel if image_channel is None else image_channel
+    selected_correction = (
+        default_correction if correction_method is None else correction_method
+    )
+    explicit_request_change = (
+        selected_cell != default_cell
+        or selected_channel != default_channel
+        or selected_correction != default_correction
+    )
+    known_ids = {cache.dataset_id for cache in merged_caches}
+    uncached_datasets = tuple(
+        dataset
+        for dataset in result.datasets
+        if dataset.provenance.dataset_id not in known_ids
+    )
+    if explicit_request_change and uncached_datasets:
+        raise ValueError(
+            "cannot retarget selected-trace datasets that have no full measurement cache"
+        )
+
+    override_map = _presentation_overrides(result.datasets)
+    override_map.update(_normalise_cache_overrides(overrides, known_ids))
+    materialised_by_id = {
+        cache.dataset_id: cache.materialize_dataset(
+            selected_cell,
+            selected_channel,
+            selected_correction,
+            overrides=override_map.get(cache.dataset_id),
+        )
+        for cache in merged_caches
+    }
+    revised_datasets: list[ExpressionDataset] = []
+    seen: set[str] = set()
+    for dataset in result.datasets:
+        dataset_id = dataset.provenance.dataset_id
+        revised_datasets.append(materialised_by_id.get(dataset_id, dataset))
+        seen.add(dataset_id)
+    for cache in merged_caches:
+        if cache.dataset_id not in seen:
+            revised_datasets.append(materialised_by_id[cache.dataset_id])
+            seen.add(cache.dataset_id)
+
+    base_spec = result.spec if spec is None else _normalise_spec(spec)
+    revised_spec = _spec_for_cache_request(
+        base_spec,
+        tuple(revised_datasets),
+        cell_name=selected_cell,
+        image_channel=selected_channel,
+    )
+    next_appearance = result.appearance if appearance is _UNSET else appearance
+    if not isinstance(next_appearance, Mapping):
+        raise TypeError("appearance must be a mapping")
+    metadata = dict(result.acquisition_metadata)
+    metadata.update(
+        {
+            "source_mode": (
+                ExpressionComparisonSourceMode.RECOMPUTED.value
+                if not uncached_datasets
+                else ExpressionComparisonSourceMode.MIXED.value
+            ),
+            "cell_name": selected_cell,
+            "image_channel_one_based": selected_channel + 1,
+            "correction_method": selected_correction,
+            "capture_scope": (
+                "all_cells_all_channels_all_corrections"
+                if not uncached_datasets
+                else "mixed_full_cache_and_selected_traces"
+            ),
+        }
+    )
+    mode = (
+        ExpressionComparisonSourceMode.RECOMPUTED
+        if not uncached_datasets
+        else ExpressionComparisonSourceMode.MIXED
+    )
+    cache_payload_unchanged = merged_caches == result.measurement_caches
+    return ExpressionComparisonResult(
+        result_id=str(uuid.uuid4()),
+        parent_result_id=result.result_id,
+        captured_at=(result.captured_at if cache_payload_unchanged else _utc_now()),
+        saved_at=None,
+        producer_version=(
+            result.producer_version if cache_payload_unchanged else __version__
+        ),
+        saved_by_version="",
+        source_mode=mode,
+        acquisition_metadata=metadata,
+        legacy_acknowledged=result.legacy_acknowledged,
+        datasets=tuple(revised_datasets),
+        spec=revised_spec,
+        appearance=next_appearance,
+        measurement_caches=merged_caches,
+        calculation_version=result.calculation_version,
     )
 
 
@@ -272,6 +595,11 @@ def save_expression_comparison_result(
         )
 
     text = _encode_envelope(persisted)
+    encoded_size = len(text.encode("utf-8"))
+    if encoded_size > _MAX_FILE_BYTES:
+        raise ValueError(
+            f"Expression comparison result exceeds {_MAX_FILE_BYTES} bytes"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=destination.parent,
@@ -334,10 +662,15 @@ def load_expression_comparison_result(
             f"Unsupported expression comparison schema: {schema!r}"
         )
     version = _integer(envelope["schema_version"], "schema_version")
-    if version != EXPRESSION_COMPARISON_RESULT_VERSION:
+    if version not in (
+        EXPRESSION_COMPARISON_RESULT_LEGACY_VERSION,
+        EXPRESSION_COMPARISON_RESULT_VERSION,
+    ):
         raise ExpressionComparisonResultFormatError(
             "Unsupported expression comparison schema version "
-            f"{version}; expected {EXPRESSION_COMPARISON_RESULT_VERSION}"
+            f"{version}; expected one of "
+            f"{EXPRESSION_COMPARISON_RESULT_LEGACY_VERSION}, "
+            f"{EXPRESSION_COMPARISON_RESULT_VERSION}"
         )
 
     checksum = _mapping(envelope["checksum"], "checksum")
@@ -358,7 +691,7 @@ def load_expression_comparison_result(
         )
 
     try:
-        result = _result_from_payload(envelope["result"])
+        result = _result_from_payload(envelope["result"], schema_version=version)
     except ExpressionComparisonResultFormatError:
         raise
     except (TypeError, ValueError, KeyError) as error:
@@ -434,6 +767,65 @@ def build_expression_comparison_data(
     )
 
 
+def build_expression_comparison_cache_data(
+    result: ExpressionComparisonResult,
+    *,
+    cell_name: str,
+    image_channel: int,
+    correction_method: str,
+    spec: ComparisonSpec | None = None,
+    service: ExpressionComparisonService | None = None,
+    included_dataset_ids: Iterable[str] | None = None,
+    overrides: Mapping[str, Mapping[str, object]] | None = None,
+) -> ExpressionComparisonData:
+    """Build a comparison for any request embedded in schema-v2 caches."""
+
+    cache_ids = tuple(cache.dataset_id for cache in result.measurement_caches)
+    if included_dataset_ids is None:
+        configured = result.appearance.get(APPEARANCE_INCLUDED_DATASET_IDS)
+        if configured is None:
+            included = cache_ids
+        else:
+            included = tuple(
+                dataset_id for dataset_id in configured if dataset_id in cache_ids
+            )
+    else:
+        included = tuple(included_dataset_ids)
+    if not included:
+        raise ValueError("at least one cached dataset must be included")
+    datasets = materialize_expression_measurement_caches(
+        result,
+        cell_name=cell_name,
+        image_channel=image_channel,
+        correction_method=correction_method,
+        dataset_ids=included,
+        overrides=overrides,
+    )
+    selected = _spec_for_cache_request(
+        result.spec if spec is None else _normalise_spec(spec),
+        datasets,
+        cell_name=cell_name,
+        image_channel=image_channel,
+    )
+    _validate_materialised_inputs(datasets, selected)
+    return (service or ExpressionComparisonService()).build(
+        datasets,
+        cell_names=selected.cell_names,
+        channel_key=selected.channel_key,
+        channel_label=selected.channel_label,
+        channel_unit=selected.channel_unit,
+        channel_bindings=dict(selected.channel_bindings),
+        cell_aliases={
+            (dataset_id, canonical_cell): source_cell
+            for dataset_id, canonical_cell, source_cell in selected.cell_aliases
+        },
+        time_mode=selected.time_mode,
+        grid=selected.grid,
+        smoothing=selected.smoothing,
+        summary=selected.summary,
+    )
+
+
 def _encode_envelope(result: ExpressionComparisonResult) -> str:
     if result.saved_at is None:
         raise ValueError("cannot encode an expression comparison before it is saved")
@@ -447,13 +839,18 @@ def _encode_envelope(result: ExpressionComparisonResult) -> str:
         },
         "result": payload,
     }
-    return json.dumps(
-        envelope,
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-        allow_nan=False,
-    ) + "\n"
+    options: dict[str, Any] = {
+        "ensure_ascii": False,
+        "sort_keys": True,
+        "allow_nan": False,
+    }
+    if result.measurement_caches:
+        # Full caches contain large numeric arrays; whitespace can otherwise
+        # multiply portable file size without improving machine readability.
+        options["separators"] = (",", ":")
+    else:
+        options["indent"] = 2
+    return json.dumps(envelope, **options) + "\n"
 
 
 def _result_to_payload(result: ExpressionComparisonResult) -> dict[str, Any]:
@@ -471,10 +868,18 @@ def _result_to_payload(result: ExpressionComparisonResult) -> dict[str, Any]:
         "appearance": _thaw_json(result.appearance),
         "spec": _spec_to_payload(result.spec),
         "datasets": [_dataset_to_payload(item) for item in result.datasets],
+        "measurement_caches": [
+            _measurement_cache_to_payload(item)
+            for item in result.measurement_caches
+        ],
     }
 
 
-def _result_from_payload(value: Any) -> ExpressionComparisonResult:
+def _result_from_payload(
+    value: Any,
+    *,
+    schema_version: int,
+) -> ExpressionComparisonResult:
     data = _mapping(value, "result")
     fields = {
         "result_id",
@@ -491,6 +896,8 @@ def _result_from_payload(value: Any) -> ExpressionComparisonResult:
         "spec",
         "datasets",
     }
+    if schema_version >= 2:
+        fields.add("measurement_caches")
     _exact_keys(data, fields, "result")
     parent = data["parent_result_id"]
     saved_at = data["saved_at"]
@@ -532,9 +939,374 @@ def _result_from_payload(value: Any) -> ExpressionComparisonResult:
         datasets=tuple(
             _dataset_from_payload(item, index)
             for index, item in enumerate(
-                _sequence(data["datasets"], "result.datasets")
+                _bounded_sequence(
+                    data["datasets"],
+                    "result.datasets",
+                    maximum=_MAX_DATASETS,
+                )
             )
         ),
+        measurement_caches=(
+            ()
+            if schema_version == EXPRESSION_COMPARISON_RESULT_LEGACY_VERSION
+            else tuple(
+                _measurement_cache_from_payload(
+                    item,
+                    f"result.measurement_caches[{index}]",
+                )
+                for index, item in enumerate(
+                    _bounded_sequence(
+                        data["measurement_caches"],
+                        "result.measurement_caches",
+                        maximum=_MAX_DATASETS,
+                    )
+                )
+            )
+        ),
+    )
+
+
+def _measurement_cache_to_payload(
+    cache: FrozenDatasetMeasurementCache,
+) -> dict[str, Any]:
+    return {
+        "dataset_id": cache.dataset_id,
+        "source_uri": cache.source_uri,
+        "source_fingerprint": cache.source_fingerprint,
+        "snapshot_token": cache.snapshot_token,
+        "dataset_generation": cache.dataset_generation,
+        "image_manifest_token": cache.image_manifest_token,
+        "measured_at": cache.measured_at,
+        "measurement_algorithm_version": cache.measurement_algorithm_version,
+        "source_revision": cache.source_revision,
+        "source_dependency_fingerprint": cache.source_dependency_fingerprint,
+        "source_calibration": list(cache.source_calibration),
+        "channels": [
+            {
+                "image_channel": channel.image_channel,
+                "label": channel.label,
+                "samples": [
+                    [
+                        time,
+                        nucleus_index,
+                        sample.raw,
+                        sample.annulus_background,
+                        sample.blot_background,
+                        sample.inner_pixel_count,
+                        sample.annulus_pixel_count,
+                        sample.blot_pixel_count,
+                    ]
+                    for (time, nucleus_index), sample in sorted(
+                        channel.samples.items()
+                    )
+                ],
+            }
+            for channel in cache.channels
+        ],
+        "cells": [
+            {
+                "cell_id": cell.cell_id,
+                "cell_name": cell.cell_name,
+                "start_time": cell.start_time,
+                "end_time": cell.end_time,
+                "sample_keys": [list(key) for key in cell.sample_keys],
+            }
+            for cell in cache.cells
+        ],
+        "geometries": [
+            [
+                time,
+                nucleus_index,
+                geometry.x,
+                geometry.y,
+                geometry.z,
+                geometry.size,
+                geometry.status,
+            ]
+            for (time, nucleus_index), geometry in sorted(cache.geometries.items())
+        ],
+        "missing_reasons": [
+            [image_channel, time, nucleus_index, reason]
+            for (image_channel, time, nucleus_index), reason in sorted(
+                cache.missing_reasons.items()
+            )
+        ],
+    }
+
+
+def _measurement_cache_from_payload(
+    value: Any,
+    label: str,
+) -> FrozenDatasetMeasurementCache:
+    data = _mapping(value, label)
+    _exact_keys(
+        data,
+        {
+            "dataset_id",
+            "source_uri",
+            "source_fingerprint",
+            "snapshot_token",
+            "dataset_generation",
+            "image_manifest_token",
+            "measured_at",
+            "measurement_algorithm_version",
+            "source_revision",
+            "source_dependency_fingerprint",
+            "source_calibration",
+            "channels",
+            "cells",
+            "geometries",
+            "missing_reasons",
+        },
+        label,
+    )
+    calibration = _bounded_sequence(
+        data["source_calibration"],
+        f"{label}.source_calibration",
+        maximum=4,
+    )
+    if len(calibration) != 4:
+        raise ExpressionComparisonResultFormatError(
+            f"{label}.source_calibration must contain four values"
+        )
+
+    channels: list[MeasuredExpressionAggregateChannel] = []
+    seen_channels: set[int] = set()
+    for channel_index, raw_channel in enumerate(
+        _bounded_sequence(
+            data["channels"],
+            f"{label}.channels",
+            maximum=_MAX_CHANNELS_PER_CACHE,
+        )
+    ):
+        channel_label = f"{label}.channels[{channel_index}]"
+        channel_data = _mapping(raw_channel, channel_label)
+        _exact_keys(
+            channel_data,
+            {"image_channel", "label", "samples"},
+            channel_label,
+        )
+        image_channel = _nonnegative_integer(
+            channel_data["image_channel"], f"{channel_label}.image_channel"
+        )
+        if image_channel in seen_channels:
+            raise ExpressionComparisonResultFormatError(
+                f"{label} has duplicate image channel {image_channel}"
+            )
+        seen_channels.add(image_channel)
+        samples: dict[tuple[int, int], MeasuredExpressionAggregate] = {}
+        for sample_index, raw_sample in enumerate(
+            _bounded_sequence(
+                channel_data["samples"],
+                f"{channel_label}.samples",
+                maximum=_MAX_SAMPLES_PER_CHANNEL,
+            )
+        ):
+            sample_label = f"{channel_label}.samples[{sample_index}]"
+            row = _sequence(raw_sample, sample_label)
+            if len(row) != 8:
+                raise ExpressionComparisonResultFormatError(
+                    f"{sample_label} must contain eight values"
+                )
+            key = (
+                _nonnegative_integer(row[0], f"{sample_label}[0]"),
+                _nonnegative_integer(row[1], f"{sample_label}[1]"),
+            )
+            if key in samples:
+                raise ExpressionComparisonResultFormatError(
+                    f"{channel_label} has duplicate sample key {key!r}"
+                )
+            samples[key] = MeasuredExpressionAggregate(
+                raw=_number(row[2], f"{sample_label}[2]"),
+                annulus_background=(
+                    None
+                    if row[3] is None
+                    else _number(row[3], f"{sample_label}[3]")
+                ),
+                blot_background=(
+                    None
+                    if row[4] is None
+                    else _number(row[4], f"{sample_label}[4]")
+                ),
+                inner_pixel_count=_nonnegative_integer(
+                    row[5], f"{sample_label}[5]"
+                ),
+                annulus_pixel_count=_nonnegative_integer(
+                    row[6], f"{sample_label}[6]"
+                ),
+                blot_pixel_count=_nonnegative_integer(
+                    row[7], f"{sample_label}[7]"
+                ),
+            )
+        channels.append(
+            MeasuredExpressionAggregateChannel(
+                image_channel=image_channel,
+                label=_string(channel_data["label"], f"{channel_label}.label"),
+                samples=samples,
+            )
+        )
+
+    cells: list[FrozenCellMeasurements] = []
+    seen_cell_ids: set[str] = set()
+    for cell_index, raw_cell in enumerate(
+        _bounded_sequence(
+            data["cells"],
+            f"{label}.cells",
+            maximum=_MAX_CELLS_PER_CACHE,
+        )
+    ):
+        cell_label = f"{label}.cells[{cell_index}]"
+        cell_data = _mapping(raw_cell, cell_label)
+        _exact_keys(
+            cell_data,
+            {"cell_id", "cell_name", "start_time", "end_time", "sample_keys"},
+            cell_label,
+        )
+        cell_id = _string(cell_data["cell_id"], f"{cell_label}.cell_id")
+        if cell_id in seen_cell_ids:
+            raise ExpressionComparisonResultFormatError(
+                f"{label} has duplicate cell_id {cell_id!r}"
+            )
+        seen_cell_ids.add(cell_id)
+        sample_keys: list[tuple[int, int]] = []
+        seen_sample_keys: set[tuple[int, int]] = set()
+        for key_index, raw_key in enumerate(
+            _bounded_sequence(
+                cell_data["sample_keys"],
+                f"{cell_label}.sample_keys",
+                maximum=_MAX_SAMPLES_PER_CHANNEL,
+            )
+        ):
+            key_label = f"{cell_label}.sample_keys[{key_index}]"
+            key_row = _sequence(raw_key, key_label)
+            if len(key_row) != 2:
+                raise ExpressionComparisonResultFormatError(
+                    f"{key_label} must contain time and nucleus index"
+                )
+            key = (
+                _nonnegative_integer(key_row[0], f"{key_label}[0]"),
+                _nonnegative_integer(key_row[1], f"{key_label}[1]"),
+            )
+            if key in seen_sample_keys:
+                raise ExpressionComparisonResultFormatError(
+                    f"{cell_label} has duplicate sample key {key!r}"
+                )
+            seen_sample_keys.add(key)
+            sample_keys.append(key)
+        cells.append(
+            FrozenCellMeasurements(
+                cell_id=cell_id,
+                cell_name=_string(
+                    cell_data["cell_name"], f"{cell_label}.cell_name"
+                ),
+                start_time=_nonnegative_integer(
+                    cell_data["start_time"], f"{cell_label}.start_time"
+                ),
+                end_time=_nonnegative_integer(
+                    cell_data["end_time"], f"{cell_label}.end_time"
+                ),
+                sample_keys=tuple(sample_keys),
+            )
+        )
+
+    geometries: dict[tuple[int, int], NucleusGeometrySignature] = {}
+    for geometry_index, raw_geometry in enumerate(
+        _bounded_sequence(
+            data["geometries"],
+            f"{label}.geometries",
+            maximum=_MAX_GEOMETRIES_PER_CACHE,
+        )
+    ):
+        geometry_label = f"{label}.geometries[{geometry_index}]"
+        row = _sequence(raw_geometry, geometry_label)
+        if len(row) != 7:
+            raise ExpressionComparisonResultFormatError(
+                f"{geometry_label} must contain seven values"
+            )
+        key = (
+            _nonnegative_integer(row[0], f"{geometry_label}[0]"),
+            _nonnegative_integer(row[1], f"{geometry_label}[1]"),
+        )
+        if key in geometries:
+            raise ExpressionComparisonResultFormatError(
+                f"{label} has duplicate geometry key {key!r}"
+            )
+        geometries[key] = NucleusGeometrySignature(
+            x=_integer(row[2], f"{geometry_label}[2]"),
+            y=_integer(row[3], f"{geometry_label}[3]"),
+            z=_number(row[4], f"{geometry_label}[4]"),
+            size=_nonnegative_integer(row[5], f"{geometry_label}[5]"),
+            status=_integer(row[6], f"{geometry_label}[6]"),
+        )
+
+    missing_reasons: dict[tuple[int, int, int], str] = {}
+    for reason_index, raw_reason in enumerate(
+        _bounded_sequence(
+            data["missing_reasons"],
+            f"{label}.missing_reasons",
+            maximum=_MAX_MISSING_REASONS_PER_CACHE,
+        )
+    ):
+        reason_label = f"{label}.missing_reasons[{reason_index}]"
+        row = _sequence(raw_reason, reason_label)
+        if len(row) != 4:
+            raise ExpressionComparisonResultFormatError(
+                f"{reason_label} must contain four values"
+            )
+        key = (
+            _nonnegative_integer(row[0], f"{reason_label}[0]"),
+            _nonnegative_integer(row[1], f"{reason_label}[1]"),
+            _nonnegative_integer(row[2], f"{reason_label}[2]"),
+        )
+        if key in missing_reasons:
+            raise ExpressionComparisonResultFormatError(
+                f"{label} has duplicate missing-reason key {key!r}"
+            )
+        reason = _string(row[3], f"{reason_label}[3]")
+        if not reason.strip():
+            raise ExpressionComparisonResultFormatError(
+                f"{reason_label}[3] cannot be blank"
+            )
+        missing_reasons[key] = reason
+
+    manifest = data["image_manifest_token"]
+    return FrozenDatasetMeasurementCache(
+        dataset_id=_string(data["dataset_id"], f"{label}.dataset_id"),
+        source_uri=_string(data["source_uri"], f"{label}.source_uri"),
+        source_fingerprint=_string(
+            data["source_fingerprint"], f"{label}.source_fingerprint"
+        ),
+        snapshot_token=_string(data["snapshot_token"], f"{label}.snapshot_token"),
+        dataset_generation=_nonnegative_integer(
+            data["dataset_generation"], f"{label}.dataset_generation"
+        ),
+        image_manifest_token=(
+            None
+            if manifest is None
+            else _string(manifest, f"{label}.image_manifest_token")
+        ),
+        measured_at=_timestamp(data["measured_at"], f"{label}.measured_at"),
+        measurement_algorithm_version=_nonnegative_integer(
+            data["measurement_algorithm_version"],
+            f"{label}.measurement_algorithm_version",
+        ),
+        source_revision=_nonnegative_integer(
+            data["source_revision"], f"{label}.source_revision"
+        ),
+        source_dependency_fingerprint=_string(
+            data["source_dependency_fingerprint"],
+            f"{label}.source_dependency_fingerprint",
+        ),
+        source_calibration=(
+            _number(calibration[0], f"{label}.source_calibration[0]"),
+            _number(calibration[1], f"{label}.source_calibration[1]"),
+            _integer(calibration[2], f"{label}.source_calibration[2]"),
+            _number(calibration[3], f"{label}.source_calibration[3]"),
+        ),
+        channels=tuple(channels),
+        cells=tuple(cells),
+        geometries=geometries,
+        missing_reasons=missing_reasons,
     )
 
 
@@ -940,6 +1712,219 @@ def _normalise_spec(spec: ComparisonSpec) -> ComparisonSpec:
     )
 
 
+def _normalise_measurement_caches(
+    values: Iterable[FrozenDatasetMeasurementCache],
+) -> tuple[FrozenDatasetMeasurementCache, ...]:
+    caches = tuple(values)
+    if len(caches) > _MAX_DATASETS:
+        raise ValueError(f"at most {_MAX_DATASETS} measurement caches are supported")
+    if any(not isinstance(item, FrozenDatasetMeasurementCache) for item in caches):
+        raise TypeError(
+            "measurement_caches must contain FrozenDatasetMeasurementCache objects"
+        )
+    ids = tuple(item.dataset_id for item in caches)
+    if len(set(ids)) != len(ids):
+        raise ValueError("measurement cache dataset ids must be unique")
+    return caches
+
+
+def _normalise_cache_overrides(
+    value: Mapping[str, Mapping[str, object]] | None,
+    known_dataset_ids: set[str],
+) -> dict[str, dict[str, object]]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError("overrides must be a mapping")
+    if any(not isinstance(key, str) or not key.strip() for key in value):
+        raise ValueError("override dataset ids must be non-blank strings")
+    unknown = set(value) - known_dataset_ids
+    if unknown:
+        raise ValueError(f"overrides reference unknown cache datasets: {sorted(unknown)!r}")
+    output: dict[str, dict[str, object]] = {}
+    allowed = {"label", "group_id", "series_label", "color"}
+    for dataset_id, raw in value.items():
+        if not isinstance(dataset_id, str) or not dataset_id.strip():
+            raise ValueError("override dataset ids cannot be blank")
+        if not isinstance(raw, Mapping):
+            raise TypeError(f"overrides[{dataset_id!r}] must be a mapping")
+        if any(not isinstance(key, str) for key in raw):
+            raise TypeError(f"overrides[{dataset_id!r}] field names must be strings")
+        extra = set(raw) - allowed
+        if extra:
+            raise ValueError(
+                f"overrides[{dataset_id!r}] has unsupported fields: {sorted(extra)!r}"
+            )
+        output[dataset_id] = dict(raw)
+    return output
+
+
+def _validate_dataset_id_selection(
+    selected: tuple[str, ...],
+    known: set[str],
+    label: str,
+) -> None:
+    if not selected:
+        raise ValueError(f"{label} cannot be empty")
+    if any(not isinstance(item, str) or not item.strip() for item in selected):
+        raise ValueError(f"{label} must contain non-blank strings")
+    if len(set(selected)) != len(selected):
+        raise ValueError(f"{label} must be unique")
+    unknown = set(selected) - known
+    if unknown:
+        raise ValueError(f"{label} contains unknown datasets: {sorted(unknown)!r}")
+
+
+def _spec_for_cache_request(
+    base: ComparisonSpec,
+    datasets: tuple[ExpressionDataset, ...],
+    *,
+    cell_name: str,
+    image_channel: int,
+) -> ComparisonSpec:
+    base = _normalise_spec(base)
+    if not isinstance(cell_name, str) or not cell_name.strip():
+        raise ValueError("cell_name cannot be blank")
+    if type(image_channel) is not int or image_channel < 0:
+        raise ValueError("image_channel must be a non-negative integer")
+    traces = tuple(trace for dataset in datasets for trace in dataset.traces)
+    if traces:
+        channel_key = traces[0].channel_key
+        channel_label = traces[0].channel_label or f"Channel {image_channel + 1}"
+        channel_unit = traces[0].channel_unit
+        if any(trace.channel_key != channel_key for trace in traces):
+            raise ValueError("materialized caches returned inconsistent channel keys")
+        if any(trace.channel_unit != channel_unit for trace in traces):
+            raise ValueError("materialized caches returned inconsistent channel units")
+    else:
+        channel_key = f"measured_channel_{image_channel + 1}"
+        channel_label = f"Channel {image_channel + 1}"
+        channel_unit = "scaled mean intensity"
+    return replace(
+        base,
+        cell_names=(cell_name,),
+        channel_key=channel_key,
+        channel_label=channel_label,
+        channel_unit=channel_unit,
+        channel_bindings=(),
+        cell_aliases=(),
+    )
+
+
+def _default_cache_request(
+    result: ExpressionComparisonResult,
+) -> tuple[str, int, str]:
+    metadata = result.acquisition_metadata
+    raw_cell = metadata.get("cell_name")
+    cell_name = (
+        raw_cell
+        if isinstance(raw_cell, str) and raw_cell.strip()
+        else result.spec.cell_names[0]
+    )
+    raw_channel = metadata.get("image_channel_one_based")
+    if type(raw_channel) is int and raw_channel >= 1:
+        image_channel = raw_channel - 1
+    else:
+        match = re.fullmatch(r"measured_channel_(\d+)", result.spec.channel_key)
+        image_channel = max(0, int(match.group(1)) - 1) if match else 0
+    raw_correction = metadata.get("correction_method")
+    correction = (
+        raw_correction
+        if isinstance(raw_correction, str) and raw_correction.strip()
+        else "global"
+    )
+    return cell_name, image_channel, correction
+
+
+def _validate_cache_default_views(result: ExpressionComparisonResult) -> None:
+    """Require the compact default view to agree with its cache authority.
+
+    Schema v2 keeps one materialized request so legacy comparison code can
+    open a useful default immediately, but the correction-neutral cache is the
+    reusable numeric authority.  Rejecting divergence prevents different APIs
+    from plotting different values from one checksum-valid file.
+    """
+
+    if not result.measurement_caches:
+        return
+    cell_name, image_channel, correction_method = _default_cache_request(result)
+    datasets_by_id = {
+        dataset.provenance.dataset_id: dataset for dataset in result.datasets
+    }
+    for cache in result.measurement_caches:
+        actual = datasets_by_id[cache.dataset_id]
+        expected = cache.materialize_dataset(
+            cell_name,
+            image_channel,
+            correction_method,
+        )
+        if _cache_default_view_signature(actual) != _cache_default_view_signature(
+            expected
+        ):
+            raise ValueError(
+                "measurement cache does not match its materialized default view "
+                f"for dataset {cache.dataset_id!r}"
+            )
+
+
+def _cache_default_view_signature(dataset: ExpressionDataset) -> tuple[Any, ...]:
+    """Return acquisition/numeric fields, excluding presentation overrides."""
+
+    provenance = dataset.provenance
+    traces = tuple(
+        (
+            trace.cell_name,
+            trace.channel_key,
+            trace.channel_label,
+            trace.channel_unit,
+            trace.absolute_times,
+            trace.values,
+            trace.birth_time,
+            trace.end_time,
+            trace.missing_reasons,
+        )
+        for trace in dataset.traces
+    )
+    statuses = tuple(
+        (
+            status.cell_name,
+            status.channel_key,
+            status.availability,
+            status.message,
+        )
+        for status in dataset.acquisition_statuses
+    )
+    return (
+        provenance.dataset_id,
+        provenance.source_uri,
+        provenance.source_fingerprint,
+        provenance.source_revision,
+        provenance.metadata,
+        traces,
+        statuses,
+    )
+
+
+def _presentation_overrides(
+    datasets: tuple[ExpressionDataset, ...],
+) -> dict[str, dict[str, object]]:
+    output: dict[str, dict[str, object]] = {}
+    for dataset in datasets:
+        source = dataset.provenance
+        values: dict[str, object] = {
+            "label": source.label,
+            "group_id": source.group_id,
+        }
+        color = next(
+            (trace.color for trace in dataset.traces if trace.color is not None),
+            None,
+        )
+        if color is not None:
+            values["color"] = color
+        output[source.dataset_id] = values
+    return output
+
+
 def _validate_materialised_inputs(
     datasets: tuple[ExpressionDataset, ...], spec: ComparisonSpec
 ) -> None:
@@ -1049,6 +2034,8 @@ def _validate_materialised_inputs(
 def _validate_appearance_dataset_inclusion(
     appearance: Mapping[str, Any],
     datasets: tuple[ExpressionDataset, ...],
+    *,
+    additional_dataset_ids: set[str] | None = None,
 ) -> None:
     raw = appearance.get(APPEARANCE_INCLUDED_DATASET_IDS)
     if raw is None:
@@ -1069,6 +2056,7 @@ def _validate_appearance_dataset_inclusion(
             f"appearance.{APPEARANCE_INCLUDED_DATASET_IDS} must be unique"
         )
     known = {dataset.provenance.dataset_id for dataset in datasets}
+    known.update(additional_dataset_ids or ())
     unknown = set(raw) - known
     if unknown:
         raise ValueError(
@@ -1261,6 +2249,20 @@ def _sequence(value: Any, label: str) -> Sequence[Any]:
     return value
 
 
+def _bounded_sequence(
+    value: Any,
+    label: str,
+    *,
+    maximum: int,
+) -> Sequence[Any]:
+    sequence = _sequence(value, label)
+    if len(sequence) > maximum:
+        raise ExpressionComparisonResultFormatError(
+            f"{label} contains {len(sequence)} items; maximum is {maximum}"
+        )
+    return sequence
+
+
 def _exact_keys(value: Mapping[str, Any], expected: set[str], label: str) -> None:
     actual = set(value)
     missing = expected - actual
@@ -1291,6 +2293,15 @@ def _integer(value: Any, label: str) -> int:
     if type(value) is not int:
         raise ExpressionComparisonResultFormatError(f"{label} must be an integer")
     return value
+
+
+def _nonnegative_integer(value: Any, label: str) -> int:
+    parsed = _integer(value, label)
+    if parsed < 0:
+        raise ExpressionComparisonResultFormatError(
+            f"{label} must be non-negative"
+        )
+    return parsed
 
 
 def _number(value: Any, label: str) -> float:
@@ -1391,6 +2402,7 @@ __all__ = [
     "APPEARANCE_INCLUDED_DATASET_IDS",
     "EXPRESSION_COMPARISON_CALCULATION_VERSION",
     "EXPRESSION_COMPARISON_RESULT_SCHEMA",
+    "EXPRESSION_COMPARISON_RESULT_LEGACY_VERSION",
     "EXPRESSION_COMPARISON_RESULT_SUFFIX",
     "EXPRESSION_COMPARISON_RESULT_VERSION",
     "ExpressionComparisonResult",
@@ -1398,8 +2410,12 @@ __all__ = [
     "ExpressionComparisonSourceMode",
     "SavedExpressionComparisonResult",
     "build_expression_comparison_data",
+    "build_expression_comparison_cache_data",
     "capture_expression_comparison_result",
+    "capture_expression_comparison_measurement_caches",
     "load_expression_comparison_result",
+    "materialize_expression_measurement_caches",
     "revise_expression_comparison_result",
+    "revise_expression_comparison_measurement_caches",
     "save_expression_comparison_result",
 ]

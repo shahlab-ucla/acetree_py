@@ -21,6 +21,7 @@ import os
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from numbers import Real
 from pathlib import Path
@@ -39,6 +40,8 @@ from ..io.image_provider import (
 from .expression_measurements import (
     ExpressionMeasurementFamily,
     ExpressionMeasurementSet,
+    FrozenDatasetMeasurementCache,
+    freeze_expression_measurement_family,
     legacy_expression_coverage,
 )
 from .expression_plot import DEFAULT_EXPRESSION_CHANNELS, ExpressionChannel
@@ -104,6 +107,10 @@ class MeasurementBackendUnavailableError(ExpressionDatasetRepositoryError):
 
 class MeasurementComputationError(ExpressionDatasetRepositoryError):
     """The in-memory measurement backend failed."""
+
+
+class RecomputedCacheUnavailableError(ExpressionDatasetRepositoryError):
+    """No complete full-dataset recomputation cache has been prepared."""
 
 
 class ExpressionTraceSource(str, Enum):
@@ -198,6 +205,7 @@ class _DatasetEntry:
     image_manifest_provider: ImageProvider | None = None
     image_manifest_token: str | None = None
     measurement_family: ExpressionMeasurementFamily | None = None
+    recomputed_cache: FrozenDatasetMeasurementCache | None = None
     measurements_by_correction: dict[str, ExpressionMeasurementSet] = field(
         default_factory=dict
     )
@@ -313,6 +321,7 @@ class ExpressionDatasetRepository:
                     self._entries.pop(key, None)
                     self._close_provider(existing)
                     existing.measurement_family = None
+                    existing.recomputed_cache = None
                     existing.measurements_by_correction.clear()
         # Loading below creates a new generation even when every on-disk stat
         # happens to be identical.
@@ -491,11 +500,11 @@ class ExpressionDatasetRepository:
                     )
                     values.append(_finite_float(value, canonical_cell_name, time))
             except ExpressionDataIncompleteError:
-                # A transient unreadable stack must be retryable without an
-                # explicit source reload.  Do not retain a known-incomplete
-                # all-channel correction snapshot indefinitely.
-                entry.measurement_family = None
-                entry.measurements_by_correction.clear()
+                # A completed movie pass is still authoritative about gaps.
+                # Preserve its all-cell cache so a permanently unavailable
+                # sample cannot trigger an expensive reread on every request.
+                if family is None:
+                    entry.measurements_by_correction.pop(method, None)
                 raise
 
             # Fresh measurement reads external files and needs a post-read
@@ -529,6 +538,75 @@ class ExpressionDatasetRepository:
                 image_manifest_token=entry.image_manifest_token,
             )
 
+    def prepare_recomputed_cache(
+        self,
+        config_path: str | Path,
+        *,
+        force: bool = False,
+        progress_cb: ProgressCallback | None = None,
+    ) -> FrozenDatasetMeasurementCache:
+        """Ensure and return a complete all-cell/all-channel cache.
+
+        ``force=True`` computes a replacement in isolation and publishes it
+        only after the full movie pass and source validation succeed.  A
+        cancellation or failure therefore leaves the previous good cache
+        available.
+        """
+
+        with self._locked_entry(
+            config_path,
+            exclusive_operation="expression recomputation",
+        ) as entry:
+            self._assert_source_current(entry)
+            cached = entry.recomputed_cache
+            if (
+                not force
+                and cached is not None
+                and cached.snapshot_token == self._snapshot_token(entry)
+                and cached.is_current(entry.manager)
+            ):
+                return cached
+            family = self._measurement_family(
+                entry,
+                "blot",
+                progress_cb=progress_cb,
+                force=force,
+            )
+            cache = entry.recomputed_cache
+            if (
+                cache is None
+                or cache.snapshot_token != self._snapshot_token(entry)
+                or not cache.is_current(entry.manager)
+            ):
+                cache = self._freeze_family(entry, family)
+                entry.recomputed_cache = cache
+            return cache
+
+    def snapshot_recomputed_cache(
+        self,
+        config_path: str | Path,
+    ) -> FrozenDatasetMeasurementCache:
+        """Return the prepared immutable cache without measuring images."""
+
+        with self._locked_entry(config_path) as entry:
+            self._assert_source_current(entry)
+            cache = entry.recomputed_cache
+            if cache is None:
+                raise RecomputedCacheUnavailableError(
+                    f"No full-dataset expression cache is prepared for "
+                    f"{entry.config_path}; recompute this dataset first"
+                )
+            if (
+                cache.snapshot_token != self._snapshot_token(entry)
+                or not cache.is_current(entry.manager)
+            ):
+                entry.recomputed_cache = None
+                raise RecomputedCacheUnavailableError(
+                    f"The prepared expression cache no longer matches "
+                    f"{entry.config_path}; recompute this dataset"
+                )
+            return cache
+
     def remove_dataset(self, config_path: str | Path) -> bool:
         """Drop one detached dataset and release its provider handles."""
 
@@ -549,6 +627,7 @@ class ExpressionDatasetRepository:
                 self._entries.pop(key, None)
                 self._close_provider(entry)
                 entry.measurement_family = None
+                entry.recomputed_cache = None
                 entry.measurements_by_correction.clear()
         return True
 
@@ -572,6 +651,7 @@ class ExpressionDatasetRepository:
                 else:
                     self._close_provider(entry)
                     entry.measurement_family = None
+                    entry.recomputed_cache = None
                     entry.measurements_by_correction.clear()
 
     @contextmanager
@@ -620,6 +700,7 @@ class ExpressionDatasetRepository:
                 entry.close_when_idle = False
                 self._close_provider(entry)
                 entry.measurement_family = None
+                entry.recomputed_cache = None
                 entry.measurements_by_correction.clear()
             entry.lock.release()
 
@@ -720,15 +801,17 @@ class ExpressionDatasetRepository:
         correction_method: str,
         *,
         progress_cb: ProgressCallback | None,
+        force: bool = False,
     ) -> ExpressionMeasurementFamily:
         cached = entry.measurement_family
-        if cached is not None:
+        if cached is not None and not force:
             if cached.is_current(entry.manager) and cached.dependencies_current(
                 entry.manager,
                 correction_method,
             ):
+                if entry.recomputed_cache is None:
+                    entry.recomputed_cache = self._freeze_family(entry, cached)
                 return cached
-            entry.measurement_family = None
 
         provider = self._provider(entry)
         if provider.num_channels <= 0:
@@ -763,8 +846,27 @@ class ExpressionDatasetRepository:
             raise MeasurementComputationError(
                 "measure_expression_family returned a stale measurement family"
             )
+        pending_cache = self._freeze_family(entry, result)
         entry.measurement_family = result
+        entry.recomputed_cache = pending_cache
         return result
+
+    def _freeze_family(
+        self,
+        entry: _DatasetEntry,
+        family: ExpressionMeasurementFamily,
+    ) -> FrozenDatasetMeasurementCache:
+        return freeze_expression_measurement_family(
+            entry.manager,
+            family,
+            dataset_id=_dataset_id(entry.config_path),
+            source_uri=str(entry.config_path),
+            source_fingerprint=entry.source_fingerprint,
+            snapshot_token=self._snapshot_token(entry),
+            dataset_generation=entry.generation,
+            image_manifest_token=entry.image_manifest_token,
+            measured_at=_utc_timestamp(),
+        )
 
     def _measurement_set(
         self,
@@ -966,6 +1068,7 @@ class ExpressionDatasetRepository:
 
     def _invalidate_entry(self, entry: _DatasetEntry) -> None:
         entry.measurement_family = None
+        entry.recomputed_cache = None
         entry.measurements_by_correction.clear()
         self._close_provider(entry)
 
@@ -1017,6 +1120,19 @@ def _canonical_xml_path(path: str | Path, *, require_exists: bool) -> Path:
 
 def _path_key(path: Path) -> str:
     return os.path.normcase(str(path))
+
+
+def _dataset_id(path: Path) -> str:
+    """Match the stable path-derived id used by comparison windows."""
+
+    return hashlib.sha256(_path_key(path).casefold().encode("utf-8")).hexdigest()[:20]
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )
 
 
 def _xml_content_token(path: Path) -> tuple[int, int, str]:
@@ -1161,6 +1277,7 @@ __all__ = [
     "MeasurementBackendUnavailableError",
     "MeasurementComputationError",
     "NativeExpressionTrace",
+    "RecomputedCacheUnavailableError",
     "RepositoryClosedError",
     "source_fingerprint_for_config",
 ]
