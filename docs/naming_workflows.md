@@ -60,6 +60,7 @@ One intentional user gesture is atomic:
 | Relink across a gap | Detach old link, add intermediates, attach new link, restore reciprocal successors |
 | Rename / Lock Current Name / Use Automatic | Change name ownership over the entire valid cell continuation |
 | Apply body axes | Replace orientation metadata, invalidate/rebuild naming, refresh views |
+| Remove a false polar detection | Kill the row, rebuild the early-stage hypothesis, and retain every resulting automatic-name change in the same history boundary |
 
 If validation fails, none of the gesture commits. Undo reverses a composite in reverse mutation order; Redo replays it in forward order.
 
@@ -141,6 +142,29 @@ A relink cannot use a dead endpoint, create a non-forward edge, overfill a paren
 ### Kill or resurrect
 
 Kill begins from the selected `(time,index)` anchor and walks that component. It uses `effective_name` for user-facing identity and does not kill a disconnected same-named cell. Resurrect operates on an explicitly chosen dead nucleus and rejects live targets. Its command records `status`, `identity`, and `assigned_id`, so Undo/Redo cannot lose a forced name.
+
+### Correct a false four-object two-cell stage
+
+1. At the biological two-cell stage, select one small polar-body false
+   detection and choose **Remove Nucleus**.
+2. Remove the second small false detection. Dead rows are retained for stable
+   legacy indices, but are excluded from founder counting.
+3. AceTree invalidates the old unforced four-cell hypothesis only when the two
+   deleted rows have the strong small-object footprint expected for polar
+   bodies. Retained lineage ancestry is traced through continuation frames;
+   a real four-cell sister-pair topology, including an ablation of small
+   founders, retains its founder names. Malformed claimed topology fails closed.
+4. `AB` versus `P1` is resolved from observed division timing, then a trusted
+   AP direction, then blastomere-size asymmetry. Rejected four-cell labels are
+   never used as independent evidence.
+5. If ordering is still ambiguous, the survivors and their unforced
+   descendants receive neutral names. Supply body axes or more lineage data and
+   rerun naming rather than forcing an image-coordinate guess.
+
+Use **Remove Nucleus** for isolated false detections. Use **Kill Cell** when an
+entire tracked continuation is spurious. Automatic renaming and the live/dead
+mutation share one history boundary, so Undo/Redo restores the exact prior or
+corrected state. Explicit `assigned_id` locks are never replaced.
 
 ## 5. Body-Axis Model
 
@@ -247,6 +271,8 @@ It returns both daughter names, confidence, governing axis label, source/provena
 | Landmarks span different reference times | Reject frame |
 | Only ABa and ABp are used to claim LR | Treat as insufficient anatomical evidence |
 | Founder topology is strong but no complete AP/DV/LR frame exists | Keep founder/loaded names; defer new biological daughter ordering and use neutral placeholders |
+| Two small polar detections are removed from a false four-object two-cell frame | Replace stale unforced four-cell labels with AB/P1 from timing/AP/size evidence; otherwise use neutral names; one full Undo restores names and status |
+| Two founders are absent from a real four-cell sister-pair lineage | Preserve the surviving founder identities, even in later continuation frames or when the absent rows are small; do not invoke polar recovery |
 | Save fails midway | Old ZIP remains usable; history stays dirty |
 | Save As succeeds, then Save | Second save targets the new path |
 | Undo back to savepoint | Clean; redo away from it becomes dirty |

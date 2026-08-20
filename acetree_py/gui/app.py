@@ -774,7 +774,7 @@ class AceTreeApp:
                 error.__cause__ or error,
             )
             try:
-                self._on_edit()
+                self.edit_history.retry_post_commit(error)
             except Exception as retry_error:
                 self._report_committed_refresh_failure(command, retry_error)
             return mapping
@@ -3494,7 +3494,7 @@ class AceTreeApp:
                 error.__cause__ or error,
             )
             try:
-                self._on_edit()
+                self.edit_history.retry_post_commit(error)
             except Exception as retry_error:
                 self._report_committed_refresh_failure(command, retry_error)
             # Undo/redo normally return the affected command. Preserve that

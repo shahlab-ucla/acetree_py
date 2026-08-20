@@ -1197,6 +1197,27 @@ class TestEditHistory:
         assert history.modified
         assert history.last_command is command
 
+    def test_non_structural_callback_can_retry_without_replaying_command(self):
+        record = _simple_record()
+        command = MoveNucleus(time=1, index=1, new_x=10)
+        callback_calls = 0
+
+        def fail_once():
+            nonlocal callback_calls
+            callback_calls += 1
+            if callback_calls == 1:
+                raise RuntimeError("temporary redraw failure")
+
+        history = EditHistory(record, on_edit=fail_once)
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.do(command)
+
+        history.retry_post_commit(caught.value)
+
+        assert callback_calls == 2
+        assert record[0][0].x == 10
+        assert history.num_undoable == 1
+
     def test_undo_callback_failure_reports_committed_state(self):
         record = _simple_record()
         command = MoveNucleus(time=1, index=1, new_x=10)
@@ -1249,6 +1270,66 @@ class TestEditHistory:
         assert not history.can_redo
         assert history.modified
         assert history.last_command is command
+
+    def test_added_row_automatic_name_survives_failed_redo_callback(self):
+        """After-only rows are part of the saved automatic-name boundary."""
+        record = _simple_record()
+
+        def assign_added_name():
+            if len(record[0]) == 3:
+                record[0][2].identity = "AUTO"
+
+        history = EditHistory(record, on_edit=assign_added_name)
+        command = AddNucleus(time=1, x=50, y=50, z=3.0)
+        history.do(command)
+        assert record[0][2].identity == "AUTO"
+        history.undo()
+
+        def fail_before_naming():
+            raise RuntimeError("naming unavailable")
+
+        history.on_edit = fail_before_naming
+        with pytest.raises(PostCommitCallbackError):
+            history.redo()
+
+        assert len(record[0]) == 3
+        assert record[0][2].identity == "AUTO"
+
+    def test_retry_refreshes_full_automatic_name_boundary(self):
+        """A clean retry replaces partial first-pass names transactionally."""
+        record = _simple_record()
+        callback_calls = 0
+
+        def fail_once_then_name():
+            nonlocal callback_calls
+            callback_calls += 1
+            record[0][0].identity = "PARTIAL" if callback_calls == 1 else "A1"
+            if callback_calls == 1:
+                raise RuntimeError("temporary naming failure")
+            record[0][1].identity = "B1"
+            record[0][2].identity = "AUTO"
+
+        history = EditHistory(record, on_edit=fail_once_then_name)
+        command = AddNucleus(time=1, x=50, y=50, z=3.0)
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.do(command)
+
+        # The failed pass is rolled back before the safe callback retry.
+        assert record[0][0].identity == "A"
+        history.retry_post_commit(caught.value)
+        assert [nucleus.identity for nucleus in record[0]] == ["A1", "B1", "AUTO"]
+
+        history.on_edit = lambda: None
+        history.undo()
+        assert [nucleus.identity for nucleus in record[0]] == ["A", "B"]
+
+        def fail_redo_naming():
+            raise RuntimeError("redo naming unavailable")
+
+        history.on_edit = fail_redo_naming
+        with pytest.raises(PostCommitCallbackError):
+            history.redo()
+        assert [nucleus.identity for nucleus in record[0]] == ["A1", "B1", "AUTO"]
 
     def test_max_history(self):
         record = _simple_record()

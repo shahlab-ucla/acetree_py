@@ -125,9 +125,14 @@ Automatic naming never invents an `"X"` suffix to hide a collision. A forced/aut
 
 ### 3.1 Four-Cell Window Detection
 
-A **four-cell window** is a contiguous range of timepoints $[t_\text{first}, t_\text{last}]$ where exactly 4 alive, non-polar-body nuclei exist:
+A **four-cell window** is a contiguous range of timepoints $[t_\text{first}, t_\text{last}]$ where exactly 4 alive nuclei not already identified as polar bodies exist:
 
-$$\forall t \in [t_\text{first}, t_\text{last}]: \quad |\{n \in \text{nuclei}(t) : n.\text{status} \geq 1 \wedge n.\text{size} < \text{polar}\_\text{size}\}| = 4$$
+$$\forall t \in [t_\text{first}, t_\text{last}]: \quad |\{n \in \text{nuclei}(t) : n.\text{status} \geq 1 \wedge \text{"polar"} \notin n.\text{effectiveName}\}| = 4$$
+
+Ordinary founder counting does **not** silently classify polar bodies by size;
+an unnamed small detection remains a candidate until curated. Size is used
+only by the guarded four-to-two recovery below, after two rows have been
+explicitly removed and both are substantially smaller than the survivors.
 
 The midpoint is: $t_\text{mid} = \lfloor (t_\text{first} + t_\text{last}) / 2 \rfloor$
 
@@ -219,7 +224,35 @@ The component is exposed separately so a geometrically flat/compressed acquisiti
 
 **Threshold:** Confidence must be ≥ 0.3 for the identification to be accepted.
 
-### 3.6 Back-Tracing
+### 3.6 Curated False-Four Recovery
+
+Manual initialization can temporarily produce four detected objects at the
+biological two-cell stage because two polar bodies were detected. After the
+curator removes both false objects, the frame contains four retained rows but
+only two live rows. A prior automatic `ABa`/`ABp`/`EMS`/`P2` hypothesis is
+invalidated only when both dead rows are substantially smaller than both live
+rows. This positive size gate distinguishes the workflow from a real
+four-cell-stage ablation. Before accepting that footprint, each retained row
+is traced back through reciprocal continuation links to its birth division.
+Two sister pairs born from two parents identify a genuine four-cell lineage
+and veto recovery even in a later continuation frame or when the killed cells
+are small. Claimed but malformed lineage links also fail closed.
+
+The two live continuation components are ordered as `AB` and `P1` by:
+
+1. two observed future division times, or one observed division while the
+   reciprocal sister continuation is observed beyond it;
+2. a valid explicit posterior→anterior direction (the anterior cell is AB);
+3. strong two-cell blastomere-size asymmetry (the larger cell is AB).
+
+Rejected four-cell labels are not reused as evidence. Broken links and
+right-censored tracks do not imply a later division. If ordering remains
+ambiguous, the impossible four-cell labels and their automatic descendants are
+cleared and replaced with neutral `Nuc...` names. Forced `assigned_id` values
+remain authoritative. A complete explicit body frame can then regenerate
+canonical descendants; without one, descendant ordering remains neutral.
+
+### 3.7 Back-Tracing
 
 Once the 4 founders are identified, trace backward through predecessor links:
 

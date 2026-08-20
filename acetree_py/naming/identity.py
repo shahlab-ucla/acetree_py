@@ -36,6 +36,18 @@ logger = logging.getLogger(__name__)
 MANUAL = 2
 NEWCANONICAL = 3
 
+# Automatic identities that are only valid once the real four-cell stage has
+# been established.  A common manual-initialisation failure mode is that two
+# small polar-body detections make a two-cell embryo look like this stage.
+_FOUR_CELL_AUTOMATIC_NAMES = frozenset({"ABa", "ABp", "EMS", "P2"})
+
+# Size is deliberately a last-resort two-cell cue.  It is used only when the
+# two rows removed from the four-object frame are substantially smaller than
+# both survivors (the characteristic polar-body curation footprint), and the
+# survivor diameters themselves differ by at least this fraction.
+_POLAR_BODY_MAX_SIZE_RATIO = 0.8
+_TWO_CELL_MIN_SIZE_SEPARATION = 0.05
+
 
 class IdentityAssigner:
     """Orchestrates the full naming pipeline.
@@ -216,6 +228,71 @@ class IdentityAssigner:
             self._assign_neutral_names(self.starting_index)
             return
 
+        # Reconcile a curated false four-cell hypothesis before the generic
+        # forced-anchor path.  A curator lock below a real division is useful
+        # downstream evidence, but it must not prevent the stale ABa/ABp/EMS/P2
+        # roots from first being corrected to AB/P1.
+        two_cell_recovery = self._recover_curated_two_cell_stage(
+            previous_identities,
+        )
+        if two_cell_recovery is not None:
+            (
+                invalidated_refs,
+                ab_component,
+                p1_component,
+                recovery_time,
+                recovery_source,
+            ) = two_cell_recovery
+            self._restore_previous_identities(
+                previous_identities,
+                excluded_refs=invalidated_refs,
+            )
+            self._propagate_assigned_ids()
+
+            if ab_component is not None and p1_component is not None:
+                self._set_automatic_component_name(ab_component, "AB")
+                self._set_automatic_component_name(p1_component, "P1")
+                fa.warnings.append(
+                    "Reconciled a curated two-cell stage to AB/P1 using "
+                    f"{recovery_source}"
+                )
+                logger.info(
+                    "Reconciled stale four-cell identities at t=%d to AB/P1 "
+                    "using %s",
+                    recovery_time + 1,
+                    recovery_source,
+                )
+
+                # A complete explicit body frame can safely continue the
+                # normal daughter rules.  Two cells alone cannot establish
+                # DV/LR, so inferred mode keeps only the founder identities
+                # and gives uncertain descendants neutral names.
+                if self.canonical_transform is not None and self.canonical_transform.active:
+                    self._setup_division_caller("")
+                elif (
+                    self.auxinfo is not None
+                    and not self.auxinfo.is_v2
+                    and self.auxinfo.has_orientation
+                ):
+                    self._setup_division_caller(self.auxinfo.axis.upper())
+
+                if self.division_caller is not None:
+                    self._use_canonical_rules(recovery_time)
+                else:
+                    self._assign_neutral_names(self.starting_index)
+            else:
+                fa.warnings.append(
+                    "Discarded stale four-cell identities after a curated "
+                    "four-to-two object correction; AB/P1 ordering remains ambiguous"
+                )
+                logger.warning(
+                    "Discarded stale four-cell identities at t=%d; no trusted "
+                    "timing, AP, or polar-size cue can order AB/P1",
+                    recovery_time + 1,
+                )
+                self._assign_neutral_names(self.starting_index)
+            return
+
         # A late-start or ablated dataset may not contain a usable four-cell
         # stage.  If the curator supplied both a trusted orientation and at
         # least one forced lineage anchor, continue canonical rules forward
@@ -250,12 +327,16 @@ class IdentityAssigner:
         self,
         previous_identities: list[list[str]],
         start_index: int = 0,
+        excluded_refs: set[tuple[int, int]] | None = None,
     ) -> None:
         """Restore valid loaded names when re-identification is unavailable.
 
         Manual overrides remain authoritative, dead records stay unnamed, and
         previously blank entries remain available for the generic fill pass.
+        ``excluded_refs`` marks an automatic hypothesis invalidated by the
+        current topology and prevents stale display state from becoming data.
         """
+        excluded = excluded_refs or set()
         for t, nuclei in enumerate(self.nuclei_record):
             if t < start_index:
                 continue
@@ -267,10 +348,544 @@ class IdentityAssigner:
                     not nuc.is_alive
                     or nuc.assigned_id
                     or j >= len(prior_at_time)
+                    or (t, j) in excluded
                 ):
                     continue
                 if prior_at_time[j]:
                     nuc.identity = prior_at_time[j]
+
+    def _recover_curated_two_cell_stage(
+        self,
+        previous_identities: list[list[str]],
+    ) -> tuple[
+        set[tuple[int, int]],
+        set[tuple[int, int]] | None,
+        set[tuple[int, int]] | None,
+        int,
+        str,
+    ] | None:
+        """Recognise and repair a false four-cell hypothesis after curation.
+
+        Detector-assisted manual initialisation commonly produces four rows at
+        the biological two-cell stage: AB, P1, and two polar bodies.  Once the
+        two false detections are killed, founder probing correctly rejects the
+        old four-cell frame, but the generic partial-movie fallback used to
+        restore its surviving automatic ``ABa/ABp/EMS/P2`` labels verbatim.
+
+        The repair is intentionally narrow.  It requires exactly four retained
+        rows at one timepoint, exactly two live and two dead, two unforced live
+        rows whose prior automatic names came from the four-cell family, two
+        substantially smaller deleted rows, and disjoint continuation
+        components.  The positive polar-size footprint avoids reinterpreting
+        ordinary two-cell partial or four-cell ablation movies.
+
+        AB/P1 ordering uses the strongest available evidence in this order:
+        future division timing, an explicit AP orientation, then blastomere
+        size asymmetry.  The rejected four-cell labels are never reused as
+        ordering evidence.  If no cue is available, the returned components
+        are ``None`` so the caller can invalidate the impossible labels and
+        fail closed with neutral names.
+        """
+        end = min(self.ending_index, len(self.nuclei_record))
+        for t in range(self.starting_index, end):
+            nuclei = self.nuclei_record[t]
+            if len(nuclei) != 4 or t >= len(previous_identities):
+                continue
+
+            alive = [(idx, nuc) for idx, nuc in enumerate(nuclei) if nuc.is_alive]
+            dead = [(idx, nuc) for idx, nuc in enumerate(nuclei) if not nuc.is_alive]
+            if len(alive) != 2 or len(dead) != 2:
+                continue
+
+            # A genuine four-cell stage can have exactly this live/dead row
+            # shape after two blastomeres are ablated.  The retained
+            # predecessor links still reveal two sister pairs descending from
+            # two distinct dividing parents, even though set_all_successors()
+            # no longer includes the dead rows.  That topology is stronger
+            # evidence than size and vetoes polar-body recovery.
+            if self._has_four_cell_division_topology(t, nuclei):
+                continue
+
+            live_sizes = [float(nucleus.size) for _idx, nucleus in alive]
+            dead_sizes = [float(nucleus.size) for _idx, nucleus in dead]
+            if min(live_sizes) <= 0 or min(dead_sizes) < 0:
+                continue
+            if (
+                max(dead_sizes)
+                > _POLAR_BODY_MAX_SIZE_RATIO * min(live_sizes)
+            ):
+                continue
+
+            prior_at_time = previous_identities[t]
+            if any(
+                nuc.assigned_id
+                or idx >= len(prior_at_time)
+                or prior_at_time[idx] not in _FOUR_CELL_AUTOMATIC_NAMES
+                for idx, nuc in alive
+            ):
+                continue
+            if len({prior_at_time[idx] for idx, _nuc in alive}) != 2:
+                # Duplicate automatic founder labels are corrupt state, not a
+                # trustworthy rejected four-cell hypothesis to reinterpret.
+                continue
+
+            first_component = self._continuation_component_refs(t, alive[0][0])
+            second_component = self._continuation_component_refs(t, alive[1][0])
+            if (
+                not self._component_topology_is_valid(first_component)
+                or not self._component_topology_is_valid(second_component)
+            ):
+                continue
+            invalidated = self._descendant_refs(
+                first_component | second_component,
+            )
+            if not first_component or not second_component:
+                continue
+            if first_component & second_component:
+                return invalidated, None, None, t, "ambiguous topology"
+            if any(
+                self.nuclei_record[ref_t][ref_idx].assigned_id
+                for ref_t, ref_idx in first_component | second_component
+            ):
+                # A continuation-scoped curator lock is authoritative.  It
+                # should already have propagated to the candidate row, but
+                # retain this guard for malformed/non-reciprocal input.
+                continue
+
+            first_is_ab, source = self._order_two_cell_candidates(
+                t,
+                alive,
+                dead,
+            )
+            if first_is_ab is None:
+                return invalidated, None, None, t, source
+            if first_is_ab:
+                return invalidated, first_component, second_component, t, source
+            return invalidated, second_component, first_component, t, source
+
+        return None
+
+    def _has_four_cell_division_topology(
+        self,
+        time: int,
+        nuclei: list[Nucleus],
+    ) -> bool:
+        """Return whether lineage evidence must block polar-body recovery.
+
+        Trace all four retained rows back through continuation frames to their
+        birth divisions.  Two pairs born from two parents identify a genuine
+        four-cell stage, even several frames after those divisions.  Malformed
+        claimed topology also blocks recovery: broken links are uncertainty,
+        never positive evidence that deleted rows were polar bodies.
+        """
+        if len(nuclei) != 4:
+            return False
+
+        birth_parents: list[tuple[int, int] | None] = []
+        for index, nucleus in enumerate(nuclei):
+            birth_parent, topology_valid = self._birth_division_parent(
+                time,
+                index,
+            )
+            if not topology_valid:
+                return True
+            birth_parents.append(birth_parent)
+
+        if any(parent is None for parent in birth_parents):
+            return False
+        groups: dict[tuple[int, int], int] = {}
+        for parent in birth_parents:
+            assert parent is not None
+            groups[parent] = groups.get(parent, 0) + 1
+        return len(groups) == 2 and set(groups.values()) == {2}
+
+    def _birth_division_parent(
+        self,
+        time: int,
+        index: int,
+    ) -> tuple[tuple[int, int] | None, bool]:
+        """Trace a row to its birth division and validate every link.
+
+        The boolean is false for any claimed but non-reciprocal, out-of-range,
+        or over-subscribed relationship.  Dead children remain in the retained
+        rows and therefore still participate in the predecessor grouping.
+        """
+        current_time = time
+        current_index = index
+        while current_time > 0:
+            current = self.nuclei_record[current_time][current_index]
+            if current.predecessor <= 0:
+                reverse_claim = any(
+                    parent.is_alive
+                    and current_index + 1
+                    in (parent.successor1, parent.successor2)
+                    for parent in self.nuclei_record[current_time - 1]
+                )
+                return None, not reverse_claim
+
+            parent_index = current.predecessor - 1
+            previous = self.nuclei_record[current_time - 1]
+            if not (0 <= parent_index < len(previous)):
+                return None, False
+            parent = previous[parent_index]
+            if not parent.is_alive:
+                return None, False
+
+            retained_children = {
+                child_index
+                for child_index, child in enumerate(
+                    self.nuclei_record[current_time]
+                )
+                if child.predecessor == parent_index + 1
+            }
+            if current_index not in retained_children:
+                return None, False
+            if len(retained_children) not in (1, 2):
+                return None, False
+
+            declared_values = [
+                successor
+                for successor in (parent.successor1, parent.successor2)
+                if successor > 0
+            ]
+            if (
+                parent.successor2 > 0 and parent.successor1 <= 0
+            ) or len(set(declared_values)) != len(declared_values):
+                return None, False
+            declared_children = {
+                successor - 1 for successor in declared_values
+            }
+            if any(
+                not (0 <= child < len(self.nuclei_record[current_time]))
+                for child in declared_children
+            ):
+                return None, False
+            if not declared_children <= retained_children:
+                return None, False
+            live_children = {
+                child
+                for child in retained_children
+                if self.nuclei_record[current_time][child].is_alive
+            }
+            if not live_children <= declared_children:
+                return None, False
+
+            other_parent_claims = {
+                other_index
+                for other_index, other_parent in enumerate(previous)
+                if other_parent.is_alive
+                and current_index + 1
+                in (other_parent.successor1, other_parent.successor2)
+            }
+            if other_parent_claims - {parent_index}:
+                return None, False
+
+            if len(retained_children) == 2:
+                return (current_time - 1, parent_index), True
+
+            current_time -= 1
+            current_index = parent_index
+
+        return None, True
+
+    def _order_two_cell_candidates(
+        self,
+        time: int,
+        alive: list[tuple[int, Nucleus]],
+        dead: list[tuple[int, Nucleus]],
+    ) -> tuple[bool | None, str]:
+        """Return whether ``alive[0]`` is AB and the evidence provenance."""
+        division_observations = [
+            self._division_observation(time, idx)
+            for idx, _nucleus in alive
+        ]
+        first_division, first_last_observed = division_observations[0]
+        second_division, second_last_observed = division_observations[1]
+        if first_division is not None and second_division is not None:
+            if first_division != second_division:
+                return first_division < second_division, "future division timing"
+        elif first_division is not None:
+            if second_last_observed > first_division:
+                return True, "future division timing"
+        elif second_division is not None:
+            if first_last_observed > second_division:
+                return False, "future division timing"
+
+        ap = self._explicit_ap_direction()
+        if ap is not None:
+            projections = []
+            for _idx, nucleus in alive:
+                position = np.array(
+                    [nucleus.x, nucleus.y, nucleus.z * self.z_pix_res],
+                    dtype=float,
+                )
+                projections.append(float(np.dot(position, ap)))
+            if not np.isclose(projections[0], projections[1], atol=1e-8):
+                # AP points posterior -> anterior, so the larger projection is AB.
+                return projections[0] > projections[1], "explicit AP orientation"
+
+        live_sizes = [float(nucleus.size) for _idx, nucleus in alive]
+        dead_sizes = [float(nucleus.size) for _idx, nucleus in dead]
+        if min(live_sizes) > 0 and min(dead_sizes) >= 0:
+            deleted_are_small = (
+                max(dead_sizes)
+                <= _POLAR_BODY_MAX_SIZE_RATIO * min(live_sizes)
+            )
+            relative_gap = (
+                abs(live_sizes[0] - live_sizes[1]) / max(live_sizes)
+            )
+            if deleted_are_small and relative_gap >= _TWO_CELL_MIN_SIZE_SEPARATION:
+                # AB is the larger blastomere at the two-cell stage.
+                return live_sizes[0] > live_sizes[1], "polar-body size asymmetry"
+
+        return None, "ambiguous evidence"
+
+    def _explicit_ap_direction(self) -> np.ndarray | None:
+        """Return a trusted posterior-to-anterior vector in physical space."""
+        if self.auxinfo is None or not self.auxinfo.has_orientation:
+            return None
+
+        if self.auxinfo.is_v2:
+            ap = self.auxinfo.ap_orientation
+            if ap is None:
+                return None
+            vector = np.asarray(ap, dtype=float)
+        else:
+            axis = self.auxinfo.axis.upper()
+            sign = 1.0 if axis[0] == "A" else -1.0
+            angle = np.radians(self.auxinfo.angle)
+            vector = np.array(
+                [sign * np.cos(angle), sign * np.sin(angle), 0.0],
+                dtype=float,
+            )
+
+        norm = float(np.linalg.norm(vector))
+        if not np.isfinite(norm) or norm <= 1e-12:
+            return None
+        return vector / norm
+
+    def _division_observation(
+        self,
+        time: int,
+        index: int,
+    ) -> tuple[int | None, int]:
+        """Return the next valid division and last reciprocally observed time.
+
+        A missing division is right-censored, not automatically later.  The
+        last-observed boundary lets the caller use one-sided evidence only
+        when the intact sister continuation is actually seen beyond the other
+        lineage's division.
+        """
+        end = min(self.ending_index, len(self.nuclei_record))
+        t = time
+        idx = index
+        while 0 <= t < end and 0 <= idx < len(self.nuclei_record[t]):
+            nucleus = self.nuclei_record[t][idx]
+            if not nucleus.is_alive:
+                return None, t - 1
+            if nucleus.successor1 > 0 and nucleus.successor2 > 0:
+                next_time = t + 1
+                if next_time >= end:
+                    return None, t
+                successor_indices = (
+                    nucleus.successor1 - 1,
+                    nucleus.successor2 - 1,
+                )
+                if any(
+                    not (0 <= successor < len(self.nuclei_record[next_time]))
+                    for successor in successor_indices
+                ):
+                    return None, t
+                daughters = [
+                    self.nuclei_record[next_time][successor]
+                    for successor in successor_indices
+                ]
+                if any(
+                    not daughter.is_alive or daughter.predecessor != idx + 1
+                    for daughter in daughters
+                ):
+                    return None, t
+                return t, t
+            if nucleus.successor1 <= 0 or t + 1 >= end:
+                return None, t
+            successor_idx = nucleus.successor1 - 1
+            if not (0 <= successor_idx < len(self.nuclei_record[t + 1])):
+                return None, t
+            successor = self.nuclei_record[t + 1][successor_idx]
+            if not successor.is_alive or successor.predecessor != idx + 1:
+                return None, t
+            t += 1
+            idx = successor_idx
+        return None, max(time, t - 1)
+
+    def _continuation_component_refs(
+        self,
+        time: int,
+        index: int,
+    ) -> set[tuple[int, int]]:
+        """Return the reciprocal, non-dividing continuation component."""
+        end = min(self.ending_index, len(self.nuclei_record))
+        if not (0 <= time < end and 0 <= index < len(self.nuclei_record[time])):
+            return set()
+        if not self.nuclei_record[time][index].is_alive:
+            return set()
+
+        refs = {(time, index)}
+
+        t = time
+        idx = index
+        while t > self.starting_index:
+            nucleus = self.nuclei_record[t][idx]
+            if nucleus.predecessor <= 0:
+                break
+            pred_idx = nucleus.predecessor - 1
+            if not (0 <= pred_idx < len(self.nuclei_record[t - 1])):
+                break
+            predecessor = self.nuclei_record[t - 1][pred_idx]
+            if (
+                not predecessor.is_alive
+                or predecessor.successor2 > 0
+                or predecessor.successor1 != idx + 1
+            ):
+                break
+            t -= 1
+            idx = pred_idx
+            refs.add((t, idx))
+
+        t = time
+        idx = index
+        while t + 1 < end:
+            nucleus = self.nuclei_record[t][idx]
+            if nucleus.successor1 <= 0 or nucleus.successor2 > 0:
+                break
+            successor_idx = nucleus.successor1 - 1
+            if not (0 <= successor_idx < len(self.nuclei_record[t + 1])):
+                break
+            successor = self.nuclei_record[t + 1][successor_idx]
+            if not successor.is_alive or successor.predecessor != idx + 1:
+                break
+            t += 1
+            idx = successor_idx
+            refs.add((t, idx))
+
+        return refs
+
+    def _set_automatic_component_name(
+        self,
+        component: set[tuple[int, int]],
+        name: str,
+    ) -> None:
+        """Assign an automatic name without converting it into a curator lock."""
+        for time, index in component:
+            nucleus = self.nuclei_record[time][index]
+            if nucleus.is_alive and not nucleus.assigned_id:
+                nucleus.identity = name
+
+    def _component_topology_is_valid(
+        self,
+        component: set[tuple[int, int]],
+    ) -> bool:
+        """Reject malformed links instead of turning them into founder evidence."""
+        end = min(self.ending_index, len(self.nuclei_record))
+        for time, index in component:
+            nucleus = self.nuclei_record[time][index]
+            claimed_parents: set[int] = set()
+            if time > 0:
+                claimed_parents = {
+                    parent_index
+                    for parent_index, parent in enumerate(
+                        self.nuclei_record[time - 1]
+                    )
+                    if parent.is_alive
+                    and index + 1 in (parent.successor1, parent.successor2)
+                }
+            if nucleus.predecessor > 0:
+                if time <= 0:
+                    return False
+                predecessor_idx = nucleus.predecessor - 1
+                if not (
+                    0 <= predecessor_idx < len(self.nuclei_record[time - 1])
+                ):
+                    return False
+                predecessor = self.nuclei_record[time - 1][predecessor_idx]
+                if (
+                    not predecessor.is_alive
+                    or index + 1
+                    not in (predecessor.successor1, predecessor.successor2)
+                    or claimed_parents != {predecessor_idx}
+                ):
+                    return False
+            elif claimed_parents:
+                return False
+
+            successor_values = (nucleus.successor1, nucleus.successor2)
+            positive_successors = [value for value in successor_values if value > 0]
+            if nucleus.successor2 > 0 and nucleus.successor1 <= 0:
+                return False
+            if not positive_successors:
+                if time + 1 < end and any(
+                    child.is_alive and child.predecessor == index + 1
+                    for child in self.nuclei_record[time + 1]
+                ):
+                    return False
+                continue
+            if time + 1 >= end:
+                return False
+            if len(set(positive_successors)) != len(positive_successors):
+                return False
+            declared_children = {
+                successor - 1 for successor in positive_successors
+            }
+            claimed_children = {
+                child_index
+                for child_index, child in enumerate(
+                    self.nuclei_record[time + 1]
+                )
+                if child.is_alive and child.predecessor == index + 1
+            }
+            if claimed_children != declared_children:
+                return False
+            for successor in positive_successors:
+                successor_idx = successor - 1
+                if not (
+                    0 <= successor_idx < len(self.nuclei_record[time + 1])
+                ):
+                    return False
+                child = self.nuclei_record[time + 1][successor_idx]
+                if not child.is_alive or child.predecessor != index + 1:
+                    return False
+        return True
+
+    def _descendant_refs(
+        self,
+        seeds: set[tuple[int, int]],
+    ) -> set[tuple[int, int]]:
+        """Return live descendants so a rejected founder hypothesis stays gone."""
+        end = min(self.ending_index, len(self.nuclei_record))
+        refs = set(seeds)
+        frontier = list(seeds)
+        while frontier:
+            time, index = frontier.pop()
+            if not (0 <= time < end and 0 <= index < len(self.nuclei_record[time])):
+                continue
+            nucleus = self.nuclei_record[time][index]
+            if not nucleus.is_alive or time + 1 >= end:
+                continue
+            for successor in (nucleus.successor1, nucleus.successor2):
+                if successor <= 0:
+                    continue
+                successor_ref = (time + 1, successor - 1)
+                if successor_ref in refs:
+                    continue
+                next_time, next_index = successor_ref
+                if not (0 <= next_index < len(self.nuclei_record[next_time])):
+                    continue
+                child = self.nuclei_record[next_time][next_index]
+                if not child.is_alive or child.predecessor != index + 1:
+                    continue
+                refs.add(successor_ref)
+                frontier.append(successor_ref)
+        return refs
 
     def _assign_neutral_names(self, start_index: int) -> None:
         """Fill unnamed records without asserting anatomical daughter order.

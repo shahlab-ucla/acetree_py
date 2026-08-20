@@ -1092,6 +1092,21 @@ When a dataset is loaded, the naming pipeline automatically identifies cells:
 2. **Back-tracing**: Names earlier cells (AB, P1, P0) by tracing predecessor links backward.
 3. **Forward naming**: Names all subsequent cells by applying the selected parent's Sulston division rule to physically scaled 3D geometry. Each result carries an axis, confidence, and orientation source.
 
+**Two-cell frames with polar bodies:** Detector-assisted initialization may
+show four objects even though the embryo is at the two-cell stage. Select and
+**Remove Nucleus** for each small polar-body false detection. Once both are
+removed, AceTree discards the stale automatic four-cell labels and recalculates
+the two blastomeres as `AB` and `P1` using lineage timing, a trusted AP axis, or
+the strong polar/blastomere size pattern. The names remain automatic rather
+than becoming locked overrides. If the evidence cannot safely order the two
+cells, AceTree shows neutral `Nuc...` names instead of retaining biologically
+impossible `ABa`/`ABp`/`EMS`/`P2` labels. Normal-sized four-cell ablations are
+left unchanged, and existing lineage links are traced back through continuation
+frames so genuine four-cell sister-pair ablations remain unchanged even when
+the missing cells are small. Broken claimed topology also fails closed. Undo
+restores the removed object and every automatic name from the same edit
+boundary; Redo reapplies the corrected state.
+
 Orientation precedence is: valid explicit AuxInfo v2 (including a manual landmark frame), a supported AuxInfo v1 orientation, per-timepoint lineage geometry, then static founder geometry. A present but unusable v2 file (missing, malformed, non-finite, zero, or parallel AP/LR vectors) does not mask valid v1 metadata. Invalid placeholder metadata is ignored. Automatic geometry uses AP from P2 toward ABa and a DV seed from EMS toward ABp, projected perpendicular to AP; it does not treat ABa–ABp as LR. Manual correction is recommended when compression, sparse tracking, or uncertain handedness makes that estimate weak.
 
 ### 11.2 Unnamed Cells

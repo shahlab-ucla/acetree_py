@@ -296,7 +296,7 @@ AuxInfo selection is based on usability, not merely file presence. A v2 record m
 2. **Propagate forced names** (`_propagate_assigned_ids()`): extend each `assigned_id` only through live reciprocal one-successor continuations. Stop at divisions, dead/missing links, non-reciprocal links, or a different forced identity.
 3. Select orientation in precedence order: valid v2 (manual or imported), supported v1, per-timepoint lineage geometry, then static founder geometry.
 4. **Topology-based identification** (`identify_founders()`).
-5. If topology fails (confidence < 0.3): warn and assign generic names. Legacy diamond-pattern identification available via `legacy_mode=True`.
+5. If topology fails (confidence < 0.3): preserve compatible loaded names for partial movies, but invalidate any automatic founder hypothesis contradicted by current topology. A curated false four-object stage (two blastomeres plus two substantially smaller deleted polar detections) is reconciled to AB/P1 from timing, explicit AP, or blastomere-size evidence. Ambiguous ordering receives neutral names rather than stale four-cell labels. Legacy diamond-pattern identification remains available via `legacy_mode=True`.
 6. Set up `DivisionCaller` with the selected orientation source and deterministic chronological axis caching.
 7. **Forward pass**: apply canonical rules from 4-cell stage onward (single-frame classification with quality-aware axis smoothing; multi-frame averaging disabled in lineage mode).
 8. Assign generic `Nuc_t_z_x_y` names to remaining unnamed cells.
@@ -317,6 +317,22 @@ Topology-based identification of ABa, ABp, EMS, P2 at the 4-cell stage:
 5. **Back-trace**: trace predecessors to name AB, P1, P0 and their continuation cells.
 6. **Axis derivation**: AP is P2→ABa; the DV seed is EMS→ABp projected perpendicular to AP; LR completes the right-handed frame.
 7. **Confidence**: composite of timing, size, and axis confidence with per-component breakdown.
+
+When manual initialization initially mistakes two polar bodies for blastomeres,
+the retained rows provide a narrow correction footprint: four rows, two live
+unforced founder-labelled survivors, and two substantially smaller dead rows.
+After the second removal, naming invalidates the rejected four-cell hypothesis
+and reconstructs `AB`/`P1`. Evidence precedence is observed division timing,
+trusted posterior→anterior metadata, then two-cell blastomere-size asymmetry.
+One missing division is treated as right-censored unless its intact sister is
+observed beyond the other division. Reciprocal lineage ancestry is traced back
+through continuation frames; a genuine pair-of-sister-pairs four-cell lineage,
+or malformed claimed topology, vetoes recovery even when dead rows are small.
+Automatic name changes made during the structural rebuild are recorded in the
+same history boundary, so Undo/Redo restores exact name ownership as well as
+live/dead state. A failed post-commit naming pass is rolled back to its clean
+callback boundary before one safe retry, and the retry result refreshes that
+same history entry.
 
 ### 4.3 Division Caller (`naming/division_caller.py`)
 
