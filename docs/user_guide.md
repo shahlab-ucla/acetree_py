@@ -531,7 +531,7 @@ The conventions are AP **posterior → anterior**, DV **ventral → dorsal**, an
 
 Do not infer left/right from the ABa–ABp separation alone. At the four-cell stage that pair does not by itself establish signed LR; use trusted metadata, a manual anatomical cue, or later handedness. Manual orientation takes precedence over automatic geometry, while manual **cell-name** overrides remain intact when naming is rerun.
 
-If AceTree can identify founders from topology but cannot construct a complete AP/DV/LR frame, it keeps those founder names but does not pretend that microscope x/y/z are anatomical coordinates. Existing loaded descendant names are preserved; new uncertain branches use neutral `Nuc...` names until a valid body frame is supplied and naming is rerun.
+If AceTree can identify founders from topology but cannot construct a complete AP/DV/LR frame, it keeps those founder names but does not pretend that microscope x/y/z are anatomical coordinates. Existing loaded descendant names are preserved; unrelated new uncertain roots and later divisions whose required axes remain unavailable use neutral `Nuc...` names until a valid body frame is supplied and naming is rerun. The early AB/P1 recovery is the constrained exception above: the parent rule already fixes each first daughter family, so only sister ordering—not the family—can remain uncertain.
 
 ### 6.6 3D Volume View
 
@@ -1106,6 +1106,15 @@ frames so genuine four-cell sister-pair ablations remain unchanged even when
 the missing cells are small. Broken claimed topology also fails closed. Undo
 restores the removed object and every automatic name from the same edit
 boundary; Redo reapplies the corrected state.
+
+Once the roots resolve, their first valid divisions keep the biological
+family even if the dataset does not yet provide a complete body frame: `AB`
+produces `ABa` and `ABp`, and `P1` produces `EMS` and `P2`. Recovered AP orders
+the sisters when possible. If that call is tied, AceTree preserves a consistent
+loaded pair or uses stable successor order and reports the lower-confidence
+fallback; it does not replace these four founders with unrelated `Nuc...`
+roots. A dataset previously saved with corrected `AB`/`P1` roots but legacy
+neutral daughters is upgraded automatically on the next naming rebuild.
 
 Orientation precedence is: valid explicit AuxInfo v2 (including a manual landmark frame), a supported AuxInfo v1 orientation, per-timepoint lineage geometry, then static founder geometry. A present but unusable v2 file (missing, malformed, non-finite, zero, or parallel AP/LR vectors) does not mask valid v1 metadata. Invalid placeholder metadata is ignored. Automatic geometry uses AP from P2 toward ABa and a DV seed from EMS toward ABp, projected perpendicular to AP; it does not treat ABa–ABp as LR. Manual correction is recommended when compression, sparse tracking, or uncertain handedness makes that estimate weak.
 

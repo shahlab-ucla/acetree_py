@@ -83,7 +83,10 @@ Step 2:  Select the highest-precedence valid orientation source
 Step 3:  Topology-based founder identification
          → FounderAssignment with ABa, ABp, EMS, P2 indices + confidence
 
-Step 4:  If Step 3 fails (confidence < 0.3): warn and assign generic names
+Step 4:  If Step 3 fails (confidence < 0.3): preserve compatible loaded names;
+         invalidate contradicted founder hypotheses; repair a positively
+         identified false-four polar-body state; use generic names only for
+         the roots/branches that remain unresolved
          (legacy InitialID fallback available via legacy_mode=True)
 
 Step 5:  Set up DivisionCaller with coordinate axes
@@ -97,6 +100,8 @@ Step 6:  Forward pass — apply canonical rules:
                if parent is NOT dividing: nuc.identity ← parent.identity
                if parent IS dividing:
                  (d1, d2) = DivisionCaller.assign_names(parent, daughter1, daughter2)
+                 if a non-empty pair falls outside RuleManager(parent):
+                   replace it with that parent's exact canonical pair
                  daughter1.identity ← d1
                  daughter2.identity ← d2
 
@@ -249,8 +254,19 @@ Rejected four-cell labels are not reused as evidence. Broken links and
 right-censored tracks do not imply a later division. If ordering remains
 ambiguous, the impossible four-cell labels and their automatic descendants are
 cleared and replaced with neutral `Nuc...` names. Forced `assigned_id` values
-remain authoritative. A complete explicit body frame can then regenerate
-canonical descendants; without one, descendant ordering remains neutral.
+remain authoritative.
+
+Once the two roots are resolved as `AB` and `P1`, their first reciprocal
+divisions never fall back to a different lineage family. The two-cell
+separation supplies a partial posterior→anterior direction, and the rule table
+fixes the exact unordered daughter families: `AB` produces `ABa`/`ABp`, while
+`P1` produces `EMS`/`P2`. If that sister ordering is degenerate, AceTree first
+preserves a consistent previously loaded pair and otherwise uses stable
+successor order with a lower-confidence warning. When all four recovered
+founders overlap, AceTree reconstructs the lineage body frame and returns
+later divisions to the normal geometry-aware caller. Neutral names remain the
+fail-closed result for disconnected roots or later divisions whose required
+body axes are still unavailable.
 
 ### 3.7 Back-Tracing
 

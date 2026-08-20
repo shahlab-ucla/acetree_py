@@ -651,6 +651,122 @@ def test_deleting_two_polar_objects_reconciles_false_four_cell_names(
     ] == after_second_delete
 
 
+def test_polar_deletion_history_rebuilds_canonical_descendants_exactly():
+    """The actual sequential edit workflow must repair roots and daughters."""
+    from acetree_py.editing.commands import RemoveNucleus
+    from acetree_py.editing.history import EditHistory
+
+    record = _false_four_object_two_cell_stage()
+    record[0][0].successor1 = 1
+    record[0][1].successor1 = 2
+    record.append([
+        _make_nuc(1, 75, 100, 10.0, identity="ABa", pred=1, succ1=1, succ2=3),
+        _make_nuc(2, 165, 100, 10.0, identity="ABp", pred=2, succ1=2),
+    ])
+    record.append([
+        _make_nuc(1, 65, 100, 10.0, identity="WrongA", pred=1),
+        _make_nuc(2, 170, 100, 10.0, identity="ABp", pred=2),
+        _make_nuc(3, 85, 100, 10.0, identity="WrongB", pred=1),
+    ])
+    original = [
+        [(n.identity, n.assigned_id, n.status) for n in nuclei]
+        for nuclei in record
+    ]
+
+    def rebuild_names() -> None:
+        IdentityAssigner(record, naming_method=NEWCANONICAL).assign_identities()
+
+    history = EditHistory(record, on_edit=rebuild_names)
+    history.do(RemoveNucleus(time=1, index=3))
+    after_first = [
+        [(n.identity, n.assigned_id, n.status) for n in nuclei]
+        for nuclei in record
+    ]
+    history.do(RemoveNucleus(time=1, index=4))
+    after_second = [
+        [(n.identity, n.assigned_id, n.status) for n in nuclei]
+        for nuclei in record
+    ]
+
+    assert [record[0][0].identity, record[0][1].identity] == ["AB", "P1"]
+    assert [record[1][0].identity, record[1][1].identity] == ["AB", "P1"]
+    assert {record[2][0].identity, record[2][2].identity} == {"ABa", "ABp"}
+    assert record[2][1].identity == "P1"
+    assert all(
+        not nucleus.identity.startswith("Nuc")
+        for nuclei in record
+        for nucleus in nuclei
+        if nucleus.is_alive
+    )
+
+    history.undo()
+    assert [
+        [(n.identity, n.assigned_id, n.status) for n in nuclei]
+        for nuclei in record
+    ] == after_first
+    history.undo()
+    assert [
+        [(n.identity, n.assigned_id, n.status) for n in nuclei]
+        for nuclei in record
+    ] == original
+    history.redo()
+    history.redo()
+    assert [
+        [(n.identity, n.assigned_id, n.status) for n in nuclei]
+        for nuclei in record
+    ] == after_second
+
+
+def test_asynchronous_two_cell_recovery_hands_real_quartet_to_canonical_rules():
+    """AB-first/P1-later recovery must resume normal downstream naming."""
+    from acetree_py.editing.commands import RemoveNucleus
+    from acetree_py.editing.history import EditHistory
+
+    record = _false_four_object_two_cell_stage()
+    record[0][0].successor1 = 1
+    record[0][0].successor2 = 2
+    record[0][1].successor1 = 3
+    record.append([
+        _make_nuc(1, 60, 100, 10.0, pred=1, succ1=1),
+        _make_nuc(2, 100, 130, 10.0, pred=1, succ1=2),
+        _make_nuc(3, 160, 100, 10.0, pred=2, succ1=3, succ2=4),
+    ])
+    record.append([
+        _make_nuc(1, 60, 100, 10.0, pred=1, succ1=1, succ2=2),
+        _make_nuc(2, 100, 130, 10.0, pred=2, succ1=3),
+        _make_nuc(3, 140, 80, 10.0, pred=3, succ1=4),
+        _make_nuc(4, 180, 100, 10.0, pred=3, succ1=5),
+    ])
+    record.append([
+        _make_nuc(1, 50, 95, 11.0, pred=1),
+        _make_nuc(2, 70, 105, 9.0, pred=1),
+        _make_nuc(3, 100, 130, 10.0, pred=2),
+        _make_nuc(4, 140, 80, 10.0, pred=3),
+        _make_nuc(5, 180, 100, 10.0, pred=4),
+    ])
+    assignments: list[IdentityAssigner] = []
+
+    def rebuild_names() -> None:
+        assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+        assigner.assign_identities()
+        assignments.append(assigner)
+
+    history = EditHistory(record, on_edit=rebuild_names)
+    history.do(RemoveNucleus(time=1, index=3))
+    history.do(RemoveNucleus(time=1, index=4))
+
+    assert [record[0][0].identity, record[0][1].identity] == ["AB", "P1"]
+    assert {nucleus.identity for nucleus in record[2]} == {
+        "ABa", "ABp", "EMS", "P2",
+    }
+    assert {record[3][0].identity, record[3][1].identity} == {"ABal", "ABar"}
+    assert assignments[-1].division_caller is not None
+    assert any(
+        "curated two-cell stage" in warning
+        for warning in assignments[-1].founder_assignment.warnings
+    )
+
+
 def test_two_cell_recovery_prefers_future_division_timing_without_axes():
     """In inferred mode, the lineage that divides first is AB."""
     first = _make_nuc(1, 80, 100, 10.0, identity="ABa", succ1=1)
@@ -672,15 +788,56 @@ def test_two_cell_recovery_prefers_future_division_timing_without_axes():
     record[0][2].size = 5
     record[0][3].size = 5
 
-    IdentityAssigner(record, naming_method=NEWCANONICAL).assign_identities()
+    assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+    assigner.assign_identities()
 
     assert record[0][0].identity == "AB"
     assert record[0][1].identity == "P1"
     assert record[1][0].identity == "AB"
     assert record[1][1].identity == "P1"
     assert record[2][1].identity == "P1"
-    assert record[2][0].identity.startswith("Nuc")
-    assert record[2][2].identity.startswith("Nuc")
+    assert record[2][0].identity == "ABa"
+    assert record[2][2].identity == "ABp"
+    assert all(
+        not nucleus.identity.startswith("Nuc")
+        for timepoint in record
+        for nucleus in timepoint
+        if nucleus.is_alive
+    )
+    assert any(
+        "curated two-cell stage" in warning
+        for warning in assigner.founder_assignment.warnings
+    )
+
+
+def test_saved_ab_p1_with_neutral_daughters_is_upgraded_without_redeletion():
+    """Datasets saved after the root-only repair migrate on the next rebuild."""
+    record = _false_four_object_two_cell_stage()
+    record[0][0].identity = "AB"
+    record[0][1].identity = "P1"
+    record[0][2].status = -1
+    record[0][2].identity = ""
+    record[0][3].status = -1
+    record[0][3].identity = ""
+    record[0][0].successor1 = 1
+    record[0][0].successor2 = 2
+    record[0][1].successor1 = 3
+    record.append([
+        _make_nuc(1, 60, 100, 10.0, identity="Nuc002_10_60_100", pred=1),
+        _make_nuc(2, 100, 100, 10.0, identity="Nuc002_10_100_100", pred=1),
+        _make_nuc(3, 160, 100, 10.0, identity="P1", pred=2),
+    ])
+
+    assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+    assigner.assign_identities()
+
+    assert [record[0][0].identity, record[0][1].identity] == ["AB", "P1"]
+    assert {record[1][0].identity, record[1][1].identity} == {"ABa", "ABp"}
+    assert record[1][2].identity == "P1"
+    assert any(
+        "existing reconciled AB/P1 state" in warning
+        for warning in assigner.founder_assignment.warnings
+    )
 
 
 def test_two_cell_recovery_uses_symmetric_future_division_timing():
@@ -760,18 +917,19 @@ def _two_cell_stage_with_divisions() -> list[list[Nucleus]]:
     return record
 
 
-@pytest.mark.parametrize("axis_mode", ["v2", "v1"])
-def test_explicit_axes_regenerate_descendants_after_two_cell_recovery(
+@pytest.mark.parametrize("axis_mode", ["inferred", "v2", "v1"])
+def test_axes_or_recovered_ap_regenerate_descendants_after_two_cell_recovery(
     axis_mode: str,
 ):
     record = _two_cell_stage_with_divisions()
 
-    IdentityAssigner(
+    assigner = IdentityAssigner(
         record,
         auxinfo=_axis_configuration(axis_mode),
         naming_method=NEWCANONICAL,
         z_pix_res=1.0,
-    ).assign_identities()
+    )
+    assigner.assign_identities()
 
     assert {record[0][0].identity, record[0][1].identity} == {"AB", "P1"}
     ab_parent = next(nucleus for nucleus in record[0] if nucleus.identity == "AB")
@@ -789,9 +947,209 @@ def test_explicit_axes_regenerate_descendants_after_two_cell_recovery(
         for timepoint in record
         for nucleus in timepoint
     )
+    assert any(
+        "curated two-cell stage" in warning
+        for warning in assigner.founder_assignment.warnings
+    )
 
 
-def test_forced_post_division_descendant_survives_two_cell_recovery():
+def test_recovered_p1_division_uses_ems_p2_family_without_four_cell_window():
+    """P1's special daughter roots remain canonical without a full body frame."""
+    record = _false_four_object_two_cell_stage()
+    record[0][2].status = -1
+    record[0][2].identity = ""
+    record[0][3].status = -1
+    record[0][3].identity = ""
+    record[0][0].successor1 = 1
+    record[0][1].successor1 = 2
+    record.append([
+        _make_nuc(1, 75, 100, 10.0, pred=1),
+        _make_nuc(2, 165, 100, 10.0, pred=2, succ1=1, succ2=2),
+    ])
+    record.append([
+        _make_nuc(1, 145, 100, 10.0, pred=2, succ1=1),
+        _make_nuc(2, 185, 100, 10.0, pred=2, succ1=2),
+    ])
+    record.append([
+        _make_nuc(1, 140, 100, 10.0, pred=1),
+        _make_nuc(2, 190, 100, 10.0, pred=2),
+    ])
+
+    assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+    assigner.assign_identities()
+
+    assert record[0][0].identity == "AB"
+    assert record[0][1].identity == "P1"
+    assert {nucleus.identity for nucleus in record[2]} == {"EMS", "P2"}
+    assert [nucleus.identity for nucleus in record[3]] == [
+        record[2][0].identity,
+        record[2][1].identity,
+    ]
+    assert all(
+        not nucleus.identity.startswith("Nuc")
+        for timepoint in record
+        for nucleus in timepoint
+        if nucleus.is_alive
+    )
+    assert any(
+        "curated two-cell stage" in warning
+        for warning in assigner.founder_assignment.warnings
+    )
+
+
+def test_ambiguous_recovered_sister_order_keeps_exact_family_and_is_stable():
+    record = _two_cell_stage_with_divisions()
+    record[1][0].x = record[1][1].x = 80
+    record[1][2].x = record[1][3].x = 160
+
+    first = IdentityAssigner(record, naming_method=NEWCANONICAL)
+    first.assign_identities()
+    first_names = [[nucleus.identity for nucleus in nuclei] for nuclei in record]
+
+    second = IdentityAssigner(record, naming_method=NEWCANONICAL)
+    second.assign_identities()
+
+    assert {record[1][0].identity, record[1][1].identity} == {"ABa", "ABp"}
+    assert {record[1][2].identity, record[1][3].identity} == {"EMS", "P2"}
+    assert [[nucleus.identity for nucleus in nuclei] for nuclei in record] == first_names
+    assert any(
+        "stable successor order" in warning
+        for warning in first.founder_assignment.warnings
+    )
+
+
+def test_recovered_ab_sister_order_averages_continuation_geometry():
+    """Overlapping newborns may separate enough to order ABa/ABp later."""
+    record = _false_four_object_two_cell_stage()
+    record[0][2].status = record[0][3].status = -1
+    record[0][2].identity = record[0][3].identity = ""
+    record[0][0].successor1 = 1
+    record[0][0].successor2 = 2
+    record[0][1].successor1 = 3
+    record.append([
+        _make_nuc(1, 80, 100, 10.0, pred=1, succ1=1),
+        _make_nuc(2, 80, 100, 10.0, pred=1, succ1=2),
+        _make_nuc(3, 160, 100, 10.0, pred=2, succ1=3),
+    ])
+    record.append([
+        _make_nuc(1, 60, 100, 10.0, pred=1),
+        _make_nuc(2, 100, 100, 10.0, pred=2),
+        _make_nuc(3, 165, 100, 10.0, pred=3),
+    ])
+
+    IdentityAssigner(record, naming_method=NEWCANONICAL).assign_identities()
+
+    assert [record[1][0].identity, record[1][1].identity] == ["ABa", "ABp"]
+    assert [record[2][0].identity, record[2][1].identity] == ["ABa", "ABp"]
+
+
+def test_recovered_p1_sister_order_prefers_right_censor_safe_timing():
+    """EMS's earlier division outranks tied AP geometry for the P1 pair."""
+    record = _two_cell_stage_with_divisions()
+    record[1][2].x = record[1][3].x = 160
+    record[1][2].successor1 = 1
+    record[1][2].successor2 = 2
+    record[1][3].successor1 = 3
+    record.append([
+        _make_nuc(1, 150, 95, 10.0, pred=3),
+        _make_nuc(2, 170, 105, 10.0, pred=3),
+        _make_nuc(3, 160, 100, 10.0, pred=4, succ1=1),
+    ])
+    record.append([
+        _make_nuc(1, 160, 100, 10.0, pred=3),
+    ])
+
+    IdentityAssigner(
+        record,
+        auxinfo=_axis_configuration("v2"),
+        naming_method=NEWCANONICAL,
+        z_pix_res=1.0,
+    ).assign_identities()
+
+    assert record[1][2].identity == "EMS"
+    assert record[1][3].identity == "P2"
+
+
+def test_recovered_four_founder_frame_resumes_canonical_family():
+    record = _two_cell_stage_with_divisions()
+    record[1][0].x, record[1][0].y = 60, 100
+    record[1][1].x, record[1][1].y = 100, 130
+    record[1][2].x, record[1][2].y = 140, 80
+    record[1][3].x, record[1][3].y = 180, 100
+    record[1][0].successor1 = 1
+    record[1][0].successor2 = 2
+    record[1][1].successor1 = 3
+    record[1][2].successor1 = 4
+    record[1][3].successor1 = 5
+    record.append([
+        _make_nuc(1, 50, 95, 11.0, pred=1),
+        _make_nuc(2, 70, 105, 9.0, pred=1),
+        _make_nuc(3, 100, 130, 10.0, pred=2),
+        _make_nuc(4, 140, 80, 10.0, pred=3),
+        _make_nuc(5, 180, 100, 10.0, pred=4),
+    ])
+
+    assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+    assigner.assign_identities()
+
+    assert {record[2][0].identity, record[2][1].identity} == {"ABal", "ABar"}
+    assert assigner.division_caller is not None
+    assert any(
+        "curated two-cell stage" in warning
+        for warning in assigner.founder_assignment.warnings
+    )
+    assert all(
+        not nucleus.identity.startswith("Nuc")
+        for timepoint in record
+        for nucleus in timepoint
+        if nucleus.is_alive
+    )
+
+
+def test_canonical_pass_rejects_foreign_automatic_daughter_family():
+    """A classifier result cannot move daughters outside the parent's rule pair."""
+    parent = _make_nuc(1, 100, 100, 10.0, identity="AB", succ1=1, succ2=2)
+    record = [[parent], [
+        _make_nuc(1, 80, 100, 10.0, pred=1),
+        _make_nuc(2, 120, 100, 10.0, pred=1),
+    ]]
+
+    class ForeignFamilyCaller:
+        @staticmethod
+        def assign_names_multi_frame(*_args, **_kwargs):
+            return "NucWrongA", "NucWrongB"
+
+    assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+    assigner.division_caller = ForeignFamilyCaller()
+    assigner._use_canonical_rules(0)
+
+    assert {record[1][0].identity, record[1][1].identity} == {"ABa", "ABp"}
+
+
+def test_unrelated_canonical_pass_keeps_missing_classification_deferred():
+    """The AB/P1 bridge must not weaken unrelated partial-movie deferral."""
+    parent = _make_nuc(1, 100, 100, 10.0, identity="ABa", succ1=1, succ2=2)
+    record = [[parent], [
+        _make_nuc(1, 80, 100, 10.0, pred=1),
+        _make_nuc(2, 120, 100, 10.0, pred=1),
+    ]]
+
+    class DeferredCaller:
+        @staticmethod
+        def assign_names_multi_frame(*_args, **_kwargs):
+            return "", ""
+
+    assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+    assigner.division_caller = DeferredCaller()
+    assigner._use_canonical_rules(0)
+
+    assert all(nucleus.identity.startswith("Nuc") for nucleus in record[1])
+
+
+@pytest.mark.parametrize("axis_mode", ["inferred", "v2", "v1"])
+def test_forced_post_division_descendant_fixes_complementary_sister(
+    axis_mode: str,
+):
     record = _false_four_object_two_cell_stage()
     record[0][2].status = -1
     record[0][2].identity = ""
@@ -805,20 +1163,23 @@ def test_forced_post_division_descendant_survives_two_cell_recovery():
         _make_nuc(2, 100, 100, 10.0, pred=1),
         _make_nuc(3, 160, 100, 10.0, pred=2),
     ])
-    record[1][0].identity = "ABa"
-    record[1][0].assigned_id = "ABa"
+    record[1][0].identity = "ABp"
+    record[1][0].assigned_id = "ABp"
 
     assigner = IdentityAssigner(
         record,
-        auxinfo=_axis_configuration("v2"),
+        auxinfo=_axis_configuration(axis_mode),
         naming_method=NEWCANONICAL,
         z_pix_res=1.0,
     )
     assigner.assign_identities()
 
     assert {record[0][0].identity, record[0][1].identity} == {"AB", "P1"}
-    assert record[1][0].identity == "ABa"
-    assert record[1][0].assigned_id == "ABa"
+    assert {record[1][0].identity, record[1][1].identity} == {"ABa", "ABp"}
+    assert record[1][0].identity == "ABp"
+    assert record[1][0].assigned_id == "ABp"
+    assert record[1][1].identity == "ABa"
+    assert record[1][1].assigned_id == ""
     assert any(
         "curated two-cell stage" in warning
         for warning in assigner.founder_assignment.warnings

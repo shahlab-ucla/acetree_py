@@ -157,9 +157,12 @@ Kill begins from the selected `(time,index)` anchor and walks that component. It
 4. `AB` versus `P1` is resolved from observed division timing, then a trusted
    AP direction, then blastomere-size asymmetry. Rejected four-cell labels are
    never used as independent evidence.
-5. If ordering is still ambiguous, the survivors and their unforced
-   descendants receive neutral names. Supply body axes or more lineage data and
-   rerun naming rather than forcing an image-coordinate guess.
+5. If AB/P1 root ordering is still ambiguous, the survivors and their
+   unforced descendants receive neutral names. If the roots resolve, their
+   first divisions always retain the canonical families `ABa`/`ABp` and
+   `EMS`/`P2`. Missing body axes can lower confidence in which sister receives
+   which name, but cannot turn those four founders into unrelated `Nuc...`
+   roots.
 
 Use **Remove Nucleus** for isolated false detections. Use **Kill Cell** when an
 entire tracked continuation is spurious. Automatic renaming and the live/dead
@@ -202,7 +205,7 @@ ABa–ABp is **not** the LR axis. Moreover, the signed biological LR direction c
 
 Placeholder metadata such as `XXX`, zero-length vectors, or parallel AP/secondary vectors is invalid.
 
-AP alone is not a complete anatomical frame. If topology identifies the founders but DV/LR is unavailable, AceTree retains the trusted founder identities and any previously loaded downstream names, but defers new geometry-based daughter ordering. Newly encountered ambiguous branches receive neutral `Nuc...` identifiers rather than lab-coordinate-dependent biological suffixes. Applying a valid manual frame reruns naming and replaces those placeholders where the lineage rules are then defensible.
+AP alone is not a complete anatomical frame. If topology identifies the founders but DV/LR is unavailable, AceTree retains the trusted founder identities and any previously loaded downstream names, but defers geometry-dependent daughter ordering where the required axis is unknown. The curated false-four bridge is narrower: once AB/P1 are resolved, recovered AP plus the exact parent rules produces `ABa`/`ABp` and `EMS`/`P2`; a tied sister call uses deterministic successor order with a warning. Once those four founders overlap, AceTree attempts to reconstruct the full lineage frame. Unrelated ambiguous roots and later divisions that still lack their required axes receive neutral `Nuc...` identifiers rather than lab-coordinate-dependent biological suffixes. Applying a valid manual frame reruns naming and replaces those placeholders where the lineage rules are then defensible.
 
 ## 6. Manual Body-Axis Labeling and Correction
 
@@ -272,6 +275,9 @@ It returns both daughter names, confidence, governing axis label, source/provena
 | Only ABa and ABp are used to claim LR | Treat as insufficient anatomical evidence |
 | Founder topology is strong but no complete AP/DV/LR frame exists | Keep founder/loaded names; defer new biological daughter ordering and use neutral placeholders |
 | Two small polar detections are removed from a false four-object two-cell frame | Replace stale unforced four-cell labels with AB/P1 from timing/AP/size evidence; otherwise use neutral names; one full Undo restores names and status |
+| Recovered AB or P1 reaches its first division | Use the exact `ABa`/`ABp` or `EMS`/`P2` pair; preserve a valid loaded pair or warn when stable successor order is required |
+| Reopen a dataset saved with repaired AB/P1 roots but legacy `Nuc...` daughters | Upgrade those first daughters from the retained polar-body footprint without requiring another delete gesture |
+| Automatic classifier returns a foreign non-empty daughter pair | Replace it with the effective parent's RuleManager pair and warn; do not convert a deliberately deferred empty result |
 | Two founders are absent from a real four-cell sister-pair lineage | Preserve the surviving founder identities, even in later continuation frames or when the absent rows are small; do not invoke polar recovery |
 | Save fails midway | Old ZIP remains usable; history stays dirty |
 | Save As succeeds, then Save | Second save targets the new path |

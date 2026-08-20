@@ -296,7 +296,7 @@ AuxInfo selection is based on usability, not merely file presence. A v2 record m
 2. **Propagate forced names** (`_propagate_assigned_ids()`): extend each `assigned_id` only through live reciprocal one-successor continuations. Stop at divisions, dead/missing links, non-reciprocal links, or a different forced identity.
 3. Select orientation in precedence order: valid v2 (manual or imported), supported v1, per-timepoint lineage geometry, then static founder geometry.
 4. **Topology-based identification** (`identify_founders()`).
-5. If topology fails (confidence < 0.3): preserve compatible loaded names for partial movies, but invalidate any automatic founder hypothesis contradicted by current topology. A curated false four-object stage (two blastomeres plus two substantially smaller deleted polar detections) is reconciled to AB/P1 from timing, explicit AP, or blastomere-size evidence. Ambiguous ordering receives neutral names rather than stale four-cell labels. Legacy diamond-pattern identification remains available via `legacy_mode=True`.
+5. If topology fails (confidence < 0.3): preserve compatible loaded names for partial movies, but invalidate any automatic founder hypothesis contradicted by current topology. A curated false four-object stage (two blastomeres plus two substantially smaller deleted polar detections) is reconciled to AB/P1 from timing, explicit AP, or blastomere-size evidence. Ambiguous AB/P1 root ordering receives neutral names rather than stale four-cell labels. Once the roots resolve, the first reciprocal divisions are constrained to the exact RuleManager families `ABa`/`ABp` and `EMS`/`P2`, even before a complete body frame is available. Legacy diamond-pattern identification remains available via `legacy_mode=True`.
 6. Set up `DivisionCaller` with the selected orientation source and deterministic chronological axis caching.
 7. **Forward pass**: apply canonical rules from 4-cell stage onward (single-frame classification with quality-aware axis smoothing; multi-frame averaging disabled in lineage mode).
 8. Assign generic `Nuc_t_z_x_y` names to remaining unnamed cells.
@@ -328,6 +328,13 @@ One missing division is treated as right-censored unless its intact sister is
 observed beyond the other division. Reciprocal lineage ancestry is traced back
 through continuation frames; a genuine pair-of-sister-pairs four-cell lineage,
 or malformed claimed topology, vetoes recovery even when dead rows are small.
+Resolved AB/P1 continuations define a partial posterior→anterior direction.
+That direction orders their first divisions when possible, while RuleManager
+always constrains the unordered result to `ABa`/`ABp` or `EMS`/`P2`.
+Degenerate geometry preserves an exact loaded pair or uses deterministic
+successor order with an explicit warning instead of creating unrelated
+`Nuc...` roots. Once the recovered quartet overlaps, the pipeline rebuilds
+the lineage frame and resumes ordinary geometry-aware classification.
 Automatic name changes made during the structural rebuild are recorded in the
 same history boundary, so Undo/Redo restores exact name ownership as well as
 live/dead state. A failed post-commit naming pass is rolled back to its clean
@@ -344,6 +351,7 @@ Classifies each cell division to determine daughter names:
 4. Dot product with the rule's axis vector determines which daughter gets which name.
 5. Angle between division vector and rule axis maps to a confidence score.
 6. If confidence < 0.3, **deferred majority-vote evaluation**: follow daughters forward up to 8 frames, re-classify at each, and use majority vote.
+7. A non-empty automatic result must be the exact unordered RuleManager pair for the effective parent. Foreign classifier output is replaced by that canonical pair and warned; an empty result caused by an unavailable body frame remains deferred. Explicit `assigned_id` values still take priority.
 
 Four coordinate transform modes are selected by explicit precedence:
 

@@ -264,9 +264,10 @@ class IdentityAssigner:
                 )
 
                 # A complete explicit body frame can safely continue the
-                # normal daughter rules.  Two cells alone cannot establish
-                # DV/LR, so inferred mode keeps only the founder identities
-                # and gives uncertain descendants neutral names.
+                # normal daughter rules.  Without DV/LR, the recovered
+                # AB/P1 pair still supplies enough AP information to preserve
+                # each exact RuleManager daughter family.  Only the within-
+                # pair ordering may fall back to stable successor order.
                 if self.canonical_transform is not None and self.canonical_transform.active:
                     self._setup_division_caller("")
                 elif (
@@ -279,7 +280,41 @@ class IdentityAssigner:
                 if self.division_caller is not None:
                     self._use_canonical_rules(recovery_time)
                 else:
+                    recovered_ap = self._recovered_ap_direction(
+                        ab_component,
+                        p1_component,
+                    )
+                    stable_order_divisions = self._assign_rule_safe_descendants(
+                        invalidated_refs,
+                        start_index=recovery_time,
+                        ap_direction=recovered_ap,
+                        previous_identities=previous_identities,
+                    )
+                    if stable_order_divisions:
+                        fa.warnings.append(
+                            "Preserved canonical daughter families for "
+                            f"{stable_order_divisions} division(s) without a "
+                            "complete body frame; ambiguous sister order used "
+                            "stable successor order"
+                        )
                     self._assign_neutral_names(self.starting_index)
+                    recovered_frame = self._find_recovered_four_cell_frame(
+                        invalidated_refs,
+                        start_index=recovery_time,
+                    )
+                    if recovered_frame is not None:
+                        four_cell_time, founder_indices = recovered_frame
+                        fa.four_cell_time = four_cell_time
+                        fa.aba_idx = founder_indices["ABa"]
+                        fa.abp_idx = founder_indices["ABp"]
+                        fa.ems_idx = founder_indices["EMS"]
+                        fa.p2_idx = founder_indices["P2"]
+                        fa.ap_vector = recovered_ap
+                        fa.lr_vector = None
+                        fa.dv_vector = None
+                        self._setup_division_caller_from_founders()
+                        if self.division_caller is not None:
+                            self._use_canonical_rules(four_cell_time)
             else:
                 fa.warnings.append(
                     "Discarded stale four-cell identities after a curated "
@@ -374,17 +409,19 @@ class IdentityAssigner:
 
         The repair is intentionally narrow.  It requires exactly four retained
         rows at one timepoint, exactly two live and two dead, two unforced live
-        rows whose prior automatic names came from the four-cell family, two
-        substantially smaller deleted rows, and disjoint continuation
-        components.  The positive polar-size footprint avoids reinterpreting
-        ordinary two-cell partial or four-cell ablation movies.
+        rows whose prior automatic names came from the four-cell family (or an
+        already-reconciled automatic AB/P1 pair), two substantially smaller
+        deleted rows, and disjoint continuation components.  The AB/P1 form
+        upgrades datasets saved by the earlier root-only repair.  The positive
+        polar-size footprint avoids reinterpreting ordinary two-cell partial
+        or four-cell ablation movies.
 
         AB/P1 ordering uses the strongest available evidence in this order:
         future division timing, an explicit AP orientation, then blastomere
         size asymmetry.  The rejected four-cell labels are never reused as
         ordering evidence.  If no cue is available, the returned components
         are ``None`` so the caller can invalidate the impossible labels and
-        fail closed with neutral names.
+        fail closed with neutral root names.
         """
         end = min(self.ending_index, len(self.nuclei_record))
         for t in range(self.starting_index, end):
@@ -418,13 +455,22 @@ class IdentityAssigner:
 
             prior_at_time = previous_identities[t]
             if any(
-                nuc.assigned_id
-                or idx >= len(prior_at_time)
-                or prior_at_time[idx] not in _FOUR_CELL_AUTOMATIC_NAMES
+                nuc.assigned_id or idx >= len(prior_at_time)
                 for idx, nuc in alive
             ):
                 continue
-            if len({prior_at_time[idx] for idx, _nuc in alive}) != 2:
+            prior_live_names = [prior_at_time[idx] for idx, _nuc in alive]
+            stale_four_cell_hypothesis = (
+                len(set(prior_live_names)) == 2
+                and all(
+                    name in _FOUR_CELL_AUTOMATIC_NAMES
+                    for name in prior_live_names
+                )
+            )
+            already_reconciled_pair = set(prior_live_names) == {"AB", "P1"}
+            if not stale_four_cell_hypothesis and not already_reconciled_pair:
+                continue
+            if len(set(prior_live_names)) != 2:
                 # Duplicate automatic founder labels are corrupt state, not a
                 # trustworthy rejected four-cell hypothesis to reinterpret.
                 continue
@@ -452,11 +498,15 @@ class IdentityAssigner:
                 # retain this guard for malformed/non-reciprocal input.
                 continue
 
-            first_is_ab, source = self._order_two_cell_candidates(
-                t,
-                alive,
-                dead,
-            )
+            if already_reconciled_pair:
+                first_is_ab = prior_live_names[0] == "AB"
+                source = "existing reconciled AB/P1 state"
+            else:
+                first_is_ab, source = self._order_two_cell_candidates(
+                    t,
+                    alive,
+                    dead,
+                )
             if first_is_ab is None:
                 return invalidated, None, None, t, source
             if first_is_ab:
@@ -781,6 +831,306 @@ class IdentityAssigner:
             if nucleus.is_alive and not nucleus.assigned_id:
                 nucleus.identity = name
 
+    def _recovered_ap_direction(
+        self,
+        ab_component: set[tuple[int, int]],
+        p1_component: set[tuple[int, int]],
+    ) -> np.ndarray | None:
+        """Estimate posterior-to-anterior direction from recovered AB/P1.
+
+        AB and P1 roles have already been resolved by trusted timing, explicit
+        AP metadata, or the polar/blastomere size footprint.  Their physical
+        separation therefore supplies the partial AP frame needed to order the
+        two early founder divisions without inventing DV or LR axes.
+        """
+        ab_by_time = {time: index for time, index in ab_component}
+        p1_by_time = {time: index for time, index in p1_component}
+        samples: list[np.ndarray] = []
+        for time in sorted(ab_by_time.keys() & p1_by_time.keys()):
+            ab = self.nuclei_record[time][ab_by_time[time]]
+            p1 = self.nuclei_record[time][p1_by_time[time]]
+            delta = np.array(
+                [
+                    float(ab.x - p1.x),
+                    float(ab.y - p1.y),
+                    float(ab.z - p1.z) * self.z_pix_res,
+                ],
+                dtype=float,
+            )
+            norm = float(np.linalg.norm(delta))
+            if np.isfinite(norm) and norm > 1e-8:
+                samples.append(delta / norm)
+
+        if not samples:
+            return None
+        direction = np.mean(samples, axis=0)
+        norm = float(np.linalg.norm(direction))
+        if not np.isfinite(norm) or norm <= 1e-8:
+            return None
+        return direction / norm
+
+    def _find_recovered_four_cell_frame(
+        self,
+        scope: set[tuple[int, int]],
+        *,
+        start_index: int,
+    ) -> tuple[int, dict[str, int]] | None:
+        """Find the first complete recovered founder quartet in one frame."""
+        expected = {"ABa", "ABp", "EMS", "P2"}
+        end = min(self.ending_index, len(self.nuclei_record))
+        for time in range(max(0, start_index), end):
+            found: dict[str, int] = {}
+            duplicate = False
+            for index, nucleus in enumerate(self.nuclei_record[time]):
+                if (
+                    (time, index) not in scope
+                    or not nucleus.is_alive
+                    or nucleus.effective_name not in expected
+                ):
+                    continue
+                name = nucleus.effective_name
+                if name in found:
+                    duplicate = True
+                    break
+                found[name] = index
+            if not duplicate and set(found) == expected:
+                return time, found
+        return None
+
+    def _assign_rule_safe_descendants(
+        self,
+        scope: set[tuple[int, int]],
+        *,
+        start_index: int,
+        ap_direction: np.ndarray | None,
+        previous_identities: list[list[str]],
+    ) -> int:
+        """Repair the first AB/P1 divisions without changing daughter family.
+
+        A complete AP/DV/LR frame determines *which* sister receives each name,
+        but the unordered daughter pair is already fixed for recovered AB and
+        P1.  This bridge deliberately stops after those founder divisions;
+        later divisions return to the normal geometry-aware caller when a
+        complete four-founder frame can be reconstructed.
+        """
+        end = min(self.ending_index, len(self.nuclei_record))
+        stable_order_divisions = 0
+        for time in range(max(0, start_index), max(0, end - 1)):
+            next_nuclei = self.nuclei_record[time + 1]
+            for index, parent in enumerate(self.nuclei_record[time]):
+                if (time, index) not in scope or not parent.is_alive:
+                    continue
+                parent_name = parent.effective_name
+                if parent_name not in {"AB", "P1"}:
+                    continue
+
+                successors = [
+                    successor - 1
+                    for successor in (parent.successor1, parent.successor2)
+                    if successor > 0
+                ]
+                if not successors:
+                    continue
+                if any(
+                    not (0 <= successor < len(next_nuclei))
+                    or (time + 1, successor) not in scope
+                    or not next_nuclei[successor].is_alive
+                    or next_nuclei[successor].predecessor != index + 1
+                    for successor in successors
+                ):
+                    continue
+
+                if len(successors) == 1:
+                    successor = next_nuclei[successors[0]]
+                    if not successor.assigned_id:
+                        successor.identity = parent_name
+                    continue
+                if len(successors) != 2 or successors[0] == successors[1]:
+                    continue
+
+                daughter1 = next_nuclei[successors[0]]
+                daughter2 = next_nuclei[successors[1]]
+                first_component = self._continuation_component_refs(
+                    time + 1,
+                    successors[0],
+                )
+                second_component = self._continuation_component_refs(
+                    time + 1,
+                    successors[1],
+                )
+                if (
+                    not first_component
+                    or not second_component
+                    or first_component & second_component
+                    or not self._component_topology_is_valid(first_component)
+                    or not self._component_topology_is_valid(second_component)
+                ):
+                    warning = (
+                        f"{parent_name} daughters remain neutral because their "
+                        "continuation topology is malformed"
+                    )
+                    logger.warning("%s", warning)
+                    if self.founder_assignment is not None:
+                        self.founder_assignment.warnings.append(warning)
+                    continue
+
+                rule = self.rule_manager.get_rule(parent_name)
+                prior1 = self._prior_component_rule_name(
+                    first_component,
+                    previous_identities,
+                    {rule.daughter1, rule.daughter2},
+                )
+                prior2 = self._prior_component_rule_name(
+                    second_component,
+                    previous_identities,
+                    {rule.daughter1, rule.daughter2},
+                )
+                if {prior1, prior2} != {rule.daughter1, rule.daughter2}:
+                    prior1 = prior2 = ""
+                ordered = self._order_recovered_daughter_components(
+                    parent_name,
+                    time + 1,
+                    successors,
+                    first_component,
+                    second_component,
+                    ap_direction,
+                )
+                if ordered is not None:
+                    name1, name2, source = ordered
+                else:
+                    name1, name2, source = self._coerce_rule_daughter_pair(
+                        parent_name,
+                        prior1,
+                        prior2,
+                        allow_missing_fallback=True,
+                    )
+                expected = {name1, name2}
+                pair_components = first_component | second_component
+                collisions = [
+                    nucleus.effective_name
+                    for other_time, nuclei in enumerate(self.nuclei_record[:end])
+                    for other_index, nucleus in enumerate(nuclei)
+                    if nucleus.is_alive
+                    and (other_time, other_index) not in pair_components
+                    and nucleus.effective_name in expected
+                ]
+                if collisions:
+                    warning = (
+                        f"{parent_name} daughter family collides with existing "
+                        f"name(s) {sorted(set(collisions))}; duplicate ownership "
+                        "was retained for validation"
+                    )
+                    logger.warning("%s", warning)
+                    if self.founder_assignment is not None:
+                        self.founder_assignment.warnings.append(warning)
+
+                daughter1.identity = name1
+                daughter2.identity = name2
+                _use_preassigned_id(daughter1, daughter2)
+                if source == "stable successor order":
+                    stable_order_divisions += 1
+
+        return stable_order_divisions
+
+    def _order_recovered_daughter_components(
+        self,
+        parent_name: str,
+        daughter_time: int,
+        successors: list[int],
+        first_component: set[tuple[int, int]],
+        second_component: set[tuple[int, int]],
+        ap_direction: np.ndarray | None,
+    ) -> tuple[str, str, str] | None:
+        """Order a recovered founder pair from timing or averaged AP geometry."""
+        rule = self.rule_manager.get_rule(parent_name)
+        if parent_name == "P1":
+            first_division, first_last = self._division_observation(
+                daughter_time,
+                successors[0],
+            )
+            second_division, second_last = self._division_observation(
+                daughter_time,
+                successors[1],
+            )
+            first_is_ems: bool | None = None
+            if first_division is not None and second_division is not None:
+                if first_division != second_division:
+                    first_is_ems = first_division < second_division
+            elif first_division is not None and second_last > first_division:
+                first_is_ems = True
+            elif second_division is not None and first_last > second_division:
+                first_is_ems = False
+            if first_is_ems is not None:
+                if first_is_ems:
+                    return rule.daughter1, rule.daughter2, "future division timing"
+                return rule.daughter2, rule.daughter1, "future division timing"
+
+        if ap_direction is None:
+            return None
+        first_by_time = {time: index for time, index in first_component}
+        second_by_time = {time: index for time, index in second_component}
+        projections: list[float] = []
+        for time in sorted(first_by_time.keys() & second_by_time.keys()):
+            first = self.nuclei_record[time][first_by_time[time]]
+            second = self.nuclei_record[time][second_by_time[time]]
+            separation = np.array(
+                [
+                    float(first.x - second.x),
+                    float(first.y - second.y),
+                    float(first.z - second.z) * self.z_pix_res,
+                ],
+                dtype=float,
+            )
+            projection = float(np.dot(separation, ap_direction))
+            if np.isfinite(projection):
+                projections.append(projection)
+        if not projections:
+            return None
+        mean_projection = float(np.mean(projections))
+        if np.isclose(mean_projection, 0.0, atol=1e-8):
+            return None
+        if mean_projection > 0:
+            return rule.daughter1, rule.daughter2, "recovered AP"
+        return rule.daughter2, rule.daughter1, "recovered AP"
+
+    @staticmethod
+    def _prior_component_rule_name(
+        component: set[tuple[int, int]],
+        previous_identities: list[list[str]],
+        expected: set[str],
+    ) -> str:
+        """Return one consistent prior rule name from a continuation."""
+        names = {
+            previous_identities[time][index]
+            for time, index in component
+            if time < len(previous_identities)
+            and index < len(previous_identities[time])
+            and previous_identities[time][index]
+            and not previous_identities[time][index].startswith(NUC)
+        }
+        if len(names) == 1 and names <= expected:
+            return next(iter(names))
+        return ""
+
+    def _coerce_rule_daughter_pair(
+        self,
+        parent_name: str,
+        proposed1: str,
+        proposed2: str,
+        *,
+        allow_missing_fallback: bool = False,
+    ) -> tuple[str, str, str]:
+        """Return an exact RuleManager daughter pair and its provenance."""
+        rule = self.rule_manager.get_rule(parent_name)
+        expected = {rule.daughter1, rule.daughter2}
+
+        if proposed1 != proposed2 and {proposed1, proposed2} == expected:
+            return proposed1, proposed2, "division caller"
+        if not proposed1 or not proposed2:
+            if not allow_missing_fallback:
+                return "", "", "deferred"
+        return rule.daughter1, rule.daughter2, "stable successor order"
+
     def _component_topology_is_valid(
         self,
         component: set[tuple[int, int]],
@@ -893,8 +1243,10 @@ class IdentityAssigner:
         Continuations inherit a known parent identity.  At a division with no
         complete body frame, each still-unnamed daughter receives a neutral
         ``Nuc...`` identifier instead of a biological ``a/p``, ``d/v``, or
-        ``l/r`` suffix.  Reprocessing after a curator supplies valid axes can
-        then replace these placeholders with canonical names.
+        ``l/r`` suffix.  The curated two-cell bridge pre-fills the exact first
+        AB/P1 daughter families before this pass; this helper handles roots or
+        later axis-dependent divisions that remain unresolved.  Reprocessing
+        after a curator supplies valid axes can replace those placeholders.
         """
         end = min(self.ending_index, len(self.nuclei_record))
         for t in range(max(0, start_index), end):
@@ -1345,6 +1697,27 @@ class IdentityAssigner:
                         parent, dau1, dau2, timepoint=i + 1,
                         nuclei_record=self.nuclei_record,
                     )
+
+                safe_name1, safe_name2, source = self._coerce_rule_daughter_pair(
+                    pname,
+                    name1,
+                    name2,
+                )
+                if source == "deferred":
+                    logger.warning(
+                        "%s division remains unnamed because the division "
+                        "caller has no complete anatomical frame",
+                        pname,
+                    )
+                    continue
+                if source != "division caller":
+                    logger.warning(
+                        "%s division returned a foreign daughter family; "
+                        "preserving the canonical rule pair using %s",
+                        pname,
+                        source,
+                    )
+                name1, name2 = safe_name1, safe_name2
 
                 dau1.identity = name1
                 dau2.identity = name2

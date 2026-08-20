@@ -1236,7 +1236,7 @@ identity where algorithms intentionally differ.
 | Selected forward | Prefix cutoff is seed, gap, or diagnostic candidate | Prefix acceptance disabled |
 | Selected forward | Likely division under STOP | Stop before branch; offer direct rerun following both daughters when splitting is supported |
 | Naming | Forced EMS extended then divided | EMS preserved; automatic E/MS naming remains host-owned |
-| Naming | No valid body frame | Neutral names; tracker does not invent biological order |
+| Naming | No valid body frame | Unknown roots and axis-dependent later divisions remain neutral; a positively recovered AB/P1 pair still uses the exact first daughter families while reporting uncertain sister order |
 | Preview | Scrub time/Z and change contrast | Proposal unchanged; view state retained |
 | Preview | Discard | No model, history, dirty-state, or file change |
 | Commit | Proposal accepted | Exactly one history entry and one naming/tree rebuild |
