@@ -64,6 +64,9 @@ class _Viewer:
     def add_shapes(self, data, **kwargs):
         layer = _Layer(data, **kwargs)
         self.layers.append(layer)
+        # Napari activates newly added layers.  This matters because only the
+        # active Nuclei layer receives the ordinary cell click callbacks.
+        self.layers.selection.active = layer
         return layer
 
 
@@ -153,6 +156,49 @@ def test_overlay_editor_separation_atomic_redraw_and_3d_cleanup():
     integration.set_three_dimensional(False)
     assert integration.overlay_layer.visible
     assert len(integration.overlay_layer.data) == 1
+
+
+def test_roi_layers_return_left_and_right_click_ownership_to_nuclei():
+    document, track = _document()
+    viewer = _RealishViewer()
+    nuclei_layer = _Layer([], name="Nuclei")
+    viewer.layers.append(nuclei_layer)
+    viewer.layers.selection.active = nuclei_layer
+    restore_calls = []
+
+    def ensure_nuclei_active():
+        restore_calls.append(True)
+        viewer.layers.selection.active = nuclei_layer
+
+    app = SimpleNamespace(
+        viewer=viewer,
+        current_time=4,
+        current_plane=12,
+        _viewer_integration=SimpleNamespace(
+            _ensure_nuclei_active=ensure_nuclei_active,
+        ),
+    )
+    integration = RoiViewerIntegration(
+        app,
+        SimpleNamespace(document=document),
+        command_sink=lambda _command: None,
+    )
+
+    integration.setup_layers()
+    assert viewer.layers.selection.active is nuclei_layer
+
+    integration.enter_edit_mode(track.object_id, 4, track.frames[4].geometry)
+    assert viewer.layers.selection.active is integration.editor_layer
+    integration.cancel_edit()
+    assert viewer.layers.selection.active is nuclei_layer
+
+    integration.enter_edit_mode(track.object_id, 4, track.frames[4].geometry)
+    integration.editor_layer.data = [
+        np.array(((21.0, 11.0), (22.0, 19.0), (31.0, 15.0)))
+    ]
+    integration.finish_edit()
+    assert viewer.layers.selection.active is nuclei_layer
+    assert len(restore_calls) == 3
 
 
 def test_editor_drag_commits_once_at_release():

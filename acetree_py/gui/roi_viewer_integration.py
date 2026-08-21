@@ -238,6 +238,11 @@ class RoiViewerIntegration:
         self._lock_overlay()
         self._clear_editor()
         self.update_overlay()
+        # ``viewer.add_shapes`` selects each newly created layer.  The hidden
+        # editor is therefore active at this point unless we explicitly hand
+        # control back to the Nuclei layer, whose mouse callbacks implement
+        # the normal left/right-click cell interactions.
+        self._restore_cell_interaction_layer()
 
     @staticmethod
     def _add_shapes_layer(viewer: Any, **kwargs: Any) -> Any:
@@ -573,6 +578,7 @@ class RoiViewerIntegration:
         self._clear_editor()
         self._editor_session = None
         self._set_space_shortcut_enabled(True)
+        self._restore_cell_interaction_layer()
         if session.create_object:
             selector = getattr(self.app, "_on_roi_object_selected", None)
             if callable(selector):
@@ -661,6 +667,7 @@ class RoiViewerIntegration:
         self._editor_session = None
         self._clear_editor()
         self._set_space_shortcut_enabled(True)
+        self._restore_cell_interaction_layer()
         self._sync_panel_inspect()
 
     exit_edit_mode = cancel_edit
@@ -700,6 +707,14 @@ class RoiViewerIntegration:
             viewer.layers.selection.active = self.editor_layer
         except Exception:
             pass
+
+    def _restore_cell_interaction_layer(self) -> None:
+        """Return mouse ownership to the curated Nuclei layer."""
+
+        integration = getattr(self.app, "_viewer_integration", None)
+        restore = getattr(integration, "_ensure_nuclei_active", None)
+        if callable(restore):
+            restore()
 
     def on_view_changed(self, *, reason: str = "View changed") -> None:
         """Leave editing explicitly, then redraw for a time/Z navigation."""
