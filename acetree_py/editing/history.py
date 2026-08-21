@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Callable
 
-from .commands import EditCommand, NucleiRecord
+from .commands import EditCommand, EditEffect, NucleiRecord
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +237,14 @@ class EditHistory:
         """Command currently at the Undo boundary, or ``None`` when empty."""
 
         return self._undo_stack[-1].command if self._undo_stack else None
+
+    @property
+    def last_effects(self) -> frozenset[EditEffect]:
+        """Effects for the most recently committed do/undo/redo operation."""
+
+        if self.last_command is None:
+            return frozenset()
+        return self.last_command.effects
 
     @property
     def undo_description(self) -> str:

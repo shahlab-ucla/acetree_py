@@ -12,6 +12,7 @@ license = "MIT"
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
+    "scikit-image>=0.21",
     "tifffile>=2023.1",
     "typer>=0.9",
     "matplotlib>=3.7",

@@ -1166,7 +1166,13 @@ def create_image_provider_from_config(config) -> ImageProvider | None:
     stem = image_path.stem
 
     # Determine number of planes from config or by probing
-    num_planes = config.plane_end if config.plane_end > 0 else 50
+    plane_start = max(1, int(getattr(config, "plane_start", 1)))
+    plane_end = int(getattr(config, "plane_end", 0))
+    num_planes = (
+        plane_end - plane_start + 1
+        if plane_end >= plane_start
+        else 50
+    )
 
     # Create the base provider based on file naming pattern
     base_provider = _create_base_provider(
@@ -1367,7 +1373,14 @@ def _create_multi_channel_provider(config) -> ImageProvider | None:
 
         # Probe plane count from first file
         actual_planes = _probe_stack_planes(ch_path)
-        num_planes = actual_planes or config.plane_end or 50
+        plane_start = max(1, int(getattr(config, "plane_start", 1)))
+        plane_end = int(getattr(config, "plane_end", 0))
+        configured_planes = (
+            plane_end - plane_start + 1
+            if plane_end >= plane_start
+            else 50
+        )
+        num_planes = actual_planes or configured_planes
 
         provider = StackTiffProvider(directory=ch_dir, pattern=pattern)
         provider._num_planes_cached = num_planes

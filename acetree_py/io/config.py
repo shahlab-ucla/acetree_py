@@ -81,6 +81,7 @@ class AceTreeConfig:
         ending_index: Last timepoint to process.
         xy_res: XY pixel resolution in microns.
         z_res: Z-plane spacing in microns.
+        plane_start: First absolute z-plane index.
         plane_end: Last z-plane index.
         polar_size: Polar body filter size.
         axis_given: Pre-specified axis orientation string (e.g. "adl", "avr").
@@ -185,7 +186,7 @@ def _parse_xml_config(path: Path, config: AceTreeConfig) -> None:
             <end index="350"/>
             <naming method="NEWCANONICAL"/>
             <axis axis="adl"/>
-            <resolution xyRes="0.09" zRes="1.0" planeEnd="30"/>
+            <resolution xyRes="0.09" zRes="1.0" planeStart="1" planeEnd="30"/>
             <exprCorr type="blot"/>
             ...
         </embryo>
@@ -260,6 +261,9 @@ def _parse_xml_config(path: Path, config: AceTreeConfig) -> None:
             z = elem.get("zRes", "")
             if z:
                 config.z_res = float(z)
+            ps = elem.get("planeStart", "")
+            if ps:
+                config.plane_start = int(ps)
             pe = elem.get("planeEnd", "")
             if pe:
                 config.plane_end = int(pe)
@@ -330,6 +334,8 @@ def _parse_legacy_config(path: Path, config: AceTreeConfig) -> None:
                 config.xy_res = float(value)
             elif key == "zRes" and value:
                 config.z_res = float(value)
+            elif key == "planeStart" and value:
+                config.plane_start = int(value)
             elif key == "planeEnd" and value:
                 config.plane_end = int(value)
             elif key == "exprCorr" and value:

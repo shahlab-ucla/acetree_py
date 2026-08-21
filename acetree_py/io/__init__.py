@@ -1,0 +1,41 @@
+"""AceTree dataset I/O helpers."""
+
+from .roi_sidecar import (
+    ROI_SIDECAR_SCHEMA,
+    ROI_SIDECAR_SUFFIX,
+    ROI_SIDECAR_VERSION,
+    RoiJsonLimits,
+    RoiSidecarChecksumError,
+    RoiSidecarConflictError,
+    RoiSidecarError,
+    RoiSidecarFormatError,
+    RoiSidecarLoad,
+    RoiSidecarToken,
+    StagedRoiSidecar,
+    commit_staged_roi_sidecar,
+    discard_staged_roi_sidecar,
+    read_roi_sidecar,
+    roi_sidecar_path,
+    stage_roi_sidecar,
+    write_roi_sidecar,
+)
+
+__all__ = [
+    "ROI_SIDECAR_SCHEMA",
+    "ROI_SIDECAR_SUFFIX",
+    "ROI_SIDECAR_VERSION",
+    "RoiJsonLimits",
+    "RoiSidecarChecksumError",
+    "RoiSidecarConflictError",
+    "RoiSidecarError",
+    "RoiSidecarFormatError",
+    "RoiSidecarLoad",
+    "RoiSidecarToken",
+    "StagedRoiSidecar",
+    "commit_staged_roi_sidecar",
+    "discard_staged_roi_sidecar",
+    "read_roi_sidecar",
+    "roi_sidecar_path",
+    "stage_roi_sidecar",
+    "write_roi_sidecar",
+]

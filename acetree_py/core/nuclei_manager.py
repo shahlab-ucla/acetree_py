@@ -166,7 +166,7 @@ class NucleiManager:
         mgr.movie = Movie(
             xy_res=config.xy_res,
             z_res=config.z_res,
-            num_planes=config.plane_end,
+            num_planes=max(0, config.plane_end - config.plane_start + 1),
         )
         mgr._naming_method = config.naming_method.value
         mgr._expr_corr = config.expr_corr
@@ -198,7 +198,7 @@ class NucleiManager:
         mgr.movie = Movie(
             xy_res=config.xy_res,
             z_res=config.z_res,
-            num_planes=config.plane_end,
+            num_planes=max(0, config.plane_end - config.plane_start + 1),
         )
         mgr._naming_method = config.naming_method.value
         mgr._expr_corr = config.expr_corr

@@ -80,11 +80,12 @@ def write_config_xml(config: AceTreeConfig, path: str | Path) -> None:
     if config.polar_size != 45:  # only write non-default
         SubElement(root, "polar", size=str(config.polar_size))
 
-    # <resolution xyRes="..." zRes="..." planeEnd="..."/>
+    # <resolution xyRes="..." zRes="..." planeStart="..." planeEnd="..."/>
     SubElement(
         root, "resolution",
         xyRes=str(config.xy_res),
         zRes=str(config.z_res),
+        planeStart=str(config.plane_start),
         planeEnd=str(config.plane_end),
     )
 

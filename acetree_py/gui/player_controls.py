@@ -150,9 +150,18 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         self._btn_plane_down.setFixedWidth(32)
         self._btn_plane_down.clicked.connect(self.app.prev_plane)
 
-        max_planes = self.app.image_provider.num_planes if self.app.image_provider else 30
+        config = self.app.manager.config
+        min_plane = int(config.plane_start) if config is not None else 1
+        if self.app.image_provider is not None:
+            max_plane = min_plane + max(
+                0, int(self.app.image_provider.num_planes) - 1
+            )
+        elif config is not None:
+            max_plane = int(config.plane_end)
+        else:
+            max_plane = min_plane + 29
         self._plane_spin = QSpinBox()
-        self._plane_spin.setRange(1, max(1, max_planes))
+        self._plane_spin.setRange(min_plane, max(min_plane, max_plane))
         self._plane_spin.setValue(self.app.current_plane)
         self._plane_spin.setPrefix("z=")
         self._plane_spin.valueChanged.connect(self.app.set_plane)
@@ -217,8 +226,18 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         max_t = self.app.manager.num_timepoints
         self._time_label.setText(f"/ {max_t}")
 
-        max_p = self.app.image_provider.num_planes if self.app.image_provider else 30
-        self._plane_label.setText(f"/ {max_p}")
+        config = self.app.manager.config
+        min_plane = int(config.plane_start) if config is not None else 1
+        if self.app.image_provider is not None:
+            max_plane = min_plane + max(
+                0, int(self.app.image_provider.num_planes) - 1
+            )
+        elif config is not None:
+            max_plane = int(config.plane_end)
+        else:
+            max_plane = min_plane + 29
+        self._plane_spin.setRange(min_plane, max(min_plane, max_plane))
+        self._plane_label.setText(f"/ {max_plane}")
 
         self._btn_3d.setChecked(self.app._3d_mode)
 

@@ -17,11 +17,13 @@ matplotlib and rendered to SVG without another data transformation.
 from __future__ import annotations
 
 import csv
+import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from numbers import Real
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Iterable, Mapping, TextIO
 
 from ..core.cell import Cell
@@ -40,6 +42,91 @@ class TimeAxisMode(str, Enum):
 # The cell and time arguments let a channel read from an external measurement
 # table as well as from fields stored directly on a Nucleus.
 ChannelValueReader = Callable[[Cell, int, Nucleus], Real | None]
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalSeriesSubject:
+    """A renderer-neutral subject sampled at absolute timepoints.
+
+    Cell plotting remains available through :class:`ExpressionPlotService`.
+    This smaller contract lets other annotation streams, including
+    subcellular ROI tracks, reuse the same time-axis, smoothing, rendering,
+    and export behavior without pretending to be a ``Cell``.
+    """
+
+    key: str
+    label: str
+    start_time: int
+    end_time: int
+    sample_times: tuple[int, ...]
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.key.strip():
+            raise ValueError("Temporal-series subject key cannot be blank")
+        if not self.label.strip():
+            raise ValueError("Temporal-series subject label cannot be blank")
+        canonical = tuple(int(time) for time in self.sample_times)
+        if self.start_time <= 0 or self.end_time <= 0:
+            raise ValueError("Temporal-series bounds must be positive")
+        if self.end_time < self.start_time:
+            raise ValueError("Temporal-series end_time cannot precede start_time")
+        if any(time <= 0 for time in canonical):
+            raise ValueError("Temporal-series timepoints must be positive")
+        if canonical != tuple(sorted(set(canonical))):
+            raise ValueError("Temporal-series timepoints must be unique and sorted")
+        if any(time < self.start_time or time > self.end_time for time in canonical):
+            raise ValueError("Temporal-series sample_times must lie within the subject span")
+        object.__setattr__(self, "sample_times", canonical)
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+
+@dataclass(frozen=True, slots=True)
+class ScalarSeriesSample:
+    """One scalar value, or an explicit missing reason."""
+
+    value: Real | None
+    missing_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.value is not None and self.missing_reason is not None:
+            raise ValueError("A scalar sample cannot have both a value and a missing reason")
+
+
+ScalarSeriesReader = Callable[
+    [TemporalSeriesSubject, int],
+    Real | ScalarSeriesSample | None,
+]
+ScalarSeriesMeasurementKey = Callable[[TemporalSeriesSubject], str]
+
+
+@dataclass(frozen=True, slots=True)
+class ScalarSeriesChannel:
+    """A scalar reader whose freshness and coverage belong to the source."""
+
+    key: str
+    label: str
+    reader: ScalarSeriesReader
+    unit: str = ""
+    source_token: Callable[[], object] | None = None
+    validate_coverage: Callable[[tuple[TemporalSeriesSubject, ...]], object] | None = None
+    measurement_key: ScalarSeriesMeasurementKey | None = None
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.key.strip():
+            raise ValueError("Scalar-series channel key cannot be blank")
+        if not self.label.strip():
+            raise ValueError("Scalar-series channel label cannot be blank")
+        if not callable(self.reader):
+            raise TypeError("Scalar-series channel reader must be callable")
+        if self.source_token is not None and not callable(self.source_token):
+            raise TypeError("source_token must be callable")
+        if self.validate_coverage is not None and not callable(self.validate_coverage):
+            raise TypeError("validate_coverage must be callable")
+        if self.measurement_key is not None and not callable(self.measurement_key):
+            raise TypeError("measurement_key must be callable")
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
 @dataclass(frozen=True)
@@ -83,6 +170,9 @@ class ExpressionPlotSeries:
     x_values: tuple[float, ...]
     y_values: tuple[float | None, ...]
     raw_y_values: tuple[float | None, ...] | None = None
+    missing_reasons: tuple[str | None, ...] | None = None
+    subject_metadata: Mapping[str, object] | None = None
+    measurement_key: str | None = None
 
     def __post_init__(self) -> None:
         lengths = {
@@ -92,6 +182,8 @@ class ExpressionPlotSeries:
         }
         if self.raw_y_values is not None:
             lengths.add(len(self.raw_y_values))
+        if self.missing_reasons is not None:
+            lengths.add(len(self.missing_reasons))
         if len(lengths) != 1:
             raise ValueError("Expression plot series arrays must have equal length")
 
@@ -142,13 +234,24 @@ class ExpressionPlotData:
     time_mode: TimeAxisMode
     series: tuple[ExpressionPlotSeries, ...]
     smoothing_sigma: float = 0.0
+    source_token: object | None = None
+    series_kind: str = "cells"
+    channel_metadata: Mapping[str, object] | None = None
 
     @property
     def x_label(self) -> str:
         if self.time_mode is TimeAxisMode.RELATIVE:
-            return "Time since birth (timepoints)"
+            return (
+                "Time since first segmentation (timepoints)"
+                if self.series_kind == "subcellular_objects"
+                else "Time since birth (timepoints)"
+            )
         if self.time_mode is TimeAxisMode.NORMALIZED:
-            return "Normalized lifetime"
+            return (
+                "Normalized observed track"
+                if self.series_kind == "subcellular_objects"
+                else "Normalized lifetime"
+            )
         return "Timepoint"
 
     @property
@@ -264,6 +367,184 @@ class ExpressionPlotService:
             series=tuple(output),
             smoothing_sigma=float(smoothing_sigma),
         )
+
+
+class TemporalSeriesService:
+    """Build ordinary :class:`ExpressionPlotData` from generic subjects."""
+
+    def build(
+        self,
+        subjects: Iterable[TemporalSeriesSubject],
+        channel: ScalarSeriesChannel,
+        time_mode: TimeAxisMode | str = TimeAxisMode.ABSOLUTE,
+        *,
+        styles: Mapping[str, ExpressionSeriesStyle] | None = None,
+        smoothing_sigma: float = 0.0,
+        series_kind: str = "subjects",
+    ) -> ExpressionPlotData:
+        selected = tuple(subjects)
+        mode = _coerce_time_mode(time_mode)
+        smoothing_sigma = float(smoothing_sigma)
+        gaussian_smooth_missing((), smoothing_sigma)
+        styles = styles or {}
+        if channel.validate_coverage is not None:
+            channel.validate_coverage(selected)
+        source_token = channel.source_token() if channel.source_token is not None else None
+        expression_channel = ExpressionChannel(
+            key=channel.key,
+            label=channel.label,
+            unit=channel.unit,
+            reader=lambda _cell, _time, _nucleus: None,
+        )
+        output: list[ExpressionPlotSeries] = []
+
+        for subject in selected:
+            absolute_times = subject.sample_times
+            if not absolute_times and subject.end_time >= subject.start_time:
+                absolute_times = tuple(range(subject.start_time, subject.end_time + 1))
+            style = (
+                styles.get(subject.key)
+                or styles.get(subject.label)
+                or ExpressionSeriesStyle()
+            )
+            x_values = tuple(
+                _time_coordinate(time, subject.start_time, subject.end_time, mode)
+                for time in absolute_times
+            )
+            raw_values: list[float | None] = []
+            missing_reasons: list[str | None] = []
+            for time in absolute_times:
+                value, reason = _scalar_series_value(channel, subject, time)
+                raw_values.append(value)
+                missing_reasons.append(reason)
+            plotted = gaussian_smooth_missing(raw_values, smoothing_sigma)
+            output.append(
+                ExpressionPlotSeries(
+                    cell_key=subject.key,
+                    cell_name=subject.label,
+                    label=style.label or subject.label,
+                    channel_key=channel.key,
+                    color=style.color,
+                    start_time=subject.start_time,
+                    end_time=subject.end_time,
+                    absolute_timepoints=absolute_times,
+                    x_values=x_values,
+                    y_values=plotted,
+                    raw_y_values=tuple(raw_values),
+                    missing_reasons=tuple(missing_reasons),
+                    subject_metadata=subject.metadata,
+                    measurement_key=(
+                        channel.measurement_key(subject)
+                        if channel.measurement_key is not None
+                        else None
+                    ),
+                )
+            )
+
+        return ExpressionPlotData(
+            channel=expression_channel,
+            time_mode=mode,
+            series=tuple(output),
+            smoothing_sigma=smoothing_sigma,
+            source_token=source_token,
+            series_kind=series_kind,
+            channel_metadata=channel.metadata,
+        )
+
+
+def export_scalar_series_csv(
+    data: ExpressionPlotData,
+    output: str | Path | TextIO,
+) -> None:
+    """Export generic scalar subjects with provenance and missing reasons."""
+
+    should_close = False
+    if isinstance(output, (str, Path)):
+        path = Path(output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stream = path.open("w", newline="", encoding="utf-8")
+        should_close = True
+    else:
+        stream = output
+    try:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(
+            [
+                "series_label",
+                "subject_label",
+                "subject_key",
+                "measurement_key",
+                "series_kind",
+                "channel",
+                "channel_label",
+                "channel_unit",
+                "time_mode",
+                "x",
+                "absolute_time",
+                "raw_value",
+                "value",
+                "missing_reason",
+                "smoothing_sigma",
+                "source_token",
+                "source_image_channel",
+                "metric_key",
+                "algorithm_version",
+                "channel_metadata",
+                "subject_metadata",
+                "color",
+            ]
+        )
+        for series in data.series:
+            reasons = series.missing_reasons or (None,) * len(series.y_values)
+            subject_metadata = json.dumps(
+                dict(series.subject_metadata or {}),
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            channel_metadata = dict(data.channel_metadata or {})
+            encoded_channel_metadata = json.dumps(
+                channel_metadata,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            for absolute_time, x_value, raw_value, value, reason in zip(
+                series.absolute_timepoints,
+                series.x_values,
+                series.source_y_values,
+                series.y_values,
+                reasons,
+            ):
+                writer.writerow(
+                    [
+                        series.label,
+                        series.cell_name,
+                        series.cell_key,
+                        series.measurement_key or "",
+                        data.series_kind,
+                        data.channel.key,
+                        data.channel.label,
+                        data.channel.unit,
+                        data.time_mode.value,
+                        _format_number(x_value),
+                        absolute_time,
+                        "" if raw_value is None else _format_number(raw_value),
+                        "" if value is None else _format_number(value),
+                        reason or "",
+                        _format_number(data.smoothing_sigma),
+                        "" if data.source_token is None else str(data.source_token),
+                        channel_metadata.get("source_image_channel", ""),
+                        channel_metadata.get("metric_key", ""),
+                        channel_metadata.get("algorithm_version", ""),
+                        encoded_channel_metadata,
+                        subject_metadata,
+                        series.color or "",
+                    ]
+                )
+    finally:
+        if should_close:
+            stream.close()
 
 
 def nucleus_attribute_channel(
@@ -430,6 +711,37 @@ def _finite_value_or_none(
     return converted if math.isfinite(converted) else None
 
 
+def _scalar_series_value(
+    channel: ScalarSeriesChannel,
+    subject: TemporalSeriesSubject,
+    time: int,
+) -> tuple[float | None, str | None]:
+    raw = channel.reader(subject, time)
+    if isinstance(raw, ScalarSeriesSample):
+        value = raw.value
+        reason = raw.missing_reason
+    elif raw is not None and hasattr(raw, "value"):
+        # ROI measurement values deliberately remain independent of this
+        # plotting module.  Accept their small ``value``/``reason`` protocol
+        # without coupling the generic series core back to ROI analysis.
+        value = getattr(raw, "value")
+        reason = getattr(raw, "missing_reason", getattr(raw, "reason", None))
+    else:
+        value = raw
+        reason = None
+    if value is None:
+        return None, str(reason or "missing")
+    if not isinstance(value, Real):
+        raise TypeError(
+            f"Channel {channel.key!r} returned a non-numeric value for "
+            f"subject {subject.label!r} at time {time}: {value!r}"
+        )
+    converted = float(value)
+    if not math.isfinite(converted):
+        return None, str(reason or "nonfinite")
+    return converted, None
+
+
 def _format_number(value: float) -> str:
     """Compact, round-trip-safe output without gratuitous trailing zeros."""
 
@@ -470,8 +782,13 @@ __all__ = [
     "ExpressionPlotSeries",
     "ExpressionPlotService",
     "ExpressionSeriesStyle",
+    "ScalarSeriesChannel",
+    "ScalarSeriesSample",
+    "TemporalSeriesService",
+    "TemporalSeriesSubject",
     "TimeAxisMode",
     "export_expression_plot_csv",
+    "export_scalar_series_csv",
     "mapped_expression_channel",
     "nucleus_attribute_channel",
 ]

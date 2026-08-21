@@ -27,6 +27,7 @@ import numpy as np
 if TYPE_CHECKING:
     import napari
     from ..core.nucleus import Nucleus
+    from ..core.roi_manager import RoiManager
     from ..tracking.api import (
         Calibration,
         ComponentSpec,
@@ -152,9 +153,15 @@ class AceTreeApp:
         self,
         manager: NucleiManager,
         image_provider: ImageProvider | None = None,
+        roi_manager: RoiManager | None = None,
     ) -> None:
+        from ..analysis.roi_measurements import RoiMeasurementEngine
+        from ..core.roi_manager import RoiManager
+
         self.manager = manager
         self.image_provider = image_provider
+        self.roi_manager = roi_manager if roi_manager is not None else RoiManager()
+        self.roi_measurement_engine = RoiMeasurementEngine(image_provider)
         self.edit_history = EditHistory(
             manager.nuclei_record,
             on_edit=self._on_edit,
@@ -170,6 +177,8 @@ class AceTreeApp:
         # a rename elsewhere from stealing the selection and makes unnamed
         # selections safe across time navigation.
         self.selection_anchor: tuple[int, int] | None = None
+        self.current_roi_object_id = None
+        self.current_roi_class_id = None
         self.tracking: bool = True
 
         # Save As becomes the target for subsequent Save operations even for
@@ -206,6 +215,8 @@ class AceTreeApp:
         self._cell_info_panel = None
         self._contrast_tools = None
         self._edit_panel = None
+        self._subcellular_objects_panel = None
+        self._roi_viewer_integration = None
         self._tracking_menu = None
         self._tracking_menu_actions: dict[str, object] = {}
         self._lineage_widgets: list = []  # Multiple lineage tree panels
@@ -213,6 +224,8 @@ class AceTreeApp:
         self._expression_plot_window_counter: int = 0
         self._expression_comparison_windows: list = []
         self._expression_comparison_window_counter: int = 0
+        self._roi_scalar_plot_windows: list = []
+        self._roi_profile_windows: list = []
         self._expression_dataset_repository = None
         self._expression_repository_shutdown_connected = False
         self._panel_menu_actions: dict[str, object] = {}
@@ -282,7 +295,15 @@ class AceTreeApp:
             else:
                 logger.warning("No image provider could be created from config")
 
-        app = cls(manager, image_provider)
+        from ..core.roi_manager import RoiManager
+
+        roi_manager = RoiManager.from_config(
+            config,
+            image_provider=image_provider,
+            num_timepoints=manager.num_timepoints,
+        )
+        app = cls(manager, image_provider, roi_manager=roi_manager)
+        app.roi_manager.reconcile_cells(app._resolve_roi_cell_anchor)
         tracking_sidecar = config.zip_file.with_suffix(".tracking.json")
         if tracking_sidecar.exists():
             try:
@@ -302,10 +323,13 @@ class AceTreeApp:
                 )
         app.current_time = 1
         # Set initial plane to middle of stack
+        plane_start = int(config.plane_start)
         if image_provider is not None and image_provider.num_planes > 0:
-            app.current_plane = max(1, image_provider.num_planes // 2)
+            app.current_plane = plane_start + (image_provider.num_planes - 1) // 2
         else:
-            app.current_plane = max(1, (manager.movie.num_planes or 30) // 2)
+            app.current_plane = plane_start + max(
+                0, ((manager.movie.num_planes or 30) - 1) // 2
+            )
         return app
 
     @classmethod
@@ -359,12 +383,25 @@ class AceTreeApp:
                         type(image_provider).__name__,
                         image_provider.num_planes)
 
-        app = cls(manager, image_provider)
+        from ..core.roi_manager import RoiManager
+
+        app = cls(
+            manager,
+            image_provider,
+            roi_manager=RoiManager.from_config(
+                config,
+                image_provider=image_provider,
+                num_timepoints=manager.num_timepoints,
+            ),
+        )
         app.current_time = 1
+        plane_start = int(config.plane_start)
         if image_provider is not None and image_provider.num_planes > 0:
-            app.current_plane = max(1, image_provider.num_planes // 2)
+            app.current_plane = plane_start + (image_provider.num_planes - 1) // 2
         else:
-            app.current_plane = max(1, (manager.movie.num_planes or 30) // 2)
+            app.current_plane = plane_start + max(
+                0, ((manager.movie.num_planes or 30) - 1) // 2
+            )
         if tracking_request is not None:
             app._pending_initial_tracking_request = tracking_request
             app._last_global_tracking_request = tracking_request
@@ -422,6 +459,8 @@ class AceTreeApp:
         from .edit_panel import EditPanel
         from .lineage_list import LineageListWidget
         from .player_controls import PlayerControls
+        from .roi_viewer_integration import RoiViewerIntegration
+        from .subcellular_objects_panel import SubcellularObjectsPanel
         from .viewer_integration import ViewerIntegration
 
         self.viewer = napari.Viewer(title="AceTree")
@@ -462,6 +501,8 @@ class AceTreeApp:
         # Set up nucleus overlay
         self._viewer_integration = ViewerIntegration(self)
         self._viewer_integration.setup_layers()
+        self._roi_viewer_integration = RoiViewerIntegration(self)
+        self._roi_viewer_integration.setup_layers()
 
         # ── Dock widgets ──────────────────────────────────────────
         # Bottom: Player Controls, then Lineage Tree
@@ -495,6 +536,25 @@ class AceTreeApp:
             area="right",
         )
 
+        self._subcellular_objects_panel = SubcellularObjectsPanel(
+            self,
+            browse_only=False,
+        )
+        self._subcellular_objects_panel.objectSelected.connect(
+            self._on_roi_object_selected
+        )
+        self._subcellular_objects_panel.modeChanged.connect(
+            self._on_roi_mode_changed
+        )
+        self._subcellular_objects_panel.actionRequested.connect(
+            self._on_roi_action_requested
+        )
+        self.viewer.window.add_dock_widget(
+            self._subcellular_objects_panel,
+            name="Subcellular Objects",
+            area="right",
+        )
+
         # Bottom: Lineage tree view (graphical Sulston tree)
         self.add_lineage_panel()
 
@@ -509,6 +569,7 @@ class AceTreeApp:
         self._add_tracking_menu_actions()
         # Add File → Measure… action
         self._add_file_menu_actions()
+        self._add_objects_menu_actions()
 
         # Keyboard shortcuts
         self._bind_keys()
@@ -1190,20 +1251,68 @@ class AceTreeApp:
         if not path_str:
             return None  # User cancelled
 
-        saved_path = self._do_save(Path(path_str), mark_saved=False)
+        target_path = Path(path_str)
+        config = self.manager.config
+        config_path = Path(config.config_file) if config is not None else Path()
+        has_xml = config_path != Path() and config_path.suffix.lower() == ".xml"
+        saved_path = self._do_save(
+            target_path,
+            mark_saved=False,
+            include_roi=not has_xml,
+            roi_destination=(
+                None if has_xml else target_path.with_suffix(".subcellular-rois.json")
+            ),
+        )
         if saved_path is None:
             return None
 
-        config = self.manager.config
         old_zip_path = config.zip_file if config is not None else None
         if config is not None:
             config.zip_file = saved_path
-            config_path = config.config_file
-            if config_path != Path() and config_path.suffix.lower() == ".xml":
+            if has_xml:
+                config_stage = None
+                roi_stage = None
                 try:
-                    from ..io.config_writer import write_config_xml
+                    from ..io.dataset_transaction import DatasetTransaction
+                    from ..io.roi_sidecar import (
+                        RoiSidecarConflictError,
+                        read_roi_sidecar,
+                        roi_sidecar_path,
+                    )
 
-                    write_config_xml(config, config_path)
+                    config_stage = _stage_config_xml(config, config_path)
+                    transaction = DatasetTransaction()
+                    if self.roi_manager.is_dirty:
+                        roi_destination = (
+                            self.roi_manager.sidecar_path
+                            or roi_sidecar_path(config_path)
+                        )
+                        roi_stage = self.roi_manager.stage_save(roi_destination)
+                        sidecar = roi_stage.sidecar
+                        precondition = None
+                        if not roi_stage.replaces_protected_sidecar:
+                            expected = sidecar.expected_token
+                            destination = sidecar.destination
+
+                            def ensure_roi_unchanged() -> None:
+                                loaded = read_roi_sidecar(destination)
+                                current = None if loaded is None else loaded.token
+                                if current != expected:
+                                    raise RoiSidecarConflictError(
+                                        "ROI sidecar changed externally immediately "
+                                        f"before Save As: {destination}"
+                                    )
+
+                            precondition = ensure_roi_unchanged
+                        transaction.add(
+                            sidecar.temp_path,
+                            sidecar.destination,
+                            precondition=precondition,
+                        )
+                    transaction.add(config_stage, config_path)
+                    transaction.commit()
+                    if roi_stage is not None:
+                        self.roi_manager.finalize_external_commit(roi_stage)
                 except Exception:
                     # The target ZIP is a valid standalone copy, but Save As
                     # is not a successful retarget unless the source config
@@ -1225,15 +1334,28 @@ class AceTreeApp:
                         "not changed.",
                     )
                     return None
+                finally:
+                    if roi_stage is not None:
+                        self.roi_manager.discard_save(roi_stage)
+                    if config_stage is not None:
+                        config_stage.unlink(missing_ok=True)
 
         self.manager._config_dirty = False
         self._save_path_override = saved_path
         self.edit_history.mark_saved()
         return saved_path
 
-    def _do_save(self, path: Path, *, mark_saved: bool = True) -> Path | None:
-        """Write nuclei_record to *path* and report success/failure."""
+    def _do_save(
+        self,
+        path: Path,
+        *,
+        mark_saved: bool = True,
+        include_roi: bool = True,
+        roi_destination: Path | None = None,
+    ) -> Path | None:
+        """Write authoritative dataset artifacts and report success/failure."""
         config_stage: Path | None = None
+        roi_stage = None
         try:
             config = self.manager.config
             final_commit = None
@@ -1252,27 +1374,90 @@ class AceTreeApp:
 
                     final_commit = commit_config
 
+            if include_roi and self.roi_manager.is_dirty:
+                if roi_destination is None:
+                    roi_destination = self.roi_manager.sidecar_path
+                if roi_destination is None:
+                    from ..io.roi_sidecar import roi_sidecar_path
+
+                    roi_destination = roi_sidecar_path(None, path)
+                roi_stage = self.roi_manager.stage_save(roi_destination)
+
+            if roi_stage is not None or config_stage is not None:
+                from ..io.dataset_transaction import DatasetTransaction
+                from ..io.roi_sidecar import (
+                    RoiSidecarConflictError,
+                    read_roi_sidecar,
+                )
+
+                transaction = DatasetTransaction()
+                if roi_stage is not None:
+                    sidecar = roi_stage.sidecar
+                    precondition = None
+                    if not roi_stage.replaces_protected_sidecar:
+                        expected = sidecar.expected_token
+                        destination = sidecar.destination
+
+                        def ensure_roi_unchanged() -> None:
+                            loaded = read_roi_sidecar(destination)
+                            current = None if loaded is None else loaded.token
+                            if current != expected:
+                                raise RoiSidecarConflictError(
+                                    "ROI sidecar changed externally immediately "
+                                    f"before save: {destination}"
+                                )
+
+                        precondition = ensure_roi_unchanged
+                    transaction.add(
+                        sidecar.temp_path,
+                        sidecar.destination,
+                        precondition=precondition,
+                    )
+                if config_stage is not None:
+                    transaction.add(config_stage, config_path)
+
+                def commit_authoritative_stages() -> None:
+                    transaction.commit()
+
+                final_commit = commit_authoritative_stages
+
             if final_commit is None:
                 self.manager.save(path)
             else:
                 self.manager.save(path, final_commit=final_commit)
+            if roi_stage is not None:
+                self.roi_manager.finalize_external_commit(roi_stage)
+            if config_stage is not None:
                 self.manager._config_dirty = False
             if self._tracking_results:
-                from ..tracking.persistence import (
-                    tracking_sidecar_path,
-                    write_tracking_proposal,
-                )
+                try:
+                    from ..tracking.persistence import (
+                        tracking_sidecar_path,
+                        write_tracking_proposal,
+                    )
 
-                write_tracking_proposal(
-                    tracking_sidecar_path(path),
-                    self._tracking_results[-1],
-                )
-                self._tracking_sidecar_managed = True
+                    write_tracking_proposal(
+                        tracking_sidecar_path(path),
+                        self._tracking_results[-1],
+                    )
+                    self._tracking_sidecar_managed = True
+                except Exception:
+                    logger.warning(
+                        "Authoritative data saved, but tracking provenance did not",
+                        exc_info=True,
+                    )
             elif self._tracking_sidecar_managed:
-                from ..tracking.persistence import tracking_sidecar_path
+                try:
+                    from ..tracking.persistence import tracking_sidecar_path
 
-                tracking_sidecar_path(path).unlink(missing_ok=True)
-                self._tracking_sidecar_managed = False
+                    tracking_sidecar_path(path).unlink(missing_ok=True)
+                    self._tracking_sidecar_managed = False
+                except OSError:
+                    logger.warning(
+                        "Authoritative data saved, but stale tracking provenance "
+                        "could not be removed",
+                        exc_info=True,
+                    )
             if mark_saved:
                 self.edit_history.mark_saved()
             logger.info("Saved nuclei to %s", path)
@@ -1288,6 +1473,8 @@ class AceTreeApp:
                 )
             return None
         finally:
+            if roi_stage is not None:
+                self.roi_manager.discard_save(roi_stage)
             if config_stage is not None:
                 try:
                     config_stage.unlink(missing_ok=True)
@@ -1388,6 +1575,7 @@ class AceTreeApp:
         time = max(1, min(time, self.manager.num_timepoints))
         if time == self.current_time:
             return
+        self._exit_roi_mode()
         self.current_time = time
 
         # Track cell across time
@@ -1409,10 +1597,18 @@ class AceTreeApp:
         Args:
             plane: 1-based z-plane index.
         """
-        max_planes = self.image_provider.num_planes if self.image_provider else 30
-        plane = max(1, min(plane, max_planes))
+        config = self.manager.config
+        plane_start = int(config.plane_start) if config is not None else 1
+        if self.image_provider is not None:
+            plane_end = plane_start + max(0, int(self.image_provider.num_planes) - 1)
+        elif config is not None:
+            plane_end = int(config.plane_end)
+        else:
+            plane_end = plane_start + 29
+        plane = max(plane_start, min(plane, plane_end))
         if plane == self.current_plane:
             return
+        self._exit_roi_mode()
         self.current_plane = plane
         if self.current_cell_name:
             self.update_display()
@@ -1466,6 +1662,37 @@ class AceTreeApp:
             if any(t == time and candidate is nuc for t, candidate in cell.nuclei):
                 return cell
         return None
+
+    def _resolve_roi_cell_anchor(self, time: int, index: int):
+        """Resolve one persisted physical ROI association fail-closed."""
+
+        from ..core.subcellular_roi import CellResolution, NucleusAnchor
+
+        t0 = int(time) - 1
+        i0 = int(index) - 1
+        record = self.manager.nuclei_record
+        if not (0 <= t0 < len(record)) or not (0 <= i0 < len(record[t0])):
+            return None
+        nucleus = record[t0][i0]
+        if not nucleus.is_alive:
+            return None
+        cell = self._cell_for_nucleus(int(time), nucleus)
+        if cell is None:
+            return None
+        birth_time, birth_nucleus = min(cell.nuclei, key=lambda item: item[0])
+        return CellResolution(
+            value=cell,
+            name=cell.name,
+            birth_anchor=NucleusAnchor(
+                timepoint=int(birth_time),
+                index=int(birth_nucleus.index),
+            ),
+            centroid_xyz_px=(
+                float(nucleus.x),
+                float(nucleus.y),
+                float(nucleus.z),
+            ),
+        )
 
     def _selection_name(self, time: int, nuc) -> str:
         """Return the current display name for a physically anchored nucleus."""
@@ -1680,6 +1907,7 @@ class AceTreeApp:
         """
         # Interaction modes are exclusive.  A relink target click must never
         # also be interpreted as an Add/Track gesture afterward.
+        self._exit_roi_mode()
         self.exit_add_mode()
         self.exit_placement_mode()
         if self._edit_panel is not None:
@@ -1725,6 +1953,7 @@ class AceTreeApp:
     def enter_add_mode(self) -> None:
         """Enter click-to-add mode. Left-click places a nucleus."""
         switch_from_3d = self._3d_mode
+        self._exit_roi_mode()
         if self._relink_pick_mode:
             self.cancel_relink_pick_mode()
         self.exit_placement_mode()
@@ -2296,6 +2525,7 @@ class AceTreeApp:
             default_size: Default nucleus diameter for placed nuclei.
         """
         switch_from_3d = self._3d_mode
+        self._exit_roi_mode()
         if self._relink_pick_mode:
             self.cancel_relink_pick_mode()
         self.exit_add_mode()
@@ -2572,6 +2802,8 @@ class AceTreeApp:
             self._3d_mode = False
             return
         enabled = bool(enabled)
+        if enabled:
+            self._exit_roi_mode()
         if enabled and (self._add_mode or self._placement_mode):
             # Manual placement requires a definite image plane. Do not carry
             # an armed 2D click mode into 3D, where the same buttons would be
@@ -2600,6 +2832,8 @@ class AceTreeApp:
                 self._exit_3d()
         finally:
             self._changing_ndisplay = False
+        if self._roi_viewer_integration is not None:
+            self._roi_viewer_integration.set_three_dimensional(enabled)
         if self._player_controls is not None:
             self._player_controls.refresh()
 
@@ -3102,6 +3336,9 @@ class AceTreeApp:
             else:
                 self._viewer_integration.update_overlays()
 
+        if self._roi_viewer_integration:
+            self._roi_viewer_integration.update_overlay()
+
         if self._contrast_tools:
             self._contrast_tools.refresh()
 
@@ -3110,6 +3347,9 @@ class AceTreeApp:
 
         if self._edit_panel:
             self._edit_panel.refresh()
+
+        if self._subcellular_objects_panel:
+            self._subcellular_objects_panel.refresh()
 
         if self._global_tracking_dialog is not None:
             try:
@@ -3155,8 +3395,388 @@ class AceTreeApp:
         if self._viewer_integration:
             self._viewer_integration.update_overlays()
 
+        if self._roi_viewer_integration:
+            self._roi_viewer_integration.update_overlay()
+
         if self._player_controls:
             self._player_controls.refresh()
+
+        if self._subcellular_objects_panel:
+            self._subcellular_objects_panel.refresh()
+
+    def _on_roi_object_selected(self, object_id) -> None:
+        """Keep ROI and nucleus selection as independent UI state."""
+
+        self.current_roi_object_id = object_id
+        track = self.roi_manager.get_object(object_id) if object_id is not None else None
+        self.current_roi_class_id = None if track is None else track.class_id
+
+    def _on_roi_mode_changed(self, mode: str) -> None:
+        """Keep ROI authoring mutually exclusive with other canvas modes."""
+
+        if mode == "inspect":
+            return
+        if self._3d_mode:
+            self.set_3d_mode(False)
+        if self._add_mode:
+            self.exit_add_mode()
+        if self._placement_mode:
+            self.exit_placement_mode()
+        if self._relink_pick_mode:
+            self.cancel_relink_pick_mode()
+        if self._edit_panel is not None:
+            try:
+                self._edit_panel._btn_add.setChecked(False)
+                self._edit_panel._btn_track.setChecked(False)
+            except Exception:
+                pass
+        if mode in {"draw_polygon", "draw_polyline", "draw_contour_stack"}:
+            try:
+                self._begin_roi_drawing(mode)
+            except (KeyError, TypeError, ValueError, RuntimeError) as error:
+                self._say(str(error))
+                if self._roi_viewer_integration is not None:
+                    self._roi_viewer_integration.cancel_edit()
+                if self._subcellular_objects_panel is not None:
+                    self._subcellular_objects_panel.set_mode("inspect")
+
+    def _begin_roi_drawing(self, mode: str) -> None:
+        """Start a model-free draft for a new track or an undecided frame."""
+
+        panel = self._subcellular_objects_panel
+        integration = self._roi_viewer_integration
+        if panel is None or integration is None:
+            raise RuntimeError("The subcellular object editor is unavailable")
+        from ..core.subcellular_roi import ContourStack3D
+
+        track = self.roi_manager.get_object(self.current_roi_object_id)
+        frame = None if track is None else track.frames.get(int(self.current_time))
+        geometry = None if frame is None else frame.geometry
+        continuing_stack = (
+            mode == "draw_contour_stack"
+            and isinstance(geometry, ContourStack3D)
+        )
+        if track is not None and (
+            frame is None or frame.presence.value == "absent" or continuing_stack
+        ):
+            object_id = track.object_id
+            class_id = track.class_id
+        else:
+            object_id = None
+            class_id = panel.selected_class_id or self.current_roi_class_id
+        if class_id is None:
+            raise ValueError("Choose an object class before drawing")
+        object_class = self.roi_manager.get_class(class_id)
+        if object_class is None:
+            raise ValueError("The selected object class no longer exists")
+        integration.begin_drawing(
+            class_id=class_id,
+            object_id=object_id,
+            timepoint=int(self.current_time),
+            z_plane=int(self.current_plane),
+            kind=mode,
+            cell_ref=self._roi_cell_ref_from_selected(),
+            geometry=geometry if continuing_stack else None,
+        )
+        target = (
+            f"{object_class.name} #{track.instance_index}"
+            if object_id is not None
+            else f"new {object_class.name} object"
+        )
+        self._say(
+            f"Drawing {target} at t={self.current_time}, z={self.current_plane}; "
+            "double-click to close the shape, then press Finish or Enter"
+        )
+
+    def _roi_cell_ref_from_selected(self):
+        """Capture the selected same-frame cell as a persistent ROI anchor."""
+
+        selected = self.get_selected_nucleus(int(self.current_time))
+        if selected is None:
+            return None
+        nucleus, selected_time, _index = selected
+        return self._roi_cell_ref_for_nucleus(selected_time, nucleus)
+
+    def _roi_cell_ref_for_nucleus(self, timepoint: int, nucleus):
+        """Build a stable same-frame ROI association for a picked nucleus."""
+
+        selected_time = int(timepoint)
+        cell = self._cell_for_nucleus(selected_time, nucleus)
+        if cell is None:
+            return None
+        from ..core.subcellular_roi import CellRef, NucleusAnchor
+
+        birth_time, birth_nucleus = min(cell.nuclei, key=lambda item: item[0])
+        return CellRef(
+            nucleus_anchor=NucleusAnchor(selected_time, nucleus.index),
+            cell_birth_anchor=NucleusAnchor(birth_time, birth_nucleus.index),
+            name_snapshot=cell.name,
+            centroid_snapshot_xyz_px=(nucleus.x, nucleus.y, nucleus.z),
+        )
+
+    def _exit_roi_mode(self) -> bool:
+        """Cancel transient ROI authoring and restore the dock to Inspect."""
+
+        integration = self._roi_viewer_integration
+        panel = self._subcellular_objects_panel
+        editing = bool(integration is not None and integration.editing)
+        mode = getattr(panel, "mode", "inspect") if panel is not None else "inspect"
+        mode_value = str(getattr(mode, "value", mode))
+        changed = editing or mode_value != "inspect"
+        if integration is not None:
+            integration.cancel_edit()
+        if panel is not None:
+            current_mode = getattr(panel, "mode", "inspect")
+            if str(getattr(current_mode, "value", current_mode)) != "inspect":
+                panel.set_mode("inspect")
+        return changed
+
+    def _on_roi_action_requested(self, action: str, object_id) -> None:
+        """Dispatch browse/curation actions from the Objects dock."""
+
+        from ..editing.roi_commands import (
+            AssociateRoiFrame,
+            CopyRoiFrameDraft,
+            DeleteRoiFrame,
+            MarkRoiFrameAbsent,
+            MarkRoiFrameReviewed,
+        )
+
+        timepoint = int(self.current_time)
+        try:
+            if action == "finish_drawing":
+                if self._roi_viewer_integration is None:
+                    raise RuntimeError("The ROI editor is unavailable")
+                self._roi_viewer_integration.finish_edit()
+                return
+            if action == "cancel_drawing":
+                self._exit_roi_mode()
+                return
+            if action == "manage_classes":
+                self._create_roi_class_from_dialog()
+                return
+            if action == "set_visibility":
+                return
+            if object_id is None:
+                return
+            track = self.roi_manager.get_object(object_id)
+            if track is None:
+                raise ValueError("The selected ROI object no longer exists")
+            if action == "pick_cell":
+                picked_time = timepoint
+
+                def associate_picked_cell(selected_time, nucleus) -> None:
+                    if int(selected_time) != picked_time:
+                        self._say(
+                            "The view time changed while picking an association; "
+                            "pick the cell again"
+                        )
+                        return
+                    cell_ref = self._roi_cell_ref_for_nucleus(
+                        selected_time,
+                        nucleus,
+                    )
+                    if cell_ref is None:
+                        self._say("The picked nucleus has no current cell")
+                        return
+                    self._run_edit_action(
+                        self.edit_history.do,
+                        AssociateRoiFrame(
+                            self.roi_manager,
+                            object_id,
+                            picked_time,
+                            cell_ref,
+                        ),
+                    )
+
+                self.enter_relink_pick_mode(associate_picked_cell)
+                self._say(
+                    "Right-click a nucleus at this timepoint to associate it "
+                    "with the selected subcellular object; Escape cancels"
+                )
+                return
+            if action == "mark_reviewed":
+                self._run_edit_action(
+                    self.edit_history.do,
+                    MarkRoiFrameReviewed(self.roi_manager, object_id, timepoint),
+                )
+            elif action == "mark_absent":
+                self._run_edit_action(
+                    self.edit_history.do,
+                    MarkRoiFrameAbsent(self.roi_manager, object_id, timepoint),
+                )
+            elif action == "delete_frame":
+                self._run_edit_action(
+                    self.edit_history.do,
+                    DeleteRoiFrame(self.roi_manager, object_id, timepoint),
+                )
+            elif action in {"use_selected_cell", "clear_association"}:
+                cell_ref = None
+                if action == "use_selected_cell":
+                    cell_ref = self._roi_cell_ref_from_selected()
+                    if cell_ref is None:
+                        raise ValueError("Select a live cell at this timepoint first")
+                self._run_edit_action(
+                    self.edit_history.do,
+                    AssociateRoiFrame(
+                        self.roi_manager, object_id, timepoint, cell_ref
+                    ),
+                )
+            elif action == "copy_previous":
+                previous = max(
+                    (value for value in track.segmented_times if value < timepoint),
+                    default=None,
+                )
+                if previous is None:
+                    raise ValueError("There is no earlier segmented frame to copy")
+                self._run_edit_action(
+                    self.edit_history.do,
+                    CopyRoiFrameDraft(
+                        self.roi_manager,
+                        object_id,
+                        previous,
+                        timepoint,
+                    ),
+                )
+            elif action in {"previous", "next"}:
+                times = track.segmented_times
+                candidates = (
+                    [value for value in times if value < timepoint]
+                    if action == "previous"
+                    else [value for value in times if value > timepoint]
+                )
+                if candidates:
+                    self.set_time(max(candidates) if action == "previous" else min(candidates))
+            elif action == "edit":
+                frame = track.frames.get(timepoint)
+                if frame is None or frame.geometry is None:
+                    raise ValueError("The selected object has no geometry at this timepoint")
+                self._roi_viewer_integration.enter_edit_mode(
+                    object_id,
+                    timepoint,
+                    frame.geometry,
+                    z_plane=self.current_plane,
+                )
+                if self._subcellular_objects_panel is not None:
+                    self._subcellular_objects_panel.set_mode("edit")
+            elif action == "measure":
+                snapshot = self.roi_measurement_engine.measure(
+                    self.roi_manager,
+                    object_ids=(object_id,),
+                )
+                self._refresh_roi_scalar_plot_windows(snapshot)
+                self._say(
+                    f"Measured {len(snapshot.samples)} ROI channel samples"
+                )
+            elif action == "plot_track":
+                from .roi_scalar_plot_window import RoiScalarPlotWindow
+
+                parent = (
+                    self.viewer.window._qt_window
+                    if self.viewer is not None
+                    else None
+                )
+                window = RoiScalarPlotWindow.from_app(
+                    self,
+                    object_ids=(object_id,),
+                    parent=parent,
+                )
+                window.destroyed.connect(
+                    lambda *_args, item=window: (
+                        self._roi_scalar_plot_windows.remove(item)
+                        if item in self._roi_scalar_plot_windows
+                        else None
+                    )
+                )
+                self._roi_scalar_plot_windows.append(window)
+                window.show()
+            elif action == "plot_profiles":
+                snapshot = self.roi_measurement_engine.latest_snapshot
+                if snapshot is None:
+                    raise ValueError("Measure this object with spatial profiles first")
+                from .roi_profile_window import RoiProfileSeries, RoiProfileWindow
+
+                profiles = tuple(
+                    RoiProfileSeries(
+                        label=f"t={sample.timepoint}, channel {sample.image_channel + 1}",
+                        profile=sample.profile,
+                        object_id=sample.object_id,
+                        timepoint=sample.timepoint,
+                        image_channel=sample.image_channel,
+                    )
+                    for sample in snapshot.samples.values()
+                    if sample.object_id == str(object_id) and sample.profile is not None
+                )
+                if not profiles:
+                    raise ValueError(
+                        "No line profiles are available; remeasure with Profiles enabled"
+                    )
+                window = RoiProfileWindow(profiles)
+                window.destroyed.connect(
+                    lambda *_args, item=window: (
+                        self._roi_profile_windows.remove(item)
+                        if item in self._roi_profile_windows
+                        else None
+                    )
+                )
+                self._roi_profile_windows.append(window)
+                window.show()
+        except (KeyError, ValueError, RuntimeError) as error:
+            self._say(str(error))
+
+    def _refresh_roi_scalar_plot_windows(self, snapshot=None) -> None:
+        """Refresh live scalar plots only after a measurement snapshot publishes."""
+
+        for window in tuple(self._roi_scalar_plot_windows):
+            try:
+                window.on_measurements_updated(snapshot)
+            except RuntimeError as error:
+                if "deleted" in str(error).lower():
+                    try:
+                        self._roi_scalar_plot_windows.remove(window)
+                    except ValueError:
+                        pass
+                else:
+                    logger.exception("Failed to refresh ROI scalar plot window")
+            except Exception:  # noqa: BLE001 - measurement remains successful
+                logger.exception("Failed to refresh ROI scalar plot window")
+
+    def _create_roi_class_from_dialog(self) -> None:
+        """Create one class through the minimum safe class-management flow."""
+
+        if self.viewer is None:
+            raise RuntimeError("Object classes can be created after the GUI opens")
+        from qtpy.QtGui import QColor
+        from qtpy.QtWidgets import QColorDialog, QInputDialog
+
+        from ..editing.roi_commands import CreateObjectClass
+
+        parent = self.viewer.window._qt_window
+        name, accepted = QInputDialog.getText(
+            parent,
+            "New Subcellular Object Class",
+            "Class name:",
+        )
+        name = str(name).strip()
+        if not accepted or not name:
+            return
+        color = QColorDialog.getColor(
+            QColor("#2ec4b6"),
+            parent,
+            "Class color",
+        )
+        if not color.isValid():
+            return
+        red, green, blue, alpha = color.getRgbF()
+        command = CreateObjectClass(
+            self.roi_manager,
+            name,
+            (float(red), float(green), float(blue), float(alpha)),
+        )
+        self._run_edit_action(self.edit_history.do, command)
+        if self._subcellular_objects_panel is not None:
+            self._subcellular_objects_panel.refresh()
+            self._subcellular_objects_panel.select_class(command.created_class_id)
 
     def get_cell_info_text(self) -> str:
         """Build the cell info display text for the currently selected cell.
@@ -3333,8 +3953,11 @@ class AceTreeApp:
 
         for ch in range(n_ch):
             try:
+                config = self.manager.config
+                plane_start = int(config.plane_start) if config is not None else 1
+                provider_plane = self.current_plane - plane_start + 1
                 plane_data = self.image_provider.get_plane(
-                    self.current_time, self.current_plane, channel=ch
+                    self.current_time, provider_plane, channel=ch
                 )
             except (FileNotFoundError, IndexError) as e:
                 logger.warning("Could not load image ch%d: %s", ch, e)
@@ -3392,7 +4015,20 @@ class AceTreeApp:
             nuc = self._find_nucleus_via_chain(cell, self.current_time)
         if nuc:
             self._set_selection_from_nucleus(self.current_time, nuc)
-            self.current_plane = max(1, round(nuc.z + NUCZINDEXOFFSET))
+            config = self.manager.config
+            plane_start = int(config.plane_start) if config is not None else 1
+            if self.image_provider is not None:
+                plane_end = plane_start + max(
+                    0, int(self.image_provider.num_planes) - 1
+                )
+            elif config is not None:
+                plane_end = int(config.plane_end)
+            else:
+                plane_end = plane_start + 29
+            self.current_plane = max(
+                plane_start,
+                min(round(nuc.z + NUCZINDEXOFFSET), plane_end),
+            )
 
     def _find_nucleus_via_chain(self, cell, target_time: int):
         """Walk the predecessor / successor chain in ``nuclei_record``
@@ -3453,17 +4089,47 @@ class AceTreeApp:
         return None
 
     def _on_edit(self) -> None:
-        """Callback after any edit command — rebuild tree and refresh display."""
+        """Route one committed edit to only the derived state it affects."""
+        from ..editing.commands import EditEffect
+
         cmd = self.edit_history.last_command
         self._last_post_commit_refresh_error = None
         self._sync_tracking_provenance(cmd)
-        # Expression values are derived from nucleus geometry and topology.
-        # Every committed edit, including undo/redo, advances the concurrency
-        # token so plots cannot export values measured against an older state.
-        self.manager.mark_data_edited(
-            (id(self.edit_history), self.edit_history.change_counter)
+        effects = (
+            frozenset((EditEffect.NUCLEI_TOPOLOGY,))
+            if cmd is None
+            else cmd.effects
         )
-        is_structural = cmd is None or cmd.structural
+        nuclear_effects = {
+            EditEffect.NUCLEI_TOPOLOGY,
+            EditEffect.NUCLEUS_GEOMETRY,
+        }
+        has_nuclear_effect = bool(effects & nuclear_effects)
+        is_structural = EditEffect.NUCLEI_TOPOLOGY in effects
+
+        if has_nuclear_effect:
+            # Nuclear expression values are derived from nucleus geometry and
+            # topology. ROI-only edits must not make them stale.
+            self.manager.mark_data_edited(
+                (id(self.edit_history), self.edit_history.change_counter)
+            )
+
+        if EditEffect.ROI_GEOMETRY in effects:
+            object_id = getattr(cmd, "object_id", None)
+            timepoint = getattr(cmd, "timepoint", getattr(cmd, "time", None))
+            if object_id is not None and timepoint is not None:
+                self.roi_measurement_engine.invalidate_frame(object_id, timepoint)
+            else:
+                self.roi_measurement_engine.cache.clear()
+        elif EditEffect.ROI_ASSOCIATION in effects:
+            object_id = getattr(cmd, "object_id", None)
+            timepoint = getattr(cmd, "timepoint", getattr(cmd, "time", None))
+            if object_id is not None and timepoint is not None:
+                self.roi_measurement_engine.invalidate_association(
+                    object_id, timepoint
+                )
+        if EditEffect.CONFIG in effects:
+            self.roi_measurement_engine.invalidate_calibration()
 
         if is_structural:
             # A few programmatic callers still set ``current_cell_name``
@@ -3488,24 +4154,28 @@ class AceTreeApp:
             if self._lineage_list:
                 self._lineage_list.rebuild()
 
+        if is_structural or EditEffect.ROI_ASSOCIATION in effects:
+            self.roi_manager.reconcile_cells(self._resolve_roi_cell_anchor)
+
         # Rendering is an observer of the curated data, not part of the edit
         # transaction. At this point the command, revision, provenance, and
         # undo entry have already committed. Do not let a napari/layer redraw
         # failure masquerade as a rejected edit (which can leave a cyan draft
         # drawn over the newly curated marker).
-        for window in tuple(self._expression_plot_windows):
-            try:
-                window.on_document_edited(structural=is_structural)
-            except RuntimeError as error:
-                if "deleted" in str(error).lower():
-                    try:
-                        self._expression_plot_windows.remove(window)
-                    except ValueError:
-                        pass
-                else:
+        if has_nuclear_effect:
+            for window in tuple(self._expression_plot_windows):
+                try:
+                    window.on_document_edited(structural=is_structural)
+                except RuntimeError as error:
+                    if "deleted" in str(error).lower():
+                        try:
+                            self._expression_plot_windows.remove(window)
+                        except ValueError:
+                            pass
+                    else:
+                        self._report_committed_refresh_failure(cmd, error)
+                except Exception as error:  # noqa: BLE001 - optional observer
                     self._report_committed_refresh_failure(cmd, error)
-            except Exception as error:  # noqa: BLE001 - isolate optional observer
-                self._report_committed_refresh_failure(cmd, error)
         try:
             self.update_display()
         except Exception as error:
@@ -3851,6 +4521,100 @@ class AceTreeApp:
         measure_action.triggered.connect(self._on_measure)
         file_menu.addAction(measure_action)
 
+    def _add_objects_menu_actions(self) -> None:
+        """Add dedicated ROI measurement and dock entry points."""
+
+        try:
+            qt_window = self.viewer.window._qt_window
+            menu_bar = qt_window.menuBar()
+        except Exception:
+            return
+        objects_menu = None
+        for action in menu_bar.actions():
+            if action.menu() and action.text().lower().replace("&", "") == "objects":
+                objects_menu = action.menu()
+                break
+        if objects_menu is None:
+            objects_menu = menu_bar.addMenu("&Objects")
+
+        from qtpy.QtWidgets import QAction
+
+        measure_action = QAction("Measure Subcellular Objects…", qt_window)
+        measure_action.setStatusTip(
+            "Measure raw scalar intensities and optional thick-line profiles"
+        )
+        measure_action.triggered.connect(self._on_measure_rois)
+        objects_menu.addAction(measure_action)
+        show_action = QAction("Show Subcellular Objects", qt_window)
+        show_action.triggered.connect(self._show_subcellular_objects_panel)
+        objects_menu.addAction(show_action)
+
+    def _show_subcellular_objects_panel(self) -> None:
+        if self.viewer is None or self._subcellular_objects_panel is None:
+            return
+        try:
+            dock = next(
+                (
+                    item
+                    for item in self.viewer.window._dock_widgets.values()
+                    if item.widget() is self._subcellular_objects_panel
+                ),
+                None,
+            )
+            if dock is not None:
+                dock.setVisible(True)
+                dock.raise_()
+        except (AttributeError, RuntimeError):
+            logger.debug("Could not reveal the Subcellular Objects dock")
+
+    def _on_measure_rois(self) -> None:
+        if self.viewer is None or self.image_provider is None:
+            self._say("No image source is available for ROI measurement")
+            return
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QApplication, QDialog, QProgressDialog
+
+        from .roi_measure_dialog import RoiMeasureDialog
+
+        dialog = RoiMeasureDialog(self, parent=self.viewer.window._qt_window)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        request = dialog.build_request()
+        progress = QProgressDialog(
+            "Measuring subcellular objects…",
+            "Cancel",
+            0,
+            1,
+            self.viewer.window._qt_window,
+        )
+        progress.setWindowTitle("Measure Subcellular Objects")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        def progress_cb(completed: int, total: int) -> bool:
+            progress.setMaximum(max(1, total))
+            progress.setValue(completed)
+            progress.setLabelText(
+                f"Measuring ROI channel sample {completed}/{max(1, total)}…"
+            )
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        try:
+            snapshot = self.roi_measurement_engine.measure(
+                request,
+                progress_cb=progress_cb,
+            )
+        except Exception as error:
+            logger.exception("ROI measurement failed")
+            self._say(f"ROI measurement failed: {error}")
+            return
+        finally:
+            progress.close()
+        self._refresh_roi_scalar_plot_windows(snapshot)
+        self._say(f"Measured {len(snapshot.samples)} ROI channel samples")
+
     def _on_measure(self) -> None:
         """Run the Measure orchestrator from a File → Measure… dialog.
 
@@ -4064,6 +4828,8 @@ class AceTreeApp:
         if self._relink_pick_mode:
             self.cancel_relink_pick_mode()
             changed = True
+        if self._exit_roi_mode():
+            changed = True
 
         if self._edit_panel:
             dialog = getattr(self._edit_panel, "_auto_track_dialog", None)
@@ -4093,6 +4859,14 @@ class AceTreeApp:
                     changed = True
             except RuntimeError:
                 self._global_tracking_dialog = None
+
+    def _handle_space_shortcut(self) -> None:
+        """Keep Space available for temporary pan while editing an ROI."""
+
+        integration = self._roi_viewer_integration
+        if integration is not None and integration.editing:
+            return
+        self.deselect_cell()
 
     def _bind_keys(self) -> None:
         """Bind keyboard shortcuts to the napari viewer."""
@@ -4174,12 +4948,14 @@ class AceTreeApp:
                 ("D", self.next_time),
                 ("W", self.next_plane),
                 ("S", self.prev_plane),
-                ("Space", self.deselect_cell),
+                ("Space", self._handle_space_shortcut),
             ]
             for key, handler in nav_bindings:
                 sc = QShortcut(QKeySequence(key), qt_window)
                 sc.setContext(Qt.WindowShortcut)
                 sc.activated.connect(handler)
                 self._nav_shortcuts.append(sc)
+                if key == "Space":
+                    self._space_shortcut = sc
         except Exception as e:
             logger.warning("Could not install application-wide shortcuts: %s", e)

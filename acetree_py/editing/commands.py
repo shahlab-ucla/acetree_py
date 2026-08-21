@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from ..core.nucleus import NILLI, Nucleus, validate_storable_name
@@ -29,6 +30,29 @@ logger = logging.getLogger(__name__)
 
 # Type alias for the nuclei record
 NucleiRecord = list[list[Nucleus]]
+
+
+class EditEffect(str, Enum):
+    """A derived-data domain affected by an edit.
+
+    The string values are intentionally stable: application code, plugins,
+    and persisted diagnostics may compare them without importing this enum.
+    ``EditCommand.structural`` remains the compatibility API for the existing
+    nucleus editor; new routing code should prefer :attr:`EditCommand.effects`.
+    """
+
+    NUCLEI_TOPOLOGY = "nuclei_topology"
+    NUCLEUS_GEOMETRY = "nucleus_geometry"
+    ROI_GEOMETRY = "roi_geometry"
+    ROI_ASSOCIATION = "roi_association"
+    ROI_METADATA = "roi_metadata"
+    CONFIG = "config"
+
+
+# A descriptive alias used by a few integrations.  Keep one enum type so set
+# equality and serialization stay straightforward.
+EditEffectDomain = EditEffect
+EditDomain = EditEffect
 
 
 class EditCommand(ABC):
@@ -70,6 +94,20 @@ class EditCommand(ABC):
         naming + tree rebuild in _on_edit and just refresh the display.
         """
         return True
+
+    @property
+    def effects(self) -> frozenset[EditEffect]:
+        """Domains whose derived state may need refreshing after this edit.
+
+        Existing commands did not declare domains.  Their legacy
+        ``structural`` flag therefore supplies a backwards-compatible
+        default: structural commands affect nuclear topology, while
+        non-structural commands affect only nucleus geometry.
+        """
+
+        if self.structural:
+            return frozenset((EditEffect.NUCLEI_TOPOLOGY,))
+        return frozenset((EditEffect.NUCLEUS_GEOMETRY,))
 
     @property
     def is_noop(self) -> bool:
@@ -164,6 +202,14 @@ class CompositeCommand(EditCommand):
     @property
     def structural(self) -> bool:
         return any(command.structural for command in self.commands)
+
+    @property
+    def effects(self) -> frozenset[EditEffect]:
+        return frozenset(
+            effect
+            for command in self.commands
+            for effect in command.effects
+        )
 
     @property
     def is_noop(self) -> bool:
