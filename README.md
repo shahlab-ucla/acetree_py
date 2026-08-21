@@ -160,7 +160,7 @@ acetree-py info config.xml --cell ABala
     <image file="path/to/image.tif"/>
     <end index="350"/>
     <naming method="NEWCANONICAL"/>
-    <resolution xyRes="0.09" zRes="1.0" planeEnd="30"/>
+    <resolution xyRes="0.09" zRes="1.0" planeStart="1" planeEnd="30"/>
 </embryo>
 ```
 
@@ -183,13 +183,14 @@ acetree-py info config.xml --cell ABala
 - **Screenshot and recording** — capture single frames or export image sequences across timepoints
 - **Save/Save As** — persist edits to ZIP files compatible with Java AceTree
 - **Export** — cell tables, nucleus tables, expression time series, Newick trees
-
-- **Expression Plot (Window > New Expression Plot...)** - open any number of independent multi-cell plots, choose any freshly measured image channel, align by absolute time, birth, or normalized lifetime, optionally apply tunable gap-preserving Gaussian smoothing, customize series/axes/legend styling, and export the exact plotted snapshot as CSV or SVG. Incomplete or edit-stale measurements prompt for Measure and fail closed for export.
+- **Subcellular objects and ROI measurements (Objects menu)** — manually curate stable, class-indexed 2D polygons, thick lines, and consecutive-Z contour stacks alongside nuclei; associate observations with same-frame cells; track Draft/Reviewed/Needs review/Absent states; measure raw scalar intensities, physical geometry, distributions, and thick-line profiles across image channels; plot gap-aware scalar tracks or spatial profiles; and export exact CSV/SVG results. Versioned checksummed `.subcellular-rois.json` sidecars save atomically with the authoritative dataset and fail closed on malformed, newer, or externally changed data.
+- **Expression Plot (Window → New Expression Plot…)** — open any number of independent multi-cell plots, choose any freshly measured image channel, align by absolute time, birth, or normalized lifetime, optionally apply tunable gap-preserving Gaussian smoothing, customize series/axes/legend styling, and export the exact plotted snapshot as CSV or SVG. Incomplete or edit-stale measurements prompt for Measure and fail closed for export. Subcellular scalar tracks use the dedicated **Plot track** action in the Objects dock.
 - **Expression Comparison and measurement sets (Window → New Expression Comparison…)** - compare one exact canonical cell across any number of saved XML datasets, group replicates, show transparent individual traces, and add mean/median summaries with supported error bands. Image recomputation reads a dataset once to build a correction-neutral cache for every named cell and every image channel; cell, channel, and correction changes then materialize immediately without image I/O (`local`/`cross` use the documented global fallback). **Save measurement set…** writes the reusable cache and current view to a checksummed schema-v2 `.aceexpr` file without recomputing, even when the current plot cannot be exported. Reopen it through **Window → Open Expression Measurement Set / Result…**, the window's open button, or drag/drop; CSV, SVG, and another measurement-set save work offline. Add or drop more XMLs, then choose **Recompute new or stale** to append only missing/changed caches or **Recompute all…** to replace every attached cache. Legacy schema-v1 `.aceexpr` captures still open as fixed one-request results.
 
 ## Documentation
 
-- [User Guide](docs/user_guide.md) — navigation, editing, saving, manual tracking, 3D view
+- [User Guide](docs/user_guide.md) — navigation, editing, saving, manual tracking, expression analysis, and subcellular ROI workflows
+- [Subcellular Measurements Design](docs/SUBCELLULAR_MEASUREMENTS_DESIGN.md) — ROI data model, persistence, measurement semantics, and implementation decisions
 - [Architecture Reference](docs/architecture.md) — package structure, data model, GUI system
 - [Algorithm Reference](docs/algorithms.md) — naming pipeline, coordinate transforms, edit commands
 - [StarryNite Rebuild Plan](docs/STARRYNITE_REBUILD_PLAN.md) — clean-room compatibility roadmap, native tracker architecture, and verification gates

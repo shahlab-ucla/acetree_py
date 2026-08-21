@@ -121,7 +121,8 @@ When you launch the GUI, you'll see:
 │ (per-ch) │                      │ (color mode,      │
 │          │                      │  buttons, viz)    │
 │ Lineage  │                      │                   │
-│ List     │                      │                   │
+│ List     │                      │ Subcellular       │
+│          │                      │ Objects           │
 ├──────────┴──────────────────────┴───────────────────┤
 │  Player Controls (time/plane/labels/deselect/3D)    │
 │  Lineage Tree (Sulston tree visualization)          │
@@ -138,6 +139,7 @@ When you launch the GUI, you'll see:
 | **Player Controls**  | Bottom     | Time/plane navigation, labels, deselect, 3D mode, 3D window |
 | **Lineage Tree**     | Bottom     | Visual Sulston tree (multiple panels supported) |
 | **Edit & Tracking Tools** | Right | Manual/automated tracking, color mode, editing, and visualization tools |
+| **Subcellular Objects** | Right | ROI classes, object tracks, drawing, association, review, measurement, and plots |
 
 Napari's built-in layer list and layer controls are hidden by default to save screen space. They remain accessible via the napari Window menu.
 
@@ -158,7 +160,7 @@ Napari's built-in layer list and layer controls are hidden by default to save sc
 | `Ctrl+Z`         | Undo                      |
 | `Ctrl+Y`         | Redo                      |
 | `Delete`         | Remove active cell's nucleus at the current timepoint |
-| `Escape`         | Exit active mode (Add, Track, Relink pick) |
+| `Escape`         | Exit active mode (Add, Track, Relink pick, or ROI drawing/editing) |
 
 Changing z-plane does **not** clear the active cell. Selection is anchored by timepoint and nucleus index, so it remains stable across display refreshes and automatic renaming. Use **Deselect** when you intentionally want to clear it.
 
@@ -637,7 +639,7 @@ Multi-channel images are displayed as separate napari layers with green/magenta 
 - **Ctrl+S** or the **Save** button: Overwrites the original nuclei ZIP file.
 - **Ctrl+Shift+S** or **Save As**: Opens a file dialog to choose a new location, makes that location the target of subsequent Save operations, and updates the source XML config so reopening it follows the new ZIP. The retarget happens only after the data save and config rewrite both succeed.
 
-The saved file is a ZIP containing CSV-formatted nucleus data, one entry per timepoint. This is the standard AceTree nuclei format and can be opened by both AceTree-Py and the original Java AceTree. AceTree fully prepares the nuclei ZIP and any manual-orientation sidecar before committing them. If Measure changed the correction setting, ordinary Save also prepares the updated XML first and keeps a rollback copy of the old ZIP until the XML replacement succeeds. A failure therefore leaves the previous ZIP, sidecar, and correction config together, rather than mixing old and new files. Existing file permissions are retained across replacement. If an automated tracking run has been accepted, Save also writes the latest run beside the nuclei ZIP as `<stem>.tracking.json`.
+The saved nuclei file is a ZIP containing CSV-formatted nucleus data, one entry per timepoint. This is the standard AceTree nuclei format and can be opened by both AceTree-Py and the original Java AceTree. Subcellular annotations are stored separately as `<xml-stem>.subcellular-rois.json` beside the XML so the nuclei ZIP remains compatible. AceTree fully prepares the nuclei ZIP, manual-orientation sidecar, dirty XML, and ROI sidecar before committing authoritative changes. If any commit step fails, the previous generation is restored instead of mixing old and new files. Existing file permissions are retained across replacement. If an automated tracking run has been accepted, Save also writes the latest run beside the nuclei ZIP as `<stem>.tracking.json`; this tracking provenance remains best-effort rather than authoritative.
 
 ### 8.2 What Gets Saved
 
@@ -647,6 +649,9 @@ The saved file is a ZIP containing CSV-formatted nucleus data, one entry per tim
 - Manual body orientation in an AuxInfo v2 sidecar, including source, quality, and reference time
 - The latest accepted automated tracking run and provenance in `<stem>.tracking.json`, when present
 - Expression values
+- Subcellular object classes, stable UUID/index identities, frame geometry,
+  cell associations, explicit absence, and review state in
+  `<xml-stem>.subcellular-rois.json`
 
 Edits that haven't been saved are tracked against an explicit savepoint. Undoing a saved edit makes the dataset dirty; redoing exactly back to the saved state makes it clean again. A new edit after Undo creates a new branch and remains dirty even if the history happens to have the same number of entries. The savepoint advances only after a successful Save or Save As.
 
@@ -785,6 +790,12 @@ You can open as many independent windows as needed—for example, one comparing
 sisters on absolute time and another comparing a lineage subtree on normalized
 time. The active cell in the main viewer is preselected when possible.
 
+This window plots **cell/nucleus expression**. Subcellular-object measurements
+use the separate **Subcellular Objects → Plot track** workflow described in
+[Section 10.7](#107-subcellular-object-measurements). Keeping the windows
+separate makes their identities and provenance explicit: cell series are keyed
+by lineage cells, while subcellular series are keyed by immutable object UUIDs.
+
 The basic workflow is:
 
 1. Find cells with the search box and select any combination. **Current cell**
@@ -854,6 +865,11 @@ repeating expensive work. A schema-v2 `.aceexpr` measurement set can persist
 that full cache for use after restart: it contains every named cell and every
 measured image channel, not only the trace currently plotted. Older schema-v1
 `.aceexpr` captures remain readable but contain one fixed measurement request.
+
+Expression Comparison is also **cell/nucleus-only**. It does not compare
+subcellular-object UUIDs across datasets, and `.aceexpr` files do not contain
+the subcellular ROI sidecar or ROI measurement snapshots. Plot ROI tracks in
+the active dataset through the Subcellular Objects dock instead.
 
 The recommended workflow is:
 
@@ -1094,6 +1110,134 @@ duplicate keys, invalid/non-finite values, unsupported versions, files over the
 cap, and checksum mismatches. The checksum is an integrity check, **not** a
 digital signature or proof of authenticity: only open files from a source you
 trust.
+
+### 10.7 Subcellular object measurements
+
+Subcellular objects are a manually curated annotation stream alongside nuclei.
+Each track has a stable identity, a class and dataset-wide class index such as
+`Golgi #2`, and optional geometry at each timepoint. Supported geometries are a
+closed 2D polygon, a thick 2D line, and a 3D stack of closed contours on
+consecutive Z planes. ROI coordinates use the displayed image coordinate
+system, so configured split/flip handling and a non-1 `planeStart` are applied
+automatically.
+
+#### Open the object tools and create a class
+
+1. Open a dataset with images and choose **Objects → Show Subcellular
+   Objects** if the right-side dock is hidden.
+2. Click **Manage classes…**, enter a class name, and choose its display color.
+   The current UI creates one class per invocation. Select the class in the
+   **Class** box before drawing a new object.
+3. Use **Show ROIs**, **Cell**, **State**, and **Search** to filter the overlay
+   and track list. Selecting an object does not clear the selected nucleus or
+   cell.
+
+#### Draw and edit observations
+
+1. Navigate to the required absolute timepoint and Z plane. Optionally select a
+   live cell first; a new observation captures that same-frame association.
+2. Choose **2D Polygon**, **Thick Line**, or **3D Contour Stack**. Draw in the
+   temporary white editor layer and double-click to close a polygon or contour.
+   Click **Finish** or press **Enter** to validate and commit one undoable edit.
+   Click **Cancel** or press **Escape** to discard the draft without creating an
+   object or frame.
+3. To build a 3D stack, keep the object selected, move to the adjacent Z plane,
+   choose **3D Contour Stack** again, and draw the next contour. Planes must be
+   consecutive; AceTree does not silently interpolate a missing contour.
+4. Select an existing observation and click **Edit** to change its vertices.
+   One completed drag/finish is one `Ctrl+Z` / `Ctrl+Y` history entry. Changing
+   time or Z, entering a nucleus Add/Track/Relink mode, or switching to 3D view
+   cancels an unfinished ROI edit. The main and detached 3D views are previews,
+   not authoring surfaces.
+
+If a selected track has no record at the current time, drawing adds a draft
+frame to that track. If it already has a segmented frame, drawing starts a new
+object of the selected class. **Copy previous** copies the most recent earlier
+segmentation into the current time as a Draft. **Mark absent** records an
+explicit biological absence; this is different from a missing/undecided frame.
+**Previous** and **Next** jump between segmented observations, while **Delete
+frame…** removes only the current observation.
+
+#### Associate and review observations
+
+- **Use selected cell** associates the current ROI frame with the currently
+  selected live cell.
+- **Pick cell** enters a right-click picker; right-click a nucleus at the same
+  timepoint, or press **Escape** to cancel.
+- **Clear association** keeps the geometry but makes it object-centric only.
+- **Mark reviewed** records that the current geometry and association were
+  checked. A later geometry or association change moves a reviewed record to
+  **Needs review**. Saving does not change review state.
+
+Orphaned or unassociated geometry remains visible and measurable. It is omitted
+only from operations that require a resolved cell. Track rows use both text and
+glyphs to distinguish Draft, Reviewed, Needs review, Absent, and Missing states.
+
+#### Measure raw ROI intensities
+
+Choose **Objects → Measure Subcellular Objects…** for a cancellable bulk run.
+The dialog provides:
+
+- **Scope:** all objects, the selected object, or the current class.
+- **Time:** all annotated timepoints or only the current timepoint.
+- **Image channels:** any combination of available raw image
+  channels, displayed as 1-based channel numbers.
+- **Scalar outputs:** integrated, mean, and median intensity; calibrated
+  integrated intensity per length, area, volume, or surface area; and supported
+  geometry length/area/volume/surface metrics.
+- **Advanced:** thick-line spatial profiles plus optional histograms and
+  quantiles.
+
+ROI intensities are raw finite pixel/voxel values. The nucleus-specific None,
+Global, and Blot background corrections are not applied. A real intensity of
+zero remains zero; absent, invalid, unavailable, clipped, or non-finite samples
+retain an explicit status instead of being converted to zero. Physical
+normalizations require matching XY/Z calibration. Cancellation, an image-source
+change, or an ROI edit during the run publishes no partial snapshot.
+
+The selected row's **Measure** button is a quick object-only run using the
+default scalar settings. Use the Objects-menu dialog when profiles,
+distributions, selected channels, or a broader scope are required.
+
+#### Plot scalar tracks and thick-line profiles
+
+After a successful ROI measurement, select an object and click **Plot track**.
+The modeless **Subcellular Object Measurements** window can display multiple
+object tracks and lets you choose the image channel, scalar metric, absolute
+time, time since first segmentation, or normalized track time, plus optional
+gap-preserving Gaussian smoothing. Missing and explicitly absent frames remain
+plot gaps. **Export CSV…** writes UUID/class/channel/metric/provenance fields and
+the exact raw and plotted values; **Export SVG…** writes the current vector
+figure.
+
+ROI plots are revision-bound. After a geometry or calibration edit, an existing
+plot may remain visible as a reference, but CSV, SVG, and toolbar Save are
+disabled until the affected objects are measured again. Association-only
+changes do not force image pixels to be reread.
+
+For a thick line, enable **Spatial profiles for thick lines** in the Advanced
+measurement options, measure, then click **Plot profiles**. The profile window
+overlays the available time/channel profiles against physical distance from the
+first vertex. Choose the across-width **Mean**, **Median**, or **Sum** reducer
+and use **Export CSV…** to retain distances, values, sample counts, and missing
+reasons.
+
+#### Save, reopen, and protected files
+
+Ordinary **Save** (`Ctrl+S`) writes ROI annotations to
+`<dataset>.subcellular-rois.json` beside the dataset XML in the same coordinated
+save boundary as the nuclei ZIP, AuxInfo, and dirty XML. If any authoritative
+replacement fails, AceTree restores the previous generation and keeps the
+document dirty. Current **Save As** retargets the nuclei ZIP while the ROI
+sidecar remains beside the source XML.
+
+The sidecar preserves object UUIDs, class/index allocation, geometry,
+associations, explicit absence, and review states. Measurement snapshots are
+derived session data and are not stored in the sidecar; measure again after
+reopening before quantitative ROI export. A missing sidecar is normal. A
+malformed, checksum-invalid, or newer unsupported sidecar leaves the nuclei
+dataset usable but puts ROI tools into a protected/read-only state so Save
+cannot silently overwrite annotations that AceTree could not safely decode.
 
 ---
 

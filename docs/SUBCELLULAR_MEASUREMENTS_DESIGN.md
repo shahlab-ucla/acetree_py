@@ -75,6 +75,7 @@ Recommended modules:
 - `acetree_py/gui/subcellular_objects_panel.py`: object browser, inspector, drawing/review workflow.
 - `acetree_py/gui/roi_viewer_integration.py`: record-derived overlay and transient editor.
 - `acetree_py/gui/roi_measure_dialog.py`: scoped measurement configuration and progress.
+- `acetree_py/gui/roi_scalar_plot_window.py`: object-centric scalar time-series plots and guarded CSV/SVG export.
 - `acetree_py/gui/roi_profile_window.py`: vector profile plots and CSV export.
 
 ## Domain model
@@ -414,12 +415,11 @@ ScalarSeriesChannel
   validate_coverage(subjects)
 ```
 
-`ExpressionPlotService.build(cells, ...)` becomes a compatibility adapter. A new ROI adapter builds subjects from `RoiObjectTrack`. Existing renderer, styling, smoothing-with-gaps, stale overlay, CSV/SVG export, and absolute/relative/normalized axes remain reusable.
+`ExpressionPlotService.build(cells, ...)` becomes a compatibility adapter. A new ROI adapter builds subjects from `RoiObjectTrack`. The cell Expression Plot remains unchanged for backward compatibility; the Objects dock opens a dedicated modeless ROI scalar window that reuses the generic temporal-series core, smoothing-with-gaps, stale guards, CSV/SVG export, and absolute/relative/normalized axes.
 
-The Expression Plot window gains a source selector:
+The dedicated ROI scalar window exposes:
 
 ```text
-Series kind    [Cells | Subcellular objects]
 Objects        [Golgi #1 — ABpl, Golgi #2 — ABpr]
 Image channel  [Channel 2]
 Metric         [Median intensity]
@@ -513,7 +513,7 @@ Track status is derived as Complete, In progress, or Needs attention. Use text/g
 
 Create `Measure Subcellular Objects…` under Objects rather than changing nucleus File → Measure. A Basic preset exposes scope, channels, geometry support, sum/mean/median, and the appropriate normalized sums. Advanced reveals line profile step/reducer and distributions. Bulk work is cancellable and publishes no partial snapshot.
 
-`Plot track` opens the generalized Expression Plot preselected. Line profile plotting supports a single timepoint and multiple-time overlay; a later view can add a time-by-distance heatmap.
+`Plot track` opens the dedicated scalar ROI window preselected. `Plot profiles` opens the separate thick-line profile window and supports a single timepoint or multiple-time overlay; a later view can add a time-by-distance heatmap.
 
 ### Accessibility and protection
 
