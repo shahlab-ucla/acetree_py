@@ -6,15 +6,15 @@ Built on [napari](https://napari.org) with full undo/redo, topology-based cell n
 
 ## Installation
 
-Requires **Python 3.10+** and Git. The tracking-enabled build currently lives
-on the `tracking-integration` branch; the repository's default branch does not
-yet contain these tools.
+Requires **Python 3.10+** and Git. The subcellular-measurements build currently
+lives on the `subcellular-measurements` branch; the repository's default branch
+does not yet contain these tools.
 
 ### Source install (recommended for testing)
 
 ```bash
-# Select the tracking branch explicitly (a plain clone currently selects main).
-git clone --branch tracking-integration --single-branch https://github.com/shahlab-ucla/acetree_py.git
+# Select the subcellular-measurements branch explicitly.
+git clone --branch subcellular-measurements --single-branch https://github.com/shahlab-ucla/acetree_py.git
 cd acetree_py
 ```
 
@@ -55,7 +55,7 @@ To install without keeping a source checkout, use a branch-pinned VCS
 requirement (not an unqualified PyPI install):
 
 ```bash
-python -m pip install "acetree-py[gui] @ git+https://github.com/shahlab-ucla/acetree_py.git@tracking-integration"
+python -m pip install "acetree-py[gui] @ git+https://github.com/shahlab-ucla/acetree_py.git@subcellular-measurements"
 ```
 
 ### Tested versions

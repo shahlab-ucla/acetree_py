@@ -1,4 +1,4 @@
-"""Regression checks for branch-safe tracking integration installation."""
+"""Regression checks for branch-safe feature installation."""
 
 import os
 from pathlib import Path
@@ -9,15 +9,15 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_BRANCH = "tracking-integration"
+EXPECTED_BRANCH = "subcellular-measurements"
 EXPECTED_CLONE = (
-    "git clone --branch tracking-integration --single-branch "
+    "git clone --branch subcellular-measurements --single-branch "
     "https://github.com/shahlab-ucla/acetree_py.git"
 )
 
 
 @pytest.mark.parametrize("document", ["README.md", "docs/user_guide.md"])
-def test_install_docs_pin_tracking_branch(document: str) -> None:
+def test_install_docs_pin_feature_branch(document: str) -> None:
     text = (REPO_ROOT / document).read_text(encoding="utf-8")
 
     assert EXPECTED_CLONE in text
@@ -120,7 +120,7 @@ def test_native_installer_enforces_checkout_state(
 
     if checkout_state == "correct":
         assert result.returncode == 0, output
-        assert "from branch 'tracking-integration'" in output
+        assert f"from branch '{EXPECTED_BRANCH}'" in output
     elif checkout_state == "wrong":
         assert result.returncode != 0
         assert "current branch is 'wrong-branch'" in output

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-EXPECTED_BRANCH="tracking-integration"
+EXPECTED_BRANCH="subcellular-measurements"
 VARIANT="gui"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 DRY_RUN=0
@@ -10,7 +10,7 @@ usage() {
     printf '%s\n' \
         "Usage: $0 [--variant core|gui|all] [--python PATH] [--dry-run]" \
         "" \
-        "Installs the tracking-enabled AceTree-Py checkout in editable mode."
+        "Installs the subcellular-measurements AceTree-Py checkout in editable mode."
 }
 
 while [ "$#" -gt 0 ]; do

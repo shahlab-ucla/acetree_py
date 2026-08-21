@@ -8,12 +8,12 @@ For automatic-versus-forced names and the complete correction contract, see [Nam
 
 ## 1. Installation
 
-The tracking-enabled build is currently on `tracking-integration`, while the
-repository default is still `main`. Select the branch explicitly before using
-an editable install:
+The subcellular-measurements build is currently on
+`subcellular-measurements`, while the repository default does not yet contain
+these tools. Select the branch explicitly before using an editable install:
 
 ```bash
-git clone --branch tracking-integration --single-branch https://github.com/shahlab-ucla/acetree_py.git
+git clone --branch subcellular-measurements --single-branch https://github.com/shahlab-ucla/acetree_py.git
 cd acetree_py
 ```
 

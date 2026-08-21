@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-Install AceTree-Py's tracking-enabled checkout.
+Install AceTree-Py's subcellular-measurements checkout.
 
 .DESCRIPTION
-Verifies that a Git checkout is on the tracking-integration branch, then
+Verifies that a Git checkout is on the subcellular-measurements branch, then
 installs that checkout in editable mode. The GUI dependency set is installed
 by default.
 #>
@@ -18,7 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedBranch = "tracking-integration"
+$ExpectedBranch = "subcellular-measurements"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $GitMarker = Join-Path $RepoRoot ".git"
 
