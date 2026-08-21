@@ -43,6 +43,25 @@ Forced-name propagation follows only these reciprocal continuation edges. It sto
 
 A conflict is data requiring correction, not a tiebreaking opportunity. Iteration order must never overwrite one user's forced identity with another. In particular, automatic naming does not append an `X` or mutate a visible cell name to hide a duplicate.
 
+### Canonical daughter-family invariant
+
+For every named parent with exactly two alive, distinct, reciprocal successors,
+the automatic effective daughter set is the exact unordered pair returned by
+`RuleManager(parent.effective_name)`. This holds across founder recovery,
+partial movies, tracking commits, reloads, and local body-axis dropout. Timing
+and geometry order the pair over the two successors; they do not select the
+family. When ordering evidence is absent, AceTree preserves a compatible exact
+loaded order or uses stable successor-slot order and emits a low-confidence
+warning. Consequently, a valid division cannot turn `ABa`, `ABp`, `EMS`, or
+`P2` descendants into unrelated `Nuc...` roots.
+
+“Build on the predecessor” means follow its RuleManager lineage rule, not always
+append a literal suffix. Canonical exceptions include `P0 → AB/P1`,
+`P1 → EMS/P2`, `EMS → E/MS`, `P2 → C/P3`, `P3 → D/P4`, and
+`P4 → Z2/Z3`. A malformed/non-reciprocal link is not evidence of a division
+and fails closed. A conflicting `assigned_id` remains an explicit curator-owned
+exception and is reported rather than overwritten.
+
 ## 3. Edit-Commit Contract
 
 ### Stable selection
@@ -158,11 +177,11 @@ Kill begins from the selected `(time,index)` anchor and walks that component. It
    AP direction, then blastomere-size asymmetry. Rejected four-cell labels are
    never used as independent evidence.
 5. If AB/P1 root ordering is still ambiguous, the survivors and their
-   unforced descendants receive neutral names. If the roots resolve, their
-   first divisions always retain the canonical families `ABa`/`ABp` and
-   `EMS`/`P2`. Missing body axes can lower confidence in which sister receives
-   which name, but cannot turn those four founders into unrelated `Nuc...`
-   roots.
+   unforced descendants receive neutral names. If the roots resolve, every
+   subsequent valid reciprocal division remains in its predecessor's exact
+   RuleManager family, beginning with `ABa`/`ABp` and `EMS`/`P2`. Missing body
+   axes can lower confidence in which sister receives which name, but cannot
+   turn a named lineage into unrelated `Nuc...` roots.
 
 Use **Remove Nucleus** for isolated false detections. Use **Kill Cell** when an
 entire tracked continuation is spurious. Automatic renaming and the live/dead
@@ -191,7 +210,14 @@ DV      = normalize(DV seed projected perpendicular to AP)
 LR      = DV × AP
 ```
 
-The same construction is used per timepoint when lineage groups are available and at the four-cell midpoint as a static fallback. Separation, perpendicular fraction, missing groups, and temporal continuity contribute to quality. Chronological caching makes results independent of the order in which frames happen to be requested.
+The same construction is used per timepoint when lineage groups are available.
+Across the valid four-cell window, AceTree also selects the complete frame with
+the highest perpendicular secondary-axis quality (earliest wins an exact tie)
+and retains it as a static fallback. Dynamic axes are preferred because they
+follow embryo motion; the retained frame handles a missing lineage group,
+degenerate local geometry, or a temporary quality dropout. Chronological
+caching makes results independent of the order in which frames happen to be
+requested.
 
 ABa–ABp is **not** the LR axis. Moreover, the signed biological LR direction cannot be established from that pair alone at the four-cell stage. Trusted orientation metadata, manually labeled anatomy, or later embryonic handedness is needed to ground the sign. Compression can distort relative positions and should lower confidence rather than produce silently authoritative names.
 
@@ -205,7 +231,18 @@ ABa–ABp is **not** the LR axis. Moreover, the signed biological LR direction c
 
 Placeholder metadata such as `XXX`, zero-length vectors, or parallel AP/secondary vectors is invalid.
 
-AP alone is not a complete anatomical frame. If topology identifies the founders but DV/LR is unavailable, AceTree retains the trusted founder identities and any previously loaded downstream names, but defers geometry-dependent daughter ordering where the required axis is unknown. The curated false-four bridge is narrower: once AB/P1 are resolved, recovered AP plus the exact parent rules produces `ABa`/`ABp` and `EMS`/`P2`; a tied sister call uses deterministic successor order with a warning. Once those four founders overlap, AceTree attempts to reconstruct the full lineage frame. Unrelated ambiguous roots and later divisions that still lack their required axes receive neutral `Nuc...` identifiers rather than lab-coordinate-dependent biological suffixes. Applying a valid manual frame reruns naming and replaces those placeholders where the lineage rules are then defensible.
+AP alone is not a complete anatomical frame. If topology identifies the
+founders but DV/LR is unavailable, AceTree retains the trusted founder
+identities and any compatible loaded downstream order. Once AB/P1 are resolved,
+their rules produce `ABa`/`ABp` and `EMS`/`P2`; once the quartet exists, the
+best complete four-cell frame is retained and dynamic lineage axes take
+precedence when usable. At any later valid reciprocal division, an unavailable
+axis defers only the sister ordering: AceTree preserves an exact loaded order
+or uses deterministic successor order with a low-confidence warning. It never
+substitutes unrelated `Nuc...` names for a named parent's RuleManager family.
+`Nuc...` is reserved for genuinely unknown/disconnected roots and topology that
+is too malformed to establish a reciprocal division. Applying a valid manual
+frame reruns naming and can improve or correct automatic sister ordering.
 
 ## 6. Manual Body-Axis Labeling and Correction
 
@@ -237,7 +274,7 @@ Manual placement must use the same biological rules as batch naming. The suggest
 - the 1-based division time;
 - current orientation and `z_pix_res`.
 
-It returns both daughter names, confidence, governing axis label, source/provenance, and an ambiguity flag. This supports founder-specific pairs such as EMS → E/MS and P2 → C/P3 as well as later `a/p`, `d/v`, or `l/r` divisions. Suggested names are written only as automatic identity. A forced daughter is respected; a compatible automatic sister assignment can be swapped. Two incompatible forced daughters remain a validation error.
+It returns both daughter names, confidence, governing axis label, source/provenance, and an ambiguity flag. This supports founder-specific pairs such as P0 → AB/P1, EMS → E/MS, and P2 → C/P3 as well as later `a/p`, `d/v`, or `l/r` divisions. The unordered pair always comes from RuleManager; geometry only orders it. If ordering evidence is unavailable, stable successor order is returned with low confidence rather than a foreign family. Suggested names are written only as automatic identity. A forced daughter is respected; a compatible automatic sister assignment can be swapped. Two incompatible forced daughters remain a validation error.
 
 ## 8. Edge-Case Acceptance Matrix
 
@@ -273,11 +310,15 @@ It returns both daughter names, confidence, governing axis label, source/provena
 | AP and secondary landmarks are parallel | Reject frame with actionable explanation |
 | Landmarks span different reference times | Reject frame |
 | Only ABa and ABp are used to claim LR | Treat as insufficient anatomical evidence |
-| Founder topology is strong but no complete AP/DV/LR frame exists | Keep founder/loaded names; defer new biological daughter ordering and use neutral placeholders |
+| Founder topology is strong but no complete AP/DV/LR frame exists | Keep founder/loaded names; assign exact RuleManager families at valid divisions; use stable successor order with a low-confidence warning when no geometry can order the sisters |
 | Two small polar detections are removed from a false four-object two-cell frame | Replace stale unforced four-cell labels with AB/P1 from timing/AP/size evidence; otherwise use neutral names; one full Undo restores names and status |
 | Recovered AB or P1 reaches its first division | Use the exact `ABa`/`ABp` or `EMS`/`P2` pair; preserve a valid loaded pair or warn when stable successor order is required |
 | Reopen a dataset saved with repaired AB/P1 roots but legacy `Nuc...` daughters | Upgrade those first daughters from the retained polar-body footprint without requiring another delete gesture |
-| Automatic classifier returns a foreign non-empty daughter pair | Replace it with the effective parent's RuleManager pair and warn; do not convert a deliberately deferred empty result |
+| Valid four-cell window has one degenerate frame and another complete frame | Retain the best complete frame; prefer dynamic axes and use the retained frame during later dropout |
+| Later dynamic lineage axes are missing or low quality | Fall back to the retained four-cell frame; retain/log its source time and report the division's ordinary angle-based confidence |
+| Named parent has a valid reciprocal division but no usable axis | Assign its exact RuleManager pair in deterministic successor order and warn; never create unrelated `Nuc...` daughters |
+| Automatic classifier returns a foreign or empty daughter pair | Replace it with the effective parent's RuleManager pair and warn; geometry/classifier failure may lower ordering confidence but not erase the family |
+| Division links are dead, non-reciprocal, duplicated, or out of range | Fail closed; do not synthesize a biological daughter pair from malformed topology |
 | Two founders are absent from a real four-cell sister-pair lineage | Preserve the surviving founder identities, even in later continuation frames or when the absent rows are small; do not invoke polar recovery |
 | Save fails midway | Old ZIP remains usable; history stays dirty |
 | Save As succeeds, then Save | Second save targets the new path |

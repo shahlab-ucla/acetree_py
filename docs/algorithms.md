@@ -90,7 +90,9 @@ Step 4:  If Step 3 fails (confidence < 0.3): preserve compatible loaded names;
          (legacy InitialID fallback available via legacy_mode=True)
 
 Step 5:  Set up DivisionCaller with coordinate axes
-         Compute seed axes (AP, DV, LR) at 4-cell midpoint for sign anchoring
+         Evaluate the valid 4-cell window, retain the best complete AP/DV/LR
+         frame as a reusable static seed, and prefer dynamic lineage axes
+         whenever their current-timepoint geometry is usable
 
 Step 6:  Forward pass — apply canonical rules:
          for t = four_cell_time to ending_index:
@@ -98,16 +100,32 @@ Step 6:  Forward pass — apply canonical rules:
              if nuc has no name and has a predecessor:
                parent = predecessor at t-1
                if parent is NOT dividing: nuc.identity ← parent.identity
-               if parent IS dividing:
-                 (d1, d2) = DivisionCaller.assign_names(parent, daughter1, daughter2)
-                 if a non-empty pair falls outside RuleManager(parent):
-                   replace it with that parent's exact canonical pair
-                 daughter1.identity ← d1
-                 daughter2.identity ← d2
+               if parent IS dividing and both links are alive and reciprocal:
+                  rule = RuleManager.get_rule(parent.effective_name)
+                  expected = {rule.daughter1, rule.daughter2}
+                  (d1, d2) = DivisionCaller.order_names(parent, daughter1, daughter2)
+                  if geometry is unavailable or ambiguous:
+                    preserve an exact loaded ordering when possible, otherwise
+                    use deterministic successor order and emit a low-confidence warning
+                  require {d1, d2} = expected
+                  daughter1.identity ← d1
+                  daughter2.identity ← d2
 
 Step 7:  Assign generic names to remaining unnamed nuclei
          name = "Nuc{time:03d}_{z}_{x}_{y}" (3-digit zero-padded, matching Java format)
+         Nuc is reserved for unknown/disconnected roots and malformed topology;
+         it is not a fallback for a valid division of a named parent
 ```
+
+The daughter **family** and the daughter **ordering** are separate decisions.
+For every valid reciprocal two-child division of a named parent, `RuleManager`
+fixes the exact unordered pair. Geometry, timing, and body axes decide only
+which physical successor receives which member of that pair. A missing or weak
+axis can lower ordering confidence, but it cannot change the family or break the
+parent's lineage chain. Special founder rules such as `P1 → EMS/P2` and
+`P2 → C/P3` are RuleManager mappings rather than literal string suffixes.
+An incompatible `assigned_id` remains visible as an explicit curator-owned
+exception and validation conflict; automatic naming never overwrites it.
 
 ### 2.2 Pre-assigned Name Handling
 
@@ -120,7 +138,10 @@ If a live nucleus has `assigned_id` set (manual override via Rename), the forced
 
 If a different `assigned_id` already exists on a nucleus in the chain, propagation stops and reports a conflict. Traversal order never decides which user assertion wins.
 
-When both daughters of a division have pre-assigned names, the automatic classification is skipped. If only one daughter has a pre-assigned name, the other receives the complement name.
+When both daughters of a division have pre-assigned names, those curator-owned
+values remain authoritative even when they conflict with the automatic rule.
+If one daughter has a compatible pre-assigned member of the RuleManager pair,
+that anchor selects the ordering and the sister receives the other member.
 
 Automatic naming never invents an `"X"` suffix to hide a collision. A forced/automatic mismatch may swap the automatically assigned sister pair when that resolves the intended complement. Two incompatible forced daughter identities remain explicit validation conflicts for the user to correct.
 
@@ -263,10 +284,14 @@ fixes the exact unordered daughter families: `AB` produces `ABa`/`ABp`, while
 `P1` produces `EMS`/`P2`. If that sister ordering is degenerate, AceTree first
 preserves a consistent previously loaded pair and otherwise uses stable
 successor order with a lower-confidence warning. When all four recovered
-founders overlap, AceTree reconstructs the lineage body frame and returns
-later divisions to the normal geometry-aware caller. Neutral names remain the
-fail-closed result for disconnected roots or later divisions whose required
-body axes are still unavailable.
+founders overlap, AceTree reconstructs and retains a lineage body frame and
+returns later divisions to the normal geometry-aware caller. If a later dynamic
+frame is incomplete or weak, the retained static four-cell frame is the
+ordering fallback. If neither frame can order a valid division, the exact
+RuleManager pair is still assigned in deterministic successor order with a
+low-confidence warning. Neutral names remain the fail-closed result for
+disconnected roots or malformed/non-reciprocal topology, not for daughters of
+a valid named parent.
 
 ### 3.7 Back-Tracing
 
@@ -395,15 +420,27 @@ Small separation, a small perpendicular fraction, incomplete lineage groups, or 
 Given a raw division vector $\vec{d}$ at timepoint $t$, project onto the local axes:
 $$\vec{d}_\text{canonical}(t) = (-\vec{d} \cdot \vec{u}_\text{AP}(t),\ \vec{d} \cdot \vec{u}_\text{DV}(t),\ \vec{d} \cdot \vec{u}_\text{LR}(t))$$
 
-**Why per-timepoint?** A static early frame can become stale as an embryo moves or is mechanically compressed. Re-deriving from current lineage centroids can follow that motion, while quality thresholds prevent a weak frame from being presented as certain.
+**Why per-timepoint?** A static early frame can become stale as an embryo moves
+or is mechanically compressed. Re-deriving from current lineage centroids can
+follow that motion, while quality thresholds prevent a weak frame from being
+presented as certain. Dynamic axes are therefore preferred, but a transient
+missing lineage group or degenerate local frame does not erase the reusable
+four-cell seed.
 
-### 4.6 Static Founder-Derived Transform (Last Fallback)
+### 4.6 Reusable Static Four-Cell Transform
 
-Used only as a fallback when the lineage centroid approach fails (e.g., too few labelled cells at a given timepoint). Axes are derived once from the 4-cell positions:
+Used when current lineage-centroid geometry is missing or below the usable
+quality boundary. Every topologically valid frame in the four-cell window is
+evaluated; the complete candidate with the highest perpendicular
+secondary-axis quality is selected, with the earliest frame winning an exact
+tie. The selected AP/LR/DV frame and its source timepoint are retained for the
+remainder of the naming run. This avoids making the arbitrary window midpoint
+a single point of failure.
 
 Let $\vec{r}_a, \vec{r}_b, \vec{r}_e, \vec{r}_p$ be the 3D positions (with z scaled by `z_pix_res`) of ABa, ABp, EMS, P2 respectively.
 
-Use the same four-cell construction as Section 4.5 at the four-cell midpoint:
+Use the same four-cell construction as Section 4.5 at the selected four-cell
+seed frame:
 
 $$\vec a=\vec r_\text{ABa}-\vec r_\text{P2},\qquad \vec d_0=\vec r_\text{ABp}-\vec r_\text{EMS}.$$
 
@@ -417,7 +454,11 @@ $$d_\text{AP} = \vec{d} \cdot \vec{u}_\text{AP}, \quad d_\text{DV} = \vec{d} \cd
 Map to canonical frame:
 $$\vec{d}_\text{canonical} = (-d_\text{AP},\ d_\text{DV},\ d_\text{LR})$$
 
-The negation of AP maps to the canonical AP direction $(-1, 0, 0)$.
+The negation of AP maps to the canonical AP direction $(-1, 0, 0)$. A later
+high-quality local frame is still preferred because it follows embryo motion;
+the static frame is used for local-axis dropout or low-quality geometry. Its
+source timepoint is retained and logged, while the division confidence remains
+the angle-based confidence of the classification in that retained frame.
 
 **Biological limitation:** the signed LR axis is not identifiable solely from the ABa/ABp pair at the four-cell stage. Establishing left versus right requires a trusted oriented secondary cue (manual landmarks or metadata), or later handedness/chirality information. Automatic four-cell geometry is therefore a fallible estimate, especially under compression, and must expose confidence rather than silently locking names. The invariant lineage described by [Sulston et al. (1983)](https://www.wormatlas.org/papers/Sulston_embryonic_lineage_1983.pdf), automated geometry in [Bao et al. (2006)](https://pmc.ncbi.nlm.nih.gov/articles/PMC1413828/), embryonic chirality in [Pohl and Bao (2010)](https://pmc.ncbi.nlm.nih.gov/articles/PMC2952354/), and compression effects in [Hench et al. (2009)](https://pubmed.ncbi.nlm.nih.gov/19527702/) provide the biological and experimental context.
 
@@ -427,7 +468,11 @@ The negation of AP maps to the canonical AP direction $(-1, 0, 0)$.
 
 ### 5.1 Classification Algorithm
 
-Given parent nucleus $P$ dividing into daughters $D_1, D_2$, and division rule $(s, \vec{a})$ where $s$ is the Sulston letter and $\vec{a}$ is the rule's axis unit vector:
+Given parent nucleus $P$ dividing through two alive reciprocal links into
+daughters $D_1,D_2$, first obtain the exact RuleManager pair
+$(R_1,R_2)$. Classification never selects a different pair; it only orders
+$(R_1,R_2)$ over the two physical successors. For division rule $(s, \vec{a})$
+where $s$ is the Sulston letter and $\vec{a}$ is the rule's axis unit vector:
 
 1. **Raw division vector:**
 $$\vec{\delta} = (D_2.x - D_1.x,\ D_2.y - D_1.y,\ (D_2.z - D_1.z) \times z_{\text{pix}\_\text{res}})$$
@@ -443,6 +488,12 @@ $$\theta = \arccos\left(\frac{|\alpha|}{\|\vec{\delta}_c\| \cdot \|\vec{a}\|}\ri
 5. **Name assignment:**
 $$\text{if } \alpha \geq 0: \quad D_1 \gets \text{daughter}_1,\ D_2 \gets \text{daughter}_2$$
 $$\text{if } \alpha < 0: \quad D_1 \gets \text{daughter}_2,\ D_2 \gets \text{daughter}_1$$
+
+6. **Ambiguous ordering:** If no usable transform or discriminating geometry is
+available, preserve a topology-compatible exact loaded pair when possible;
+otherwise assign `daughter1` to `successor1` and `daughter2` to `successor2`.
+Record confidence 0 and a stable-successor-order warning. The unordered pair
+still equals $(R_1,R_2)$.
 
 ### 5.2 Confidence from Angle
 
@@ -474,7 +525,11 @@ The averaged vector is then used in the standard classification algorithm (Secti
 
 ### 5.4 Deferred Majority-Vote Evaluation
 
-When the initial single-frame classification has low confidence ($C < 0.3$, corresponding to $\theta > 55°$), the result may be unreliable — particularly during LR axis degeneracy. Rather than committing to a potentially wrong assignment, the system defers and re-evaluates using a look-ahead window.
+When the initial single-frame classification has low confidence ($C < 0.3$,
+corresponding to $\theta > 55°$), the sister ordering may be unreliable —
+particularly during LR axis degeneracy. The system defers the ordering decision
+and re-evaluates using a look-ahead window; the parent-specific daughter family
+itself is never deferred.
 
 **Algorithm:**
 
@@ -487,7 +542,7 @@ $$\text{margin} = \frac{|V_+ - V_-|}{V_+ + V_-}$$
 
 $$C_\text{vote} = \max(C_\text{best},\ \text{margin})$$
 
-5. The deferred result replaces the initial classification if $C_\text{vote} \geq C_\text{initial}$.
+5. The deferred result replaces the initial ordering if $C_\text{vote} \geq C_\text{initial}$. If no frame supplies a usable vote, the deterministic fallback in Section 5.1 assigns the same RuleManager pair and reports low confidence.
 
 This mechanism is especially useful when the secondary axis at the moment of division is geometrically weak but recovers within a few frames as cells separate. The result records the axis label, confidence, and orientation source so the GUI can present it as a preview rather than a fact.
 
@@ -501,9 +556,14 @@ For parent name $P$:
 
 1. **Pre-computed rules** (`new_rules.tsv`): ~620 empirically determined rules with axis vectors derived from actual embryo measurements. Format: `Parent\tLetter\tD1\tD2\tX\tY\tZ`.
 
-2. **Names hash** (`names_hash.csv`): ~60 Sulston letter mappings for less-common divisions. Letter is decoded from an encoded integer value. The axis vector is the standard axis for that letter.
+2. **Canonical founder fallback mappings**: if a legacy rule resource is
+   missing, special non-concatenative pairs remain explicit, including
+   `P0 → AB/P1`, `P1 → EMS/P2`, `EMS → E/MS`, `P2 → C/P3`,
+   `P3 → D/P4`, and `P4 → Z2/Z3`.
 
-3. **Default**: Use letter `"a"` (AP axis), axis vector $(1, 0, 0)$.
+3. **Names hash** (`names_hash.csv`): ~60 Sulston letter mappings for less-common divisions. Letter is decoded from an encoded integer value. The axis vector is the standard axis for that letter.
+
+4. **Default**: Use letter `"a"` (AP axis), axis vector $(1, 0, 0)$.
 
 ### 6.2 Axis Vector Convention
 
@@ -688,6 +748,9 @@ Relink validators also require alive reciprocal endpoints and reject merges betw
 - Duplicate names at a single timepoint
 - Disconnected cells with the same effective name (reported as collisions, never renamed to synthetic `_2` aliases)
 - Name inconsistencies (parent-child name mismatches)
+- Valid reciprocal divisions whose effective daughter set is not the exact
+  RuleManager pair for the effective parent, including explicit forced
+  conflicts (which remain curator-owned but are reported)
 
 Returns a list of `NamingWarning` objects.
 

@@ -33,6 +33,57 @@ LINEAGE_EMS = "EMS"
 LINEAGE_P2 = "P2"
 
 
+def _validated_outgoing_children(
+    current: list[Nucleus],
+    following: list[Nucleus],
+) -> list[tuple[int, ...] | None]:
+    """Return exact reciprocal child indices, or ``None`` for malformed links.
+
+    Lineage centroids are anatomical evidence, so they must not be populated
+    from a partially valid edge set.  Duplicate successor slots and undeclared
+    live reverse claimers invalidate the whole parent's outgoing relationship.
+    """
+    declared_claimers: dict[int, set[int]] = {}
+    for parent_index, parent in enumerate(current):
+        if not parent.is_alive:
+            continue
+        for successor in (parent.successor1, parent.successor2):
+            child_index = successor - 1
+            if successor > 0 and 0 <= child_index < len(following):
+                declared_claimers.setdefault(child_index, set()).add(parent_index)
+
+    result: list[tuple[int, ...] | None] = []
+    for parent_index, parent in enumerate(current):
+        if not parent.is_alive:
+            result.append(None)
+            continue
+
+        raw_successors = (parent.successor1, parent.successor2)
+        positive = tuple(successor for successor in raw_successors if successor > 0)
+        child_indices = tuple(successor - 1 for successor in positive)
+        reverse_live = {
+            child_index
+            for child_index, child in enumerate(following)
+            if child.is_alive and child.predecessor == parent_index + 1
+        }
+
+        malformed = (
+            (parent.successor1 <= 0 < parent.successor2)
+            or len(set(positive)) != len(positive)
+            or any(not (0 <= child_index < len(following)) for child_index in child_indices)
+            or set(child_indices) != reverse_live
+        )
+        if not malformed:
+            malformed = any(
+                not following[child_index].is_alive
+                or following[child_index].predecessor != parent_index + 1
+                or declared_claimers.get(child_index) != {parent_index}
+                for child_index in child_indices
+            )
+        result.append(None if malformed else child_indices)
+    return result
+
+
 def build_lineage_map(
     nuclei_record: list[list[Nucleus]],
     four_cell_time: int,
@@ -66,46 +117,60 @@ def build_lineage_map(
     # Seed the founders
     if four_cell_time < n_timepoints:
         nucs = nuclei_record[four_cell_time]
-        if aba_idx < len(nucs):
+        if 0 <= aba_idx < len(nucs) and nucs[aba_idx].is_alive:
             lineage_map[four_cell_time][aba_idx] = LINEAGE_ABa
-        if abp_idx < len(nucs):
+        if 0 <= abp_idx < len(nucs) and nucs[abp_idx].is_alive:
             lineage_map[four_cell_time][abp_idx] = LINEAGE_ABp
-        if ems_idx < len(nucs):
+        if 0 <= ems_idx < len(nucs) and nucs[ems_idx].is_alive:
             lineage_map[four_cell_time][ems_idx] = LINEAGE_EMS
-        if p2_idx < len(nucs):
+        if 0 <= p2_idx < len(nucs) and nucs[p2_idx].is_alive:
             lineage_map[four_cell_time][p2_idx] = LINEAGE_P2
 
     # Back-propagate: from four_cell_time backwards to t=0
     for t in range(four_cell_time, 0, -1):
+        validated_children = _validated_outgoing_children(
+            nuclei_record[t - 1], nuclei_record[t],
+        )
         for j, nuc in enumerate(nuclei_record[t]):
             label = lineage_map[t][j]
-            if not label:
+            if not label or not nuc.is_alive:
                 continue
             pred = nuc.predecessor
             if pred == NILLI:
                 continue
             pred_idx = pred - 1  # 1-based to 0-based
             if 0 <= pred_idx < len(nuclei_record[t - 1]):
+                predecessor = nuclei_record[t - 1][pred_idx]
+                if (
+                    not predecessor.is_alive
+                    or validated_children[pred_idx] is None
+                    or j not in validated_children[pred_idx]
+                ):
+                    continue
                 prev_label = lineage_map[t - 1][pred_idx]
                 if not prev_label:
                     lineage_map[t - 1][pred_idx] = label
 
     # Forward-propagate: from four_cell_time to end via successor chains
     for t in range(four_cell_time, n_timepoints - 1):
+        current = nuclei_record[t]
+        following = nuclei_record[t + 1]
+        validated_children = _validated_outgoing_children(current, following)
         for j, nuc in enumerate(nuclei_record[t]):
             label = lineage_map[t][j]
-            if not label:
+            if not label or not nuc.is_alive:
                 continue
-            # Propagate to successor1
-            if nuc.successor1 > 0:
-                s_idx = nuc.successor1 - 1
-                if 0 <= s_idx < len(nuclei_record[t + 1]):
-                    lineage_map[t + 1][s_idx] = label
-            # Propagate to successor2 (division — both daughters inherit)
-            if nuc.successor2 > 0:
-                s_idx = nuc.successor2 - 1
-                if 0 <= s_idx < len(nuclei_record[t + 1]):
-                    lineage_map[t + 1][s_idx] = label
+            child_indices = validated_children[j]
+            if child_indices is None:
+                continue
+            for child_index in child_indices:
+                existing = lineage_map[t + 1][child_index]
+                if not existing or existing == label:
+                    lineage_map[t + 1][child_index] = label
+                else:
+                    # A conflicting lineage claim is malformed input; keep the
+                    # row out of anatomical centroid inference.
+                    lineage_map[t + 1][child_index] = ""
 
     return lineage_map
 

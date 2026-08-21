@@ -294,12 +294,13 @@ AuxInfo selection is based on usability, not merely file presence. A v2 record m
 
 1. Clear non-forced names (cells with `assigned_id` are preserved).
 2. **Propagate forced names** (`_propagate_assigned_ids()`): extend each `assigned_id` only through live reciprocal one-successor continuations. Stop at divisions, dead/missing links, non-reciprocal links, or a different forced identity.
-3. Select orientation in precedence order: valid v2 (manual or imported), supported v1, per-timepoint lineage geometry, then static founder geometry.
+3. Select orientation in precedence order: valid v2 (manual or imported), supported v1, per-timepoint lineage geometry, then the retained static four-cell frame.
 4. **Topology-based identification** (`identify_founders()`).
 5. If topology fails (confidence < 0.3): preserve compatible loaded names for partial movies, but invalidate any automatic founder hypothesis contradicted by current topology. A curated false four-object stage (two blastomeres plus two substantially smaller deleted polar detections) is reconciled to AB/P1 from timing, explicit AP, or blastomere-size evidence. Ambiguous AB/P1 root ordering receives neutral names rather than stale four-cell labels. Once the roots resolve, the first reciprocal divisions are constrained to the exact RuleManager families `ABa`/`ABp` and `EMS`/`P2`, even before a complete body frame is available. Legacy diamond-pattern identification remains available via `legacy_mode=True`.
-6. Set up `DivisionCaller` with the selected orientation source and deterministic chronological axis caching.
-7. **Forward pass**: apply canonical rules from 4-cell stage onward (single-frame classification with quality-aware axis smoothing; multi-frame averaging disabled in lineage mode).
-8. Assign generic `Nuc_t_z_x_y` names to remaining unnamed cells.
+6. Evaluate the valid four-cell window, retain its best complete AP/LR/DV frame as a reusable static seed, and set up `DivisionCaller` with deterministic chronological axis caching.
+7. **Forward pass**: apply canonical rules from 4-cell stage onward (single-frame classification with quality-aware dynamic axes; retained static-frame fallback when local geometry drops out).
+8. For every valid reciprocal division of a named parent, enforce the exact unordered RuleManager daughter pair. Geometry chooses only sister ordering; absent or ambiguous geometry uses deterministic successor order with a low-confidence warning.
+9. Assign generic `Nuc_t_z_x_y` names only to remaining unknown/disconnected roots or malformed topology, never as the daughter-family fallback for a valid named parent.
 
 ### 4.2 Founder ID (`naming/founder_id.py`)
 
@@ -315,7 +316,7 @@ Topology-based identification of ABa, ABp, EMS, P2 at the 4-cell stage:
    - **EMS vs P2**: Primary signal is forward division timing (EMS divides before P2); secondary signal is nucleus size (EMS is typically larger).
    - **ABa vs ABp**: Projection onto the AP axis vector, averaged over the 4-cell window for robustness (more anterior = ABa). Falls back to PC1 of 4-cell point cloud when no 2-cell stage is available.
 5. **Back-trace**: trace predecessors to name AB, P1, P0 and their continuation cells.
-6. **Axis derivation**: AP is P2→ABa; the DV seed is EMS→ABp projected perpendicular to AP; LR completes the right-handed frame.
+6. **Axis derivation**: AP is P2→ABa; the DV seed is EMS→ABp projected perpendicular to AP; LR completes the right-handed frame. All topologically valid frames in the four-cell window are scored, and the best complete frame is retained rather than assuming the midpoint has the best geometry.
 7. **Confidence**: composite of timing, size, and axis confidence with per-component breakdown.
 
 When manual initialization initially mistakes two polar bodies for blastomeres,
@@ -333,13 +334,18 @@ That direction orders their first divisions when possible, while RuleManager
 always constrains the unordered result to `ABa`/`ABp` or `EMS`/`P2`.
 Degenerate geometry preserves an exact loaded pair or uses deterministic
 successor order with an explicit warning instead of creating unrelated
-`Nuc...` roots. Once the recovered quartet overlaps, the pipeline rebuilds
-the lineage frame and resumes ordinary geometry-aware classification.
-Automatic name changes made during the structural rebuild are recorded in the
-same history boundary, so Undo/Redo restores exact name ownership as well as
-live/dead state. A failed post-commit naming pass is rolled back to its clean
-callback boundary before one safe retry, and the retry result refreshes that
-same history entry.
+`Nuc...` roots. Once the recovered quartet overlaps, the pipeline rebuilds and
+retains the lineage frame and resumes ordinary geometry-aware classification.
+That static frame remains available when a later dynamic lineage frame is
+missing or weak; even if neither can confidently order a division, RuleManager
+still supplies the exact daughter family.
+Automatic name changes made during the original structural rebuild are recorded
+in the same history boundary, so Undo/Redo restores exact name ownership as
+well as live/dead state. Undo/Redo callbacks rebuild derived UI/tree state, then
+the recorded name boundary is reapplied so a later naming implementation cannot
+rewrite history. A failed post-commit naming pass is rolled back to its clean
+callback boundary before one safe retry; a successful original Do retry
+refreshes that history entry.
 
 ### 4.3 Division Caller (`naming/division_caller.py`)
 
@@ -351,16 +357,16 @@ Classifies each cell division to determine daughter names:
 4. Dot product with the rule's axis vector determines which daughter gets which name.
 5. Angle between division vector and rule axis maps to a confidence score.
 6. If confidence < 0.3, **deferred majority-vote evaluation**: follow daughters forward up to 8 frames, re-classify at each, and use majority vote.
-7. A non-empty automatic result must be the exact unordered RuleManager pair for the effective parent. Foreign classifier output is replaced by that canonical pair and warned; an empty result caused by an unavailable body frame remains deferred. Explicit `assigned_id` values still take priority.
+7. Every valid reciprocal division of a named parent receives the exact unordered RuleManager pair for the effective parent. Foreign or empty classifier output cannot change or erase that family. An unavailable/ambiguous body frame defers only sister ordering; an exact loaded order is retained when valid, otherwise stable successor order is used with confidence 0 and a warning. Explicit `assigned_id` values still take priority as visible curator-owned exceptions.
 
 Four coordinate transform modes are selected by explicit precedence:
 
 - **v2**: Full `CanonicalTransform` rotation, including manual landmark frames. A valid explicit v2 frame wins over inferred geometry.
 - **v1**: Sign-flip matrix plus 2D rotation for supported anatomical strings (`ADL`, `AVR`, `PDR`, `PVL`). Placeholders such as `XXX` are not orientation.
-- **Lineage centroid**: Per-timepoint AP and DV estimates from ABa/P2 and ABp/EMS lineage centroids via `lineage_axes.py`, with quality-aware continuity.
-- **Static founder**: The same construction at the four-cell midpoint, used when current lineage axes are unavailable.
+- **Lineage centroid**: Preferred per-timepoint AP and DV estimates from ABa/P2 and ABp/EMS lineage centroids via `lineage_axes.py`, with quality-aware continuity.
+- **Static four-cell**: The best complete frame selected across the valid four-cell window, retained for local-axis dropout or low-quality geometry.
 
-Multi-frame averaging is disabled in lineage centroid mode (per-timepoint axes make cross-frame averaging unreliable). Seed axes from the 4-cell midpoint provide initial sign anchoring.
+Multi-frame averaging is disabled in lineage centroid mode (per-timepoint axes make cross-frame averaging unreliable). The selected four-cell seed provides initial sign anchoring and the reusable static fallback. Family correctness is independent of this geometry; only the physical sister-to-name mapping carries axis confidence.
 
 Signed LR cannot be derived from the ABa–ABp pair alone at the four-cell stage. A trusted secondary orientation, manual cue, or later handedness is required for a biologically grounded sign. Therefore every division suggestion carries confidence, axis label, and provenance; weak geometry remains correctable rather than being converted into a forced name.
 
@@ -368,8 +374,9 @@ Signed LR cannot be derived from the ABa–ABp pair alone at the four-cell stage
 
 `RuleManager` lookup priority:
 1. Pre-computed rules from `resources/new_rules.tsv` (~620 empirical rules).
-2. Generated rules from `resources/names_hash.csv` Sulston letter mappings.
-3. Default: use `"a"` (AP axis) as the division axis.
+2. Canonical fallback mappings for non-concatenative founder divisions (`P0 → AB/P1`, `P1 → EMS/P2`, `EMS → E/MS`, `P2 → C/P3`, `P3 → D/P4`, `P4 → Z2/Z3`) when legacy resources are absent.
+3. Generated rules from `resources/names_hash.csv` Sulston letter mappings.
+4. Default: use `"a"` (AP axis) as the division axis.
 
 Each `Rule` contains: `parent`, `sulston_letter`, `daughter1`, `daughter2`, `axis_vector` (unit 3-vector).
 

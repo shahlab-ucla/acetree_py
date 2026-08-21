@@ -115,7 +115,7 @@ class TestIdentityAssigner:
         assert nuclei_record[2][0].identity == "AB"
         assert nuclei_record[2][1].identity == "P1"
 
-    def test_founders_without_full_frame_do_not_use_lab_space_for_daughters(
+    def test_founders_without_full_frame_preserve_exact_daughter_family(
         self, monkeypatch,
     ):
         import numpy as np
@@ -167,10 +167,316 @@ class TestIdentityAssigner:
         assert [n.effective_name for n in record[0]] == [
             "ABa", "ABp", "EMS", "P2",
         ]
-        assert record[1][2].effective_name == "trusted-loaded-E"
-        assert record[1][3].effective_name.startswith("Nuc")
-        assert not record[1][3].effective_name.startswith(("E", "MS"))
+        assert {record[1][2].effective_name, record[1][3].effective_name} == {
+            "E", "MS",
+        }
+        assert all(not nucleus.effective_name.startswith("Nuc") for nucleus in record[1])
         assert any("no complete AP/DV/LR frame" in w for w in assigner.founder_assignment.warnings)
+
+    def test_inferred_four_cell_frame_survives_later_landmark_dropout(
+        self,
+        monkeypatch,
+    ):
+        """A valid quartet remains the static frame after one lineage drops out."""
+        import numpy as np
+        import acetree_py.naming.identity as identity_module
+        from acetree_py.naming.founder_id import FounderAssignment
+
+        record = [[
+            _make_nuc(1, 0, 0, 0, succ1=1),
+            _make_nuc(2, 10, 0, 0, succ1=2),
+            _make_nuc(3, 20, 0, 0, succ1=3),
+            _make_nuc(4, 30, 0, 0, succ1=4),
+        ], [
+            _make_nuc(1, 0, 0, 0, pred=1, succ1=1, succ2=2),
+            _make_nuc(2, 10, 10, 0, pred=2, succ1=3),
+            _make_nuc(3, 10, 0, 0, pred=3, succ1=4),
+            _make_nuc(4, 30, 0, 0, pred=4, succ1=5),
+        ], [
+            _make_nuc(1, -2, 0, -1, pred=1),
+            _make_nuc(2, 2, 0, 1, pred=1),
+            _make_nuc(3, 10, 10, 0, pred=2),
+            _make_nuc(4, 10, 0, 0, pred=3),
+            _make_nuc(5, 30, 0, 0, pred=4, status=-1),
+        ]]
+
+        def fake_identify(nuclei_record, **_kwargs):
+            for nucleus, name in zip(
+                nuclei_record[0],
+                ("ABa", "ABp", "EMS", "P2"),
+            ):
+                nucleus.identity = name
+            return FounderAssignment(
+                success=True,
+                confidence=0.5,
+                four_cell_time=0,
+                aba_idx=0,
+                abp_idx=1,
+                ems_idx=2,
+                p2_idx=3,
+                ap_vector=None,
+                lr_vector=None,
+                dv_vector=None,
+                timing_confidence=1.0,
+                size_confidence=1.0,
+                axis_confidence=0.0,
+            )
+
+        monkeypatch.setattr(identity_module, "identify_founders", fake_identify)
+        assigner = IdentityAssigner(
+            record,
+            naming_method=NEWCANONICAL,
+            z_pix_res=1.0,
+        )
+
+        assigner.assign_identities()
+
+        caller = assigner.division_caller
+        assert caller is not None and caller.is_lineage_mode
+        assert caller._seed_frame is not None
+        assert caller.seed_time == 1
+        np.testing.assert_allclose(caller._seed_frame[0], [-1.0, 0.0, 0.0])
+        np.testing.assert_allclose(caller._seed_frame[1], [0.0, 0.0, 1.0])
+        np.testing.assert_allclose(caller._seed_frame[2], [0.0, 1.0, 0.0])
+        assert caller._get_local_axes(2) is None
+        assert caller.has_complete_body_frame(2)
+        assert {record[2][0].identity, record[2][1].identity} == {
+            "ABal", "ABar",
+        }
+        assert not any(
+            nucleus.identity.startswith("Nuc")
+            for nucleus in record[2]
+            if nucleus.is_alive
+        )
+
+    def test_inferred_four_cell_frame_searches_before_founder_midpoint(
+        self,
+        monkeypatch,
+    ):
+        """A complete early quartet is retained when the midpoint is collinear."""
+        from acetree_py.naming.founder_id import FounderAssignment
+
+        record = [[
+            _make_nuc(1, 0, 0, 0, succ1=1),       # ABa
+            _make_nuc(2, 10, 10, 0, succ1=2),     # ABp
+            _make_nuc(3, 10, 0, 0, succ1=3),      # EMS
+            _make_nuc(4, 30, 0, 0, succ1=4),      # P2
+        ], [
+            _make_nuc(1, 0, 0, 0, pred=1),
+            _make_nuc(2, 10, 0, 0, pred=2),
+            _make_nuc(3, 20, 0, 0, pred=3),
+            _make_nuc(4, 30, 0, 0, pred=4),
+        ]]
+
+        def fake_identify(nuclei_record, **_kwargs):
+            for nucleus, name in zip(
+                nuclei_record[1],
+                ("ABa", "ABp", "EMS", "P2"),
+            ):
+                nucleus.identity = name
+            return FounderAssignment(
+                success=True,
+                confidence=0.5,
+                four_cell_time=1,
+                aba_idx=0,
+                abp_idx=1,
+                ems_idx=2,
+                p2_idx=3,
+                ap_vector=None,
+                lr_vector=None,
+                dv_vector=None,
+                timing_confidence=1.0,
+                size_confidence=1.0,
+                axis_confidence=0.0,
+            )
+
+        monkeypatch.setattr(identity_module, "identify_founders", fake_identify)
+        assigner = IdentityAssigner(
+            record,
+            naming_method=NEWCANONICAL,
+            z_pix_res=1.0,
+        )
+
+        assigner.assign_identities()
+
+        caller = assigner.division_caller
+        assert caller is not None and caller.is_lineage_mode
+        assert caller.seed_time == 0
+        assert caller._seed_frame is not None
+        np.testing.assert_allclose(caller._seed_frame[0], [-1.0, 0.0, 0.0])
+        np.testing.assert_allclose(caller._seed_frame[1], [0.0, 0.0, 1.0])
+        np.testing.assert_allclose(caller._seed_frame[2], [0.0, 1.0, 0.0])
+
+    def test_inferred_frame_search_does_not_cross_extra_cell_interruption(
+        self,
+        monkeypatch,
+    ):
+        """A separate exact-four interval cannot borrow an older body frame."""
+        from acetree_py.naming.founder_id import FounderAssignment
+
+        record = [[
+            _make_nuc(1, 0, 0, 0, succ1=1),
+            _make_nuc(2, 10, 10, 0, succ1=2),
+            _make_nuc(3, 10, 0, 0, succ1=3),
+            _make_nuc(4, 30, 0, 0, succ1=4),
+        ], [
+            _make_nuc(1, 0, 0, 0, pred=1, succ1=1),
+            _make_nuc(2, 10, 10, 0, pred=2, succ1=2),
+            _make_nuc(3, 10, 0, 0, pred=3, succ1=3),
+            _make_nuc(4, 30, 0, 0, pred=4, succ1=4),
+            _make_nuc(5, 100, 100, 0),  # unrelated extra detection
+        ], [
+            _make_nuc(1, 0, 0, 0, pred=1),
+            _make_nuc(2, 10, 0, 0, pred=2),
+            _make_nuc(3, 20, 0, 0, pred=3),
+            _make_nuc(4, 30, 0, 0, pred=4),
+        ]]
+
+        def fake_identify(nuclei_record, **_kwargs):
+            for nucleus, name in zip(
+                nuclei_record[2],
+                ("ABa", "ABp", "EMS", "P2"),
+            ):
+                nucleus.identity = name
+            return FounderAssignment(
+                success=True,
+                confidence=0.5,
+                four_cell_time=2,
+                aba_idx=0,
+                abp_idx=1,
+                ems_idx=2,
+                p2_idx=3,
+                ap_vector=None,
+                lr_vector=None,
+                dv_vector=None,
+                timing_confidence=1.0,
+                size_confidence=1.0,
+                axis_confidence=0.0,
+            )
+
+        monkeypatch.setattr(identity_module, "identify_founders", fake_identify)
+        assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+
+        assigner.assign_identities()
+
+        assert assigner.division_caller is None
+        assert any(
+            "no complete AP/DV/LR frame" in warning
+            for warning in assigner.founder_assignment.warnings
+        )
+
+    def test_axis_free_fallback_preserves_rule_family_across_generations(self):
+        """Every reciprocal division extends the predecessor's canonical family."""
+        record = [[
+            _make_nuc(1, 0, 0, 0, identity="ABa", succ1=1, succ2=2),
+        ], [
+            _make_nuc(1, -5, 0, 0, pred=1, succ1=1, succ2=2),
+            _make_nuc(2, 5, 0, 0, pred=1),
+        ], [
+            _make_nuc(1, -7, -2, 0, pred=1),
+            _make_nuc(2, -3, 2, 0, pred=1),
+        ]]
+        assigner = IdentityAssigner(record, naming_method=NEWCANONICAL)
+
+        assigner._assign_neutral_names(0)
+
+        assert {nucleus.identity for nucleus in record[1]} == {"ABal", "ABar"}
+        first_rule = assigner.rule_manager.get_rule(record[1][0].identity)
+        assert {nucleus.identity for nucleus in record[2]} == {
+            first_rule.daughter1,
+            first_rule.daughter2,
+        }
+        assert all(
+            not nucleus.identity.startswith("Nuc")
+            for nuclei in record
+            for nucleus in nuclei
+            if nucleus.is_alive
+        )
+
+    def test_malformed_division_links_remain_neutral(self):
+        """A missing reciprocal predecessor must not become biological evidence."""
+        record = [[
+            _make_nuc(1, 0, 0, 0, identity="ABa", succ1=1, succ2=2),
+        ], [
+            _make_nuc(1, -5, 0, 0, identity="WrongA", pred=1),
+            _make_nuc(2, 5, 0, 0, identity="WrongB"),
+        ]]
+
+        IdentityAssigner(record)._assign_neutral_names(0)
+
+        assert all(nucleus.identity.startswith("Nuc") for nucleus in record[1])
+
+    @pytest.mark.parametrize("malformed_predecessor", [2, 99])
+    def test_impossible_predecessor_cannot_preserve_stale_automatic_name(
+        self,
+        malformed_predecessor: int,
+    ):
+        parent = _make_nuc(1, 0, 0, 0, identity="ABa")
+        if malformed_predecessor == 2:
+            parent.status = -1
+            malformed_predecessor = 1
+        child = _make_nuc(
+            1,
+            5,
+            0,
+            0,
+            identity="WrongLoadedName",
+            pred=malformed_predecessor,
+        )
+        record = [[parent], [child]]
+
+        IdentityAssigner(record)._assign_neutral_names(0)
+
+        assert child.identity.startswith("Nuc")
+
+    def test_forced_name_survives_impossible_predecessor(self):
+        child = _make_nuc(
+            1,
+            5,
+            0,
+            0,
+            identity="CuratorName",
+            assigned_id="CuratorName",
+            pred=99,
+        )
+        record = [[_make_nuc(1, 0, 0, 0, identity="ABa")], [child]]
+
+        IdentityAssigner(record)._assign_neutral_names(0)
+
+        assert child.identity == "CuratorName"
+        assert child.assigned_id == "CuratorName"
+
+    def test_first_frame_positive_predecessor_cannot_preserve_stale_name(self):
+        nucleus = _make_nuc(
+            1,
+            5,
+            0,
+            0,
+            identity="WrongAtFirstFrame",
+            pred=99,
+        )
+
+        IdentityAssigner([[nucleus]])._assign_neutral_names(0)
+
+        assert nucleus.identity.startswith("Nuc")
+
+    def test_deleted_sister_does_not_erase_compatible_survivor_name(self):
+        parent = _make_nuc(1, 0, 0, 0, identity="ABa", succ1=1)
+        survivor = _make_nuc(1, -5, 0, 0, identity="ABal", pred=1)
+        deleted = _make_nuc(
+            2,
+            5,
+            0,
+            0,
+            identity="",
+            status=-1,
+            pred=1,
+        )
+        record = [[parent], [survivor, deleted]]
+
+        IdentityAssigner(record)._assign_neutral_names(0)
+
+        assert survivor.identity == "ABal"
 
     def test_preassigned_id_honored(self):
         """Forced names should override DivisionCaller assignments."""
@@ -1126,8 +1432,8 @@ def test_canonical_pass_rejects_foreign_automatic_daughter_family():
     assert {record[1][0].identity, record[1][1].identity} == {"ABa", "ABp"}
 
 
-def test_unrelated_canonical_pass_keeps_missing_classification_deferred():
-    """The AB/P1 bridge must not weaken unrelated partial-movie deferral."""
+def test_canonical_pass_preserves_family_when_classifier_has_no_axes():
+    """Missing geometry affects sister order, never the daughter family."""
     parent = _make_nuc(1, 100, 100, 10.0, identity="ABa", succ1=1, succ2=2)
     record = [[parent], [
         _make_nuc(1, 80, 100, 10.0, pred=1),
@@ -1143,7 +1449,7 @@ def test_unrelated_canonical_pass_keeps_missing_classification_deferred():
     assigner.division_caller = DeferredCaller()
     assigner._use_canonical_rules(0)
 
-    assert all(nucleus.identity.startswith("Nuc") for nucleus in record[1])
+    assert {nucleus.identity for nucleus in record[1]} == {"ABal", "ABar"}
 
 
 @pytest.mark.parametrize("axis_mode", ["inferred", "v2", "v1"])
@@ -1488,13 +1794,12 @@ def _partial_forced_parent(auxinfo: AuxInfo | None) -> list[list[Nucleus]]:
     return record
 
 
-def test_partial_movie_without_axes_clears_stale_automatic_progeny():
+def test_partial_movie_without_axes_repairs_stale_automatic_progeny_family():
     record = _partial_forced_parent(None)
 
     assert record[0][0].effective_name == "AB"
     assert all(nuc.assigned_id == "" for nuc in record[1])
-    assert all(nuc.identity.startswith("Nuc") for nuc in record[1])
-    assert {nuc.identity for nuc in record[1]}.isdisjoint({"EMS", "P2", "ABa", "ABp"})
+    assert {nuc.identity for nuc in record[1]} == {"ABa", "ABp"}
 
 
 @pytest.mark.parametrize("axis_mode", ["v2", "v1"])

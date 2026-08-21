@@ -821,6 +821,14 @@ class NucleiManager:
                         np.asarray(lr, dtype=float),
                         np.asarray(dv, dtype=float),
                     )
+                fallback = caller._lineage_fallback_frame()
+                if fallback is not None:
+                    ap, lr, dv = fallback
+                    return (
+                        np.asarray(ap, dtype=float),
+                        np.asarray(lr, dtype=float),
+                        np.asarray(dv, dtype=float),
+                    )
             if (
                 caller.founder_ap is not None
                 and caller.founder_lr is not None
@@ -911,18 +919,31 @@ class NucleiManager:
 
         if caller is None:
             return DivisionSuggestion(
-                first_name="",
-                second_name="",
+                first_name=rule.daughter1,
+                second_name=rule.daughter2,
                 confidence=0.0,
                 axis_label=axis_label,
-                source=source,
+                source="canonical family (body axes unavailable)",
                 ambiguous=True,
             )
 
         before = len(caller.classifications)
+        has_complete_body_frame = getattr(caller, "has_complete_body_frame", None)
+        used_body_frame = not (
+            caller.is_lineage_mode
+            and callable(has_complete_body_frame)
+            and not has_complete_body_frame(time - 1)
+        )
         name1, name2 = caller.assign_names(parent, first, second, timepoint=time - 1)
         classification = caller.classifications[-1] if len(caller.classifications) > before else None
         confidence = classification.confidence if classification is not None else 0.0
+        expected = {rule.daughter1, rule.daughter2}
+        if name1 == name2 or {name1, name2} != expected:
+            name1, name2 = rule.daughter1, rule.daughter2
+            confidence = 0.0
+            source = "canonical family (body axes unavailable)"
+        elif not used_body_frame:
+            source = "canonical family (body axes unavailable)"
         return DivisionSuggestion(
             first_name=name1,
             second_name=name2,

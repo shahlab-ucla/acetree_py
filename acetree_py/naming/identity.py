@@ -105,6 +105,14 @@ class IdentityAssigner:
         self.division_caller: DivisionCaller | None = None
         self.founder_assignment: FounderAssignment | None = None
         self.warnings: list[NamingWarning] = []
+        self._link_index_cache: dict[
+            int,
+            tuple[
+                dict[int, set[int]],
+                dict[int, set[int]],
+                dict[int, set[int]],
+            ],
+        ] = {}
 
     def assign_identities(self) -> None:
         """Run the full naming pipeline.
@@ -190,11 +198,12 @@ class IdentityAssigner:
 
             # Founder topology can be trustworthy even when compression or
             # missing landmark groups make DV/LR unknowable.  Preserve those
-            # founder identities, but do not let raw microscope coordinates
-            # masquerade as a canonical body frame for downstream divisions.
+            # founder identities and every exact daughter family, but do not
+            # let raw microscope coordinates masquerade as confident sister
+            # ordering.
             logger.warning(
-                "Founder identities retained, but downstream canonical naming "
-                "is deferred because no complete body frame is available"
+                "Founder identities retained without a complete body frame; "
+                "canonical daughter families will use stable successor order"
             )
             downstream_start = self.founder_assignment.four_cell_time + 1
             self._restore_previous_identities(
@@ -1002,7 +1011,6 @@ class IdentityAssigner:
                         parent_name,
                         prior1,
                         prior2,
-                        allow_missing_fallback=True,
                     )
                 expected = {name1, name2}
                 pair_components = first_component | second_component
@@ -1117,18 +1125,20 @@ class IdentityAssigner:
         parent_name: str,
         proposed1: str,
         proposed2: str,
-        *,
-        allow_missing_fallback: bool = False,
     ) -> tuple[str, str, str]:
-        """Return an exact RuleManager daughter pair and its provenance."""
+        """Return an exact RuleManager daughter pair and its provenance.
+
+        The body frame determines which successor receives which member of a
+        canonical pair; it does not determine the pair itself.  A missing or
+        rejected classifier result therefore falls back to stable successor
+        order instead of severing a known lineage with unrelated ``Nuc...``
+        names. Missing results always preserve the family invariant.
+        """
         rule = self.rule_manager.get_rule(parent_name)
         expected = {rule.daughter1, rule.daughter2}
 
         if proposed1 != proposed2 and {proposed1, proposed2} == expected:
             return proposed1, proposed2, "division caller"
-        if not proposed1 or not proposed2:
-            if not allow_missing_fallback:
-                return "", "", "deferred"
         return rule.daughter1, rule.daughter2, "stable successor order"
 
     def _component_topology_is_valid(
@@ -1206,6 +1216,112 @@ class IdentityAssigner:
                     return False
         return True
 
+    def _reciprocal_successor_indices(
+        self,
+        parent_time: int,
+        parent_index: int,
+    ) -> tuple[int, ...] | None:
+        """Return one parent's exact live reciprocal successors.
+
+        ``()`` is a valid terminal cell, a one/two-element tuple is a valid
+        continuation/division, and ``None`` means the stored forward and
+        reverse links disagree.  Naming must never turn malformed linkage into
+        biological evidence.
+        """
+        end = min(self.ending_index, len(self.nuclei_record))
+        if not (
+            0 <= parent_time < end
+            and 0 <= parent_index < len(self.nuclei_record[parent_time])
+        ):
+            return None
+        parent = self.nuclei_record[parent_time][parent_index]
+        if not parent.is_alive:
+            return None
+
+        declared_values = tuple(
+            successor
+            for successor in (parent.successor1, parent.successor2)
+            if successor > 0
+        )
+        if parent.successor2 > 0 and parent.successor1 <= 0:
+            return None
+        if len(set(declared_values)) != len(declared_values):
+            return None
+        if parent_time + 1 >= end:
+            return () if not declared_values else None
+
+        next_nuclei = self.nuclei_record[parent_time + 1]
+        declared = tuple(successor - 1 for successor in declared_values)
+        if any(not (0 <= index < len(next_nuclei)) for index in declared):
+            return None
+
+        child_claimers, live_reverse_by_parent, all_reverse_by_parent = (
+            self._frame_link_index(parent_time)
+        )
+        reverse = live_reverse_by_parent.get(parent_index, set())
+        historical_reverse = all_reverse_by_parent.get(parent_index, set())
+        # A killed daughter may no longer occupy a forward successor slot after
+        # set_all_successors() rebuilds live links.  That is an incomplete
+        # historical division, not a one-child continuation; preserve its
+        # surviving loaded identity and fail closed.
+        if historical_reverse != reverse:
+            return None
+        if reverse != set(declared):
+            return None
+
+        for child_index in declared:
+            child = next_nuclei[child_index]
+            if not child.is_alive or child.predecessor != parent_index + 1:
+                return None
+            claiming_parents = child_claimers.get(child_index, set())
+            if claiming_parents != {parent_index}:
+                return None
+        return declared
+
+    def _frame_link_index(
+        self,
+        parent_time: int,
+    ) -> tuple[
+        dict[int, set[int]],
+        dict[int, set[int]],
+        dict[int, set[int]],
+    ]:
+        """Index one frame's forward/reverse claims once for linear-time use."""
+        cached = self._link_index_cache.get(parent_time)
+        if cached is not None:
+            return cached
+
+        child_claimers: dict[int, set[int]] = {}
+        live_reverse_by_parent: dict[int, set[int]] = {}
+        all_reverse_by_parent: dict[int, set[int]] = {}
+        current = self.nuclei_record[parent_time]
+        following = self.nuclei_record[parent_time + 1]
+        for parent_index, parent in enumerate(current):
+            if not parent.is_alive:
+                continue
+            for successor in (parent.successor1, parent.successor2):
+                if successor > 0:
+                    child_claimers.setdefault(successor - 1, set()).add(
+                        parent_index,
+                    )
+        for child_index, child in enumerate(following):
+            if child.predecessor <= 0:
+                continue
+            parent_index = child.predecessor - 1
+            all_reverse_by_parent.setdefault(parent_index, set()).add(child_index)
+            if child.is_alive:
+                live_reverse_by_parent.setdefault(parent_index, set()).add(
+                    child_index,
+                )
+
+        result = (
+            child_claimers,
+            live_reverse_by_parent,
+            all_reverse_by_parent,
+        )
+        self._link_index_cache[parent_time] = result
+        return result
+
     def _descendant_refs(
         self,
         seeds: set[tuple[int, int]],
@@ -1238,37 +1354,122 @@ class IdentityAssigner:
         return refs
 
     def _assign_neutral_names(self, start_index: int) -> None:
-        """Fill unnamed records without asserting anatomical daughter order.
+        """Fill unresolved records while preserving every valid lineage edge.
 
-        Continuations inherit a known parent identity.  At a division with no
-        complete body frame, each still-unnamed daughter receives a neutral
-        ``Nuc...`` identifier instead of a biological ``a/p``, ``d/v``, or
-        ``l/r`` suffix.  The curated two-cell bridge pre-fills the exact first
-        AB/P1 daughter families before this pass; this helper handles roots or
-        later axis-dependent divisions that remain unresolved.  Reprocessing
-        after a curator supplies valid axes can replace those placeholders.
+        Continuations inherit their predecessor identity.  At a reciprocal
+        division, the predecessor's RuleManager entry fixes the unordered
+        daughter family even when no body frame is available.  In that case a
+        valid loaded pair is retained when possible, otherwise successor order
+        is used deterministically and reported as low-confidence.  A fresh
+        ``Nuc...`` root is reserved for records with no usable named
+        predecessor (including malformed or disconnected topology).
         """
         end = min(self.ending_index, len(self.nuclei_record))
+        stable_order_divisions = 0
         for t in range(max(0, start_index), end):
             previous = self.nuclei_record[t - 1] if t > 0 else None
-            for nuc in self.nuclei_record[t]:
+            current = self.nuclei_record[t]
+
+            # Forced names remain authoritative in every fallback path.
+            for nuc in current:
+                if nuc.is_alive and nuc.assigned_id:
+                    nuc.identity = nuc.assigned_id
+
+            # A positive predecessor must resolve to a live row in the
+            # immediately preceding frame.  Otherwise a loaded automatic
+            # label is stale topology, not a lineage fact.  This includes an
+            # impossible positive predecessor on the first stored frame.
+            # NILLI roots and explicit curator overrides remain untouched.
+            for nuc in current:
+                if not nuc.is_alive or nuc.assigned_id or nuc.predecessor <= 0:
+                    continue
+                predecessor_index = nuc.predecessor - 1
+                if (
+                    previous is None
+                    or not (0 <= predecessor_index < len(previous))
+                    or not previous[predecessor_index].is_alive
+                ):
+                    nuc.identity = ""
+
+            if previous is not None:
+                for pred_idx, pred in enumerate(previous):
+                    if not pred.is_alive or not pred.effective_name:
+                        continue
+                    successors = self._reciprocal_successor_indices(t - 1, pred_idx)
+                    if successors is None:
+                        # Malformed links are not biological evidence.  Do not
+                        # leave an unrelated automatic identity looking like a
+                        # valid child of this named parent, but retain compatible
+                        # loaded names (important for curated partial/ablation
+                        # datasets) and every explicit assigned_id.
+                        _, live_reverse, all_reverse = self._frame_link_index(t - 1)
+                        candidate_indices = set(
+                            live_reverse.get(pred_idx, set())
+                        ) | set(all_reverse.get(pred_idx, set()))
+                        for successor in (pred.successor1, pred.successor2):
+                            child_index = successor - 1
+                            if successor > 0 and 0 <= child_index < len(current):
+                                candidate_indices.add(child_index)
+                        rule = self.rule_manager.get_rule(pred.effective_name)
+                        compatible = {
+                            pred.effective_name,
+                            rule.daughter1,
+                            rule.daughter2,
+                        }
+                        for child_index in candidate_indices:
+                            child = current[child_index]
+                            if (
+                                child.is_alive
+                                and not child.assigned_id
+                                and child.identity
+                                and child.identity not in compatible
+                            ):
+                                child.identity = ""
+                        continue
+                    if not successors:
+                        continue
+                    if len(successors) == 1:
+                        successor = current[successors[0]]
+                        if not successor.assigned_id:
+                            successor.identity = pred.effective_name
+                        continue
+                    if len(successors) != 2:
+                        continue
+
+                    dau1 = current[successors[0]]
+                    dau2 = current[successors[1]]
+                    name1, name2, source = self._coerce_rule_daughter_pair(
+                        pred.effective_name,
+                        dau1.effective_name,
+                        dau2.effective_name,
+                    )
+                    dau1.identity = name1
+                    dau2.identity = name2
+                    _use_preassigned_id(dau1, dau2)
+                    if source == "stable successor order":
+                        stable_order_divisions += 1
+
+            for nuc in current:
                 if not nuc.is_alive or nuc.identity:
                     continue
                 if nuc.assigned_id:
                     nuc.identity = nuc.assigned_id
                     continue
-
-                if previous is not None and nuc.predecessor > 0:
-                    pred_idx = nuc.predecessor - 1
-                    if 0 <= pred_idx < len(previous):
-                        pred = previous[pred_idx]
-                        if pred.is_alive and pred.successor2 == NILLI:
-                            nuc.identity = pred.effective_name
-                            if nuc.identity:
-                                continue
-
                 z = round(nuc.z)
                 nuc.identity = f"{NUC}{t + 1:03d}_{z}_{nuc.x}_{nuc.y}"
+
+        if stable_order_divisions:
+            warning = (
+                "Preserved RuleManager daughter families for "
+                f"{stable_order_divisions} division(s) without a complete body "
+                "frame; anatomical sister order used stable successor order"
+            )
+            logger.warning("%s", warning)
+            if (
+                self.founder_assignment is not None
+                and warning not in self.founder_assignment.warnings
+            ):
+                self.founder_assignment.warnings.append(warning)
 
     def _clear_unforced_descendants_of_forced_early_cells(self) -> None:
         """Invalidate stale automatic progeny after an unresolved early edit.
@@ -1278,8 +1479,9 @@ class IdentityAssigner:
         identities below a changed forced P0/AB/P1/ABa/ABp/EMS/P2 anchor would
         present old automatic names as though they were concurrent with the
         edit.  Clear those unforced subtrees so ``_assign_neutral_names`` can
-        fail closed with non-biological labels.  Explicit descendant overrides
-        remain untouched.
+        rebuild every valid successor family from its current predecessor;
+        only disconnected or malformed roots remain neutral.  Explicit
+        descendant overrides remain untouched.
         """
         early_names = {"P0", "AB", "P1", "ABa", "ABp", "EMS", "P2"}
         end = min(self.ending_index, len(self.nuclei_record))
@@ -1487,14 +1689,91 @@ class IdentityAssigner:
             p2_idx=fa.p2_idx,
         )
 
-        # Compute axes at the four-cell midpoint to seed temporal signs.
-        # AP comes from P2->ABa and DV from EMS->ABp; LR is the right-handed
-        # completion, not the ABa--ABp separation.  The secondary quality
-        # value records when that DV geometry is weak or nearly collinear.
+        # Select the strongest complete frame while each founder lineage still
+        # has exactly one live representative.  The midpoint chosen for
+        # topology may be geometrically compressed; a nearby frame in the same
+        # four-cell window can carry a much better DV/LR estimate.  AP comes
+        # from P2->ABa and DV from EMS->ABp; LR is the right-handed completion.
         from .lineage_axes import compute_local_axes
-        seed_ap, seed_lr, seed_dv, _seed_quality = compute_local_axes(
-            self.nuclei_record, lineage_map, fa.four_cell_time, self.z_pix_res,
-        )
+
+        seed_ap = seed_lr = seed_dv = None
+        seed_quality = -1.0
+        seed_time = -1
+        founder_names = {"ABa", "ABp", "EMS", "P2"}
+        end = min(self.ending_index, len(self.nuclei_record))
+
+        def has_one_representative_per_founder(time: int) -> bool:
+            if not (0 <= time < end and time < len(lineage_map)):
+                return False
+            eligible_alive = sum(
+                1
+                for nucleus in self.nuclei_record[time]
+                if nucleus.is_alive
+                and "polar" not in (nucleus.assigned_id or nucleus.identity).lower()
+            )
+            if eligible_alive != 4:
+                return False
+            counts = {name: 0 for name in founder_names}
+            for index, nucleus in enumerate(self.nuclei_record[time]):
+                if not nucleus.is_alive or index >= len(lineage_map[time]):
+                    continue
+                label = lineage_map[time][index]
+                if label in counts:
+                    counts[label] += 1
+            return all(count == 1 for count in counts.values())
+
+        # FounderAssignment records the *midpoint* of the four-cell interval.
+        # Walk in both directions so a geometrically compressed midpoint cannot
+        # hide a stronger, complete frame from the earlier half of the same
+        # contiguous window.
+        midpoint = fa.four_cell_time
+        window_start = midpoint
+        window_stop = midpoint + 1
+        if has_one_representative_per_founder(midpoint):
+            lower_bound = max(0, self.starting_index)
+            while (
+                window_start > lower_bound
+                and has_one_representative_per_founder(window_start - 1)
+            ):
+                window_start -= 1
+            while (
+                window_stop < end
+                and has_one_representative_per_founder(window_stop)
+            ):
+                window_stop += 1
+        else:
+            # A malformed midpoint cannot define a trusted contiguous window.
+            window_stop = window_start
+
+        for time in range(window_start, window_stop):
+            candidate_ap, candidate_lr, candidate_dv, candidate_quality = (
+                compute_local_axes(
+                    self.nuclei_record,
+                    lineage_map,
+                    time,
+                    self.z_pix_res,
+                )
+            )
+            if not all(
+                axis is not None
+                for axis in (candidate_ap, candidate_lr, candidate_dv)
+            ):
+                continue
+            quality = float(candidate_quality)
+            if quality > seed_quality:
+                seed_ap = candidate_ap
+                seed_lr = candidate_lr
+                seed_dv = candidate_dv
+                seed_quality = quality
+                seed_time = time
+
+        if seed_time >= 0:
+            logger.info(
+                "Retained inferred four-cell body frame from t=%d "
+                "(secondary quality=%.3f)",
+                seed_time + 1,
+                seed_quality,
+            )
 
         complete_seed = all(axis is not None for axis in (seed_ap, seed_lr, seed_dv))
         complete_founder = all(
@@ -1519,6 +1798,8 @@ class IdentityAssigner:
             nuclei_record=self.nuclei_record,
             seed_ap=seed_ap,
             seed_lr=seed_lr,
+            seed_dv=seed_dv,
+            seed_time=seed_time if seed_time >= 0 else None,
         )
         # Disable multi-frame averaging in lineage mode.  With per-timepoint
         # axes that may differ between frames, averaging the division vector
@@ -1641,7 +1922,7 @@ class IdentityAssigner:
             nuclei = self.nuclei_record[i]
             next_nuclei = self.nuclei_record[i + 1] if i + 1 < m else None
 
-            for parent in nuclei:
+            for parent_index, parent in enumerate(nuclei):
                 if parent.status < 1:
                     continue
 
@@ -1662,28 +1943,29 @@ class IdentityAssigner:
                 if next_nuclei is None:
                     continue
 
-                has_two_successors = (
-                    parent.successor1 > 0 and parent.successor2 > 0
-                )
-
-                if not has_two_successors:
-                    # Not dividing — extend name to successor
-                    if parent.successor1 > 0:
-                        s1_idx = parent.successor1 - 1
-                        if 0 <= s1_idx < len(next_nuclei):
-                            succ = next_nuclei[s1_idx]
-                            if not succ.assigned_id:
-                                succ.identity = pname
+                successors = self._reciprocal_successor_indices(i, parent_index)
+                if successors is None:
+                    logger.warning(
+                        "%s at t=%d has malformed successor/predecessor links; "
+                        "biological daughter naming was skipped",
+                        pname,
+                        i + 1,
+                    )
+                    continue
+                if len(successors) < 2:
+                    # Terminal or non-dividing — extend the name on a valid
+                    # reciprocal continuation only.
+                    if successors:
+                        succ = next_nuclei[successors[0]]
+                        if not succ.assigned_id:
+                            succ.identity = pname
+                    continue
+                if len(successors) != 2:
                     continue
 
                 # Dividing — use DivisionCaller
-                s1_idx = parent.successor1 - 1
-                s2_idx = parent.successor2 - 1
-                if not (0 <= s1_idx < len(next_nuclei) and 0 <= s2_idx < len(next_nuclei)):
-                    continue
-
-                dau1 = next_nuclei[s1_idx]
-                dau2 = next_nuclei[s2_idx]
+                dau1 = next_nuclei[successors[0]]
+                dau2 = next_nuclei[successors[1]]
 
                 # Assign names (single-frame or multi-frame)
                 # division_time = i + 1 (0-based timepoint of the daughters)
@@ -1703,17 +1985,10 @@ class IdentityAssigner:
                     name1,
                     name2,
                 )
-                if source == "deferred":
-                    logger.warning(
-                        "%s division remains unnamed because the division "
-                        "caller has no complete anatomical frame",
-                        pname,
-                    )
-                    continue
                 if source != "division caller":
                     logger.warning(
-                        "%s division returned a foreign daughter family; "
-                        "preserving the canonical rule pair using %s",
+                        "%s division lacked a usable anatomical classification; "
+                        "preserving the canonical daughter family using %s",
                         pname,
                         source,
                     )
@@ -1726,48 +2001,14 @@ class IdentityAssigner:
                 _use_preassigned_id(dau1, dau2)
 
     def _assign_generic_names(self, start_index: int) -> None:
-        """Assign generic names when canonical naming isn't available.
+        """Assign topology-safe fallback names when anatomy is unavailable.
 
-        Non-dividing cells inherit parent name. Dividing cells get
-        parent + "a" / parent + "p" as a simple fallback.
+        This legacy entry point shares the same lineage invariant as the modern
+        fallback: continuations inherit and divisions use the predecessor's
+        exact RuleManager family.  Only disconnected roots receive a new
+        ``Nuc...`` identifier.
         """
-        for i in range(start_index, min(self.ending_index, len(self.nuclei_record))):
-            nuclei = self.nuclei_record[i]
-            prev_nuclei = self.nuclei_record[i - 1] if i > 0 else None
-
-            for nuc in nuclei:
-                if nuc.status < 1:
-                    continue
-
-                if nuc.identity:
-                    continue  # already named
-
-                if prev_nuclei is not None and nuc.predecessor != NILLI:
-                    pred_idx = nuc.predecessor - 1
-                    if 0 <= pred_idx < len(prev_nuclei):
-                        pred = prev_nuclei[pred_idx]
-                        if pred.successor2 == NILLI:
-                            nuc.identity = pred.identity
-                        else:
-                            # Dividing — simple a/p naming
-                            if nuc.assigned_id:
-                                nuc.identity = nuc.assigned_id
-                            else:
-                                nuc.identity = pred.identity + "a"
-                                # Name the sister too
-                                s2_idx = pred.successor2 - 1
-                                if 0 <= s2_idx < len(nuclei):
-                                    sister = nuclei[s2_idx]
-                                    if not sister.identity and not sister.assigned_id:
-                                        sister.identity = pred.identity + "p"
-                        continue
-
-                # First encounter of unnamed nucleus
-                if nuc.assigned_id:
-                    nuc.identity = nuc.assigned_id
-                else:
-                    z = round(nuc.z)
-                    nuc.identity = f"{NUC}{i + 1:03d}_{z}_{nuc.x}_{nuc.y}"
+        self._assign_neutral_names(start_index)
 
 
 def _use_preassigned_id(dau1: Nucleus, dau2: Nucleus) -> None:

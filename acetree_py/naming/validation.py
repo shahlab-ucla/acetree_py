@@ -22,7 +22,7 @@ import numpy as np
 from ..core.cell import Cell, CellFate
 from ..core.lineage import LineageTree
 from ..core.nucleus import Nucleus
-from .sulston_names import complement, FOUNDER_CELLS
+from .rules import RuleManager
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +90,9 @@ def validate_naming(
 
 
 def _check_sister_suffixes(tree: LineageTree) -> list[NamingWarning]:
-    """Check that sister cells have complementary Sulston suffixes."""
+    """Check every division against its exact RuleManager daughter family."""
     warnings = []
+    rule_manager = RuleManager()
 
     for cell in tree.all_cells():
         if len(cell.children) != 2:
@@ -99,42 +100,17 @@ def _check_sister_suffixes(tree: LineageTree) -> list[NamingWarning]:
 
         c1, c2 = cell.children
         n1, n2 = c1.name, c2.name
-
-        # Skip cells with auto-generated names
-        if n1.startswith("Nuc") or n2.startswith("Nuc"):
-            continue
-
-        # Skip founder cells with special naming (e.g., EMS -> E, MS)
-        if cell.name in FOUNDER_CELLS:
-            continue
-
-        # Both should share the parent prefix
-        if not n1.startswith(cell.name) or not n2.startswith(cell.name):
-            # Special cases: P0->AB/P1, P1->EMS/P2, etc.
-            if cell.name in FOUNDER_CELLS:
-                continue
+        rule = rule_manager.get_rule(cell.name)
+        expected = {rule.daughter1, rule.daughter2}
+        if n1 == n2 or {n1, n2} != expected:
             warnings.append(NamingWarning(
-                cell.name, "naming_prefix",
-                f"Daughters {n1}, {n2} don't share parent prefix {cell.name}",
-                severity="warning",
-                confidence_impact=0.2,
+                cell.name,
+                "sister_mismatch",
+                f"Daughters {n1}, {n2} do not match the canonical family "
+                f"{rule.daughter1}, {rule.daughter2}",
+                severity="error",
+                confidence_impact=0.5,
             ))
-            continue
-
-        # Extract suffixes
-        suffix1 = n1[len(cell.name):]
-        suffix2 = n2[len(cell.name):]
-
-        if len(suffix1) == 1 and len(suffix2) == 1:
-            expected2 = complement(suffix1)
-            if suffix2 != expected2:
-                warnings.append(NamingWarning(
-                    cell.name, "sister_mismatch",
-                    f"Daughter suffixes '{suffix1}' and '{suffix2}' are not "
-                    f"complements (expected '{suffix1}' and '{expected2}')",
-                    severity="error",
-                    confidence_impact=0.5,
-                ))
 
     return warnings
 

@@ -7,6 +7,7 @@ napari or Qt to be installed — only tests the data-layer logic.
 
 
 import numpy as np
+import pytest
 
 from acetree_py.core.lineage import build_lineage_tree
 from acetree_py.core.movie import Movie
@@ -718,7 +719,7 @@ class TestManualDivision:
         app.edit_history.undo()
         assert len(mgr.nuclei_record[1]) == 1
 
-    def test_second_daughter_without_body_frame_uses_neutral_names(self):
+    def test_second_daughter_without_body_frame_preserves_rule_family(self):
         app = self._fresh_app(parent_name="EMS", with_body_frame=False)
 
         app._handle_add_click(50.0, 100.0)
@@ -726,8 +727,7 @@ class TestManualDivision:
         daughters = app.manager.nuclei_record[1]
         assert len(daughters) == 2
         assert all(n.assigned_id == "" for n in daughters)
-        assert all(n.effective_name.startswith("Nuc") for n in daughters)
-        assert len({n.effective_name for n in daughters}) == 2
+        assert {n.effective_name for n in daughters} == {"E", "MS"}
 
     def test_division_flips_when_ap_direction_flipped(self):
         """A valid legacy body frame still uses P2's C/P3 rule.
@@ -780,6 +780,48 @@ class TestManualDivision:
 
         app.edit_history.undo()
         assert len(app.manager.nuclei_record[1]) == 1
+
+    @pytest.mark.parametrize("workflow", ["add", "placement"])
+    def test_forced_first_daughter_reorders_preview_without_duplicate(
+        self,
+        workflow: str,
+    ):
+        """A retained P3 lock on successor 1 makes the new successor C."""
+        from acetree_py.io.config import NamingMethod
+
+        app = self._fresh_app(parent_name="P2")
+        app.manager._naming_method = NamingMethod.MANUAL.value
+        first = app.manager.nuclei_record[1][0]
+        first.identity = "P3"
+        first.assigned_id = "P3"
+        before = (first.identity, first.assigned_id)
+
+        if workflow == "add":
+            app._handle_add_click(50.0, 100.0)
+        else:
+            app.exit_add_mode()
+            app.enter_placement_mode(parent_name="P2")
+            app.current_time = 2
+            assert app._handle_placement_click(50.0, 100.0)
+
+        daughters = app.manager.nuclei_record[1]
+        assert [(n.x, n.effective_name) for n in daughters] == [
+            (110, "P3"),
+            (50, "C"),
+        ]
+        assert daughters[0].assigned_id == "P3"
+        assert daughters[1].assigned_id == ""
+
+        app.edit_history.undo()
+        assert len(app.manager.nuclei_record[1]) == 1
+        restored = app.manager.nuclei_record[1][0]
+        assert (restored.identity, restored.assigned_id) == before
+
+        app.edit_history.redo()
+        assert [(n.x, n.effective_name) for n in app.manager.nuclei_record[1]] == [
+            (110, "P3"),
+            (50, "C"),
+        ]
 
     def test_click_near_existing_at_end_time_extends(self):
         """At click_time == cell.end_time, a close click preserves the

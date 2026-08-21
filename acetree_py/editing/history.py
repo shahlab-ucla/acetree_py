@@ -388,11 +388,20 @@ class EditHistory:
         if pending is None:
             return
 
+        if pending.operation in {"undo", "redo"}:
+            # The command entry already owns the exact automatic-name boundary
+            # captured by its original Do.  Undo/Redo callbacks still rebuild
+            # derived UI/tree state, but a newer naming algorithm must not
+            # rewrite the historical document state while traversing that
+            # boundary.  Restore the dense target captured immediately before
+            # the callback instead of replacing the entry with its side effects.
+            _restore_name_snapshot(self.nuclei_record, pending.callback_start)
+            if not keep_pending:
+                self._pending_name_capture = None
+            return
+
         current = _snapshot_name_state(self.nuclei_record)
-        if pending.operation == "undo":
-            changes = _name_state_changes(current, pending.operation_start)
-        else:
-            changes = _name_state_changes(pending.operation_start, current)
+        changes = _name_state_changes(pending.operation_start, current)
 
         for stack in (self._undo_stack, self._redo_stack):
             for position, candidate in enumerate(stack):

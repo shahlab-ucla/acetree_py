@@ -15,6 +15,7 @@ from acetree_py.core.nucleus import Nucleus
 from acetree_py.io.auxinfo import load_auxinfo
 from acetree_py.io.config import AceTreeConfig
 from acetree_py.naming.body_axes import BodyAxisFrame, BodyAxisLabels
+from acetree_py.naming.division_caller import DivisionCaller
 from acetree_py.naming.rules import RuleManager
 from acetree_py.editing.commands import SetBodyAxes
 
@@ -106,7 +107,7 @@ def test_manual_division_preview_uses_parent_specific_rules(
     assert not suggestion.ambiguous
 
 
-def test_division_preview_without_body_frame_does_not_guess_names():
+def test_division_preview_without_body_frame_preserves_daughter_family():
     manager = NucleiManager()
     parent = Nucleus(identity="EMS", status=1)
 
@@ -117,13 +118,36 @@ def test_division_preview_without_body_frame_does_not_guess_names():
         time=2,
     )
 
-    assert suggestion.first_name == ""
-    assert suggestion.second_name == ""
+    assert {suggestion.first_name, suggestion.second_name} == {"E", "MS"}
     assert suggestion.confidence == 0.0
     assert suggestion.ambiguous
+    assert suggestion.source == "canonical family (body axes unavailable)"
 
 
-def test_division_preview_preserves_empty_caller_result():
+def test_lineage_preview_reports_canonical_fallback_when_frame_is_incomplete():
+    manager = NucleiManager()
+    caller = DivisionCaller(
+        rule_manager=RuleManager(),
+        z_pix_res=1.0,
+        lineage_map=[["EMS"]],
+        nuclei_record=[[Nucleus(identity="EMS", status=1)]],
+    )
+    manager.identity_assigner = SimpleNamespace(division_caller=caller)
+
+    suggestion = manager.suggest_division_names(
+        Nucleus(identity="EMS", status=1),
+        (0.0, 0.0, 0.0),
+        (10.0, 0.0, 0.0),
+        time=2,
+    )
+
+    assert (suggestion.first_name, suggestion.second_name) == ("E", "MS")
+    assert suggestion.confidence == 0.0
+    assert suggestion.ambiguous
+    assert suggestion.source == "canonical family (body axes unavailable)"
+
+
+def test_division_preview_repairs_empty_caller_result_to_rule_family():
     caller = SimpleNamespace(
         is_v2=False,
         is_lineage_mode=True,
@@ -141,8 +165,8 @@ def test_division_preview_preserves_empty_caller_result():
         time=2,
     )
 
-    assert suggestion.first_name == ""
-    assert suggestion.second_name == ""
+    assert {suggestion.first_name, suggestion.second_name} == {"Ea", "Ep"}
+    assert suggestion.confidence == 0.0
     assert suggestion.ambiguous
 
 

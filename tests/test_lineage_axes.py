@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from acetree_py.core.nucleus import Nucleus
-from acetree_py.naming.lineage_axes import compute_local_axes
+from acetree_py.naming.lineage_axes import build_lineage_map, compute_local_axes
 
 
 def _nucleus(index: int, x: int, y: int, z: float) -> Nucleus:
@@ -52,3 +52,84 @@ def test_axis_geometry_scales_z_into_physical_space():
     expected = np.array([0.0, 1.0, 3.0])
     expected /= np.linalg.norm(expected)
     np.testing.assert_allclose(dv, expected)
+
+
+def test_lineage_map_requires_unique_reciprocal_successor_links():
+    founders = [
+        _nucleus(1, 0, 0, 0),
+        _nucleus(2, 1, 0, 0),
+        _nucleus(3, 2, 0, 0),
+        _nucleus(4, 3, 0, 0),
+    ]
+    founders[0].successor1 = 1
+    child = _nucleus(1, 0, 0, 0)
+    child.predecessor = 1
+
+    valid = build_lineage_map(
+        [founders, [child]],
+        four_cell_time=0,
+        aba_idx=0,
+        abp_idx=1,
+        ems_idx=2,
+        p2_idx=3,
+    )
+    assert valid[1][0] == "ABa"
+
+    founders[1].successor1 = 1
+    malformed = build_lineage_map(
+        [founders, [child]],
+        four_cell_time=0,
+        aba_idx=0,
+        abp_idx=1,
+        ems_idx=2,
+        p2_idx=3,
+    )
+    assert malformed[1][0] == ""
+
+
+def test_lineage_map_rejects_duplicate_successor_slots():
+    founders = [
+        _nucleus(1, 0, 0, 0),
+        _nucleus(2, 1, 0, 0),
+        _nucleus(3, 2, 0, 0),
+        _nucleus(4, 3, 0, 0),
+    ]
+    founders[0].successor1 = 1
+    founders[0].successor2 = 1
+    child = _nucleus(1, 0, 0, 0)
+    child.predecessor = 1
+
+    lineage_map = build_lineage_map(
+        [founders, [child]],
+        four_cell_time=0,
+        aba_idx=0,
+        abp_idx=1,
+        ems_idx=2,
+        p2_idx=3,
+    )
+
+    assert lineage_map[1][0] == ""
+
+
+def test_lineage_map_rejects_undeclared_live_reverse_claimers():
+    founders = [
+        _nucleus(1, 0, 0, 0),
+        _nucleus(2, 1, 0, 0),
+        _nucleus(3, 2, 0, 0),
+        _nucleus(4, 3, 0, 0),
+    ]
+    founders[0].successor1 = 1
+    children = [_nucleus(index, index, 0, 0) for index in (1, 2, 3)]
+    for child in children:
+        child.predecessor = 1
+
+    lineage_map = build_lineage_map(
+        [founders, children],
+        four_cell_time=0,
+        aba_idx=0,
+        abp_idx=1,
+        ems_idx=2,
+        p2_idx=3,
+    )
+
+    assert lineage_map[1] == ["", "", ""]

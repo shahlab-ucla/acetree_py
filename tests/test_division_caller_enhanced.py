@@ -247,7 +247,7 @@ class TestFounderMode:
         assert dc.is_lineage_mode
         np.testing.assert_allclose(corrected, [-5.0, 0.0, 0.0])
 
-    def test_lineage_mode_without_complete_frame_defers_names(self, rule_manager):
+    def test_lineage_mode_without_complete_frame_preserves_family(self, rule_manager):
         dc = DivisionCaller(
             rule_manager=rule_manager,
             z_pix_res=1.0,
@@ -269,11 +269,11 @@ class TestFounderMode:
             timepoint=0,
         )
 
-        assert names == ("", "")
+        assert names == ("E", "MS")
         assert not dc.has_complete_body_frame(0)
         assert dc.classifications[-1].confidence == 0.0
-        assert dc.classifications[-1].daughter1_name == ""
-        assert dc.classifications[-1].daughter2_name == ""
+        assert dc.classifications[-1].daughter1_name == "E"
+        assert dc.classifications[-1].daughter2_name == "MS"
 
 
 class TestBackwardCompatibility:

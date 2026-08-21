@@ -67,7 +67,9 @@ and accepted tracking provenance.
 5. Keep the nuclei ZIP, XML configuration, and AuxInfo behavior backward
    compatible.
 6. Preserve forced names and allow the existing naming pipeline to name newly
-   accepted automatic tracks.
+   accepted automatic tracks. A valid reciprocal division from a named parent
+   must receive that parent's exact RuleManager daughter family even when body
+   axes can provide only a low-confidence sister ordering.
 7. Record enough provenance to reproduce or audit every automated proposal.
 8. Provide one adapter boundary that hosts the StarryNite-compatible pipeline
    without creating a second editing or persistence path.
@@ -577,6 +579,16 @@ runs its normal successor reconstruction, automatic naming, and lineage build
 exactly once. This allows a forced parent such as EMS and a manual body frame to
 drive automatic E/MS and Ea/Ep naming without making the tracking component
 embryo-specific.
+
+The host separates family selection from physical sister ordering. For every
+alive reciprocal two-child division of a named parent, RuleManager supplies the
+exact unordered pair, including non-concatenative founder mappings. Dynamic
+lineage axes are preferred; the best complete four-cell frame is retained as a
+static fallback. If neither can order the sisters, the host uses deterministic
+successor order with a low-confidence warning rather than assigning unrelated
+`Nuc...` names. `Nuc...` remains valid for unknown/disconnected roots or
+malformed topology. Curator-owned `assigned_id` values remain authoritative and
+any incompatibility is surfaced as validation, never silently overwritten.
 
 ## 9. Preview and review
 
@@ -1236,7 +1248,9 @@ identity where algorithms intentionally differ.
 | Selected forward | Prefix cutoff is seed, gap, or diagnostic candidate | Prefix acceptance disabled |
 | Selected forward | Likely division under STOP | Stop before branch; offer direct rerun following both daughters when splitting is supported |
 | Naming | Forced EMS extended then divided | EMS preserved; automatic E/MS naming remains host-owned |
-| Naming | No valid body frame | Unknown roots and axis-dependent later divisions remain neutral; a positively recovered AB/P1 pair still uses the exact first daughter families while reporting uncertain sister order |
+| Naming | Valid four-cell window, later local-axis dropout | Prefer dynamic axes when usable; otherwise reuse the best retained complete four-cell frame |
+| Naming | Named parent divides reciprocally with no usable body frame | Assign the exact RuleManager daughter pair in deterministic successor order and report low-confidence ordering; do not emit unrelated `Nuc...` daughters |
+| Naming | Unknown root or malformed/non-reciprocal division | Fail closed with neutral/unresolved naming; do not infer a biological family from invalid topology |
 | Preview | Scrub time/Z and change contrast | Proposal unchanged; view state retained |
 | Preview | Discard | No model, history, dirty-state, or file change |
 | Commit | Proposal accepted | Exactly one history entry and one naming/tree rebuild |
@@ -1266,7 +1280,9 @@ The prototype is complete only when all of the following hold:
 5. A selected nucleus can be tracked forward without detecting or modifying
    unrelated cells.
 6. Uncertainty stops selected-forward tracking instead of guessing.
-7. Forced names and existing body-axis/naming behavior survive commit.
+7. Forced names and existing body-axis/naming behavior survive commit; every
+   valid reciprocal division from a named parent receives the exact RuleManager
+   daughter family, with ordering confidence/provenance reported separately.
 8. Save/reopen retains the accepted lineage and provenance while the legacy
    nuclei ZIP remains readable without the sidecar.
 9. A fake external detector and tracker can be discovered through package entry

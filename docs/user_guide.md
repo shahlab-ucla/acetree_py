@@ -352,7 +352,13 @@ The **Manual Track** button enables continuous click-to-place tracking across ti
 
 If no cell is selected, Manual Track enters root mode: a single right-click places one independent nucleus and exits.
 
-When a placement creates a second daughter, AceTree evaluates the division rule for the **actual parent**. The preview can therefore propose `ABal/ABar`, `E/MS`, `C/P3`, or other parent-specific pairs rather than always proposing `a/p`. The preview reports its axis, confidence, and orientation source. Suggested names remain automatic (`identity`); use Rename only when you intend to force a correction. Low-confidence or ambiguous geometry is an invitation to inspect the body axes and daughter positions.
+When a placement creates a second daughter, AceTree evaluates the division rule
+for the **actual parent**. The preview can therefore propose `ABal/ABar`,
+`E/MS`, `C/P3`, or other parent-specific pairs rather than always proposing
+`a/p`. That pair remains correct even when the body-axis evidence cannot order
+the two sisters confidently; in that case the preview uses stable successor
+order and clearly reports low confidence. Suggested names remain automatic
+(`identity`); use Rename only when you intend to force a correction.
 
 #### Track Selected Cell Workbench
 
@@ -529,9 +535,18 @@ Use **Body Orientation** when automatic daughter ordering is systematically mirr
 
 The conventions are AP **posterior → anterior**, DV **ventral → dorsal**, and LR **right → left**, with `DV = AP × LR`. AP plus either DV or LR is sufficient; AceTree constructs the third axis and orthogonalizes the frame. Z separation is scaled by the dataset's physical z resolution, so a one-plane z shift is not assumed to equal one x/y pixel.
 
-Do not infer left/right from the ABa–ABp separation alone. At the four-cell stage that pair does not by itself establish signed LR; use trusted metadata, a manual anatomical cue, or later handedness. Manual orientation takes precedence over automatic geometry, while manual **cell-name** overrides remain intact when naming is rerun.
+Do not infer left/right from the ABa–ABp separation alone. At the four-cell stage that pair does not by itself establish signed LR; use trusted metadata, a manual anatomical cue, or later handedness. AceTree evaluates the valid four-cell window and retains its best complete AP/LR/DV frame, rather than relying on one possibly degenerate midpoint. Per-timepoint lineage axes remain preferred because they follow embryo motion; the retained four-cell frame is reused when a later local frame is missing or weak. Manual orientation takes precedence over automatic geometry, while manual **cell-name** overrides remain intact when naming is rerun.
 
-If AceTree can identify founders from topology but cannot construct a complete AP/DV/LR frame, it keeps those founder names but does not pretend that microscope x/y/z are anatomical coordinates. Existing loaded descendant names are preserved; unrelated new uncertain roots and later divisions whose required axes remain unavailable use neutral `Nuc...` names until a valid body frame is supplied and naming is rerun. The early AB/P1 recovery is the constrained exception above: the parent rule already fixes each first daughter family, so only sister ordering—not the family—can remain uncertain.
+If AceTree can identify founders from topology but cannot construct a complete
+AP/DV/LR frame, it keeps those founder names but does not pretend that
+microscope x/y/z are anatomical coordinates. Every valid reciprocal division
+of a named parent still receives that parent's exact RuleManager daughter pair;
+only the assignment of the two names to the two physical sisters is uncertain.
+AceTree preserves a compatible loaded ordering or uses stable successor order
+with a low-confidence warning. Neutral `Nuc...` names are reserved for
+unknown/disconnected roots and malformed links, not for daughters whose named
+predecessor and reciprocal division are known. A forced `assigned_id` remains a
+curator-owned exception and is never silently replaced.
 
 ### 6.6 3D Volume View
 
@@ -1090,7 +1105,7 @@ When a dataset is loaded, the naming pipeline automatically identifies cells:
 
 1. **Founder identification**: Finds the 4-cell stage and identifies ABa, ABp, EMS, P2 using topology and timing. ABa/ABp are distinguished by projection onto a posterior→anterior axis rather than assuming image x. Explicit orientation is preferred; weak geometric fallbacks are reported with lower confidence.
 2. **Back-tracing**: Names earlier cells (AB, P1, P0) by tracing predecessor links backward.
-3. **Forward naming**: Names all subsequent cells by applying the selected parent's Sulston division rule to physically scaled 3D geometry. Each result carries an axis, confidence, and orientation source.
+3. **Forward naming**: Names all subsequent cells by applying the selected parent's Sulston division rule. The rule fixes the exact daughter family; physically scaled 3D geometry chooses sister ordering. Each result carries an axis, confidence, and orientation source.
 
 **Two-cell frames with polar bodies:** Detector-assisted initialization may
 show four objects even though the embryo is at the two-cell stage. Select and
@@ -1109,18 +1124,27 @@ boundary; Redo reapplies the corrected state.
 
 Once the roots resolve, their first valid divisions keep the biological
 family even if the dataset does not yet provide a complete body frame: `AB`
-produces `ABa` and `ABp`, and `P1` produces `EMS` and `P2`. Recovered AP orders
-the sisters when possible. If that call is tied, AceTree preserves a consistent
-loaded pair or uses stable successor order and reports the lower-confidence
-fallback; it does not replace these four founders with unrelated `Nuc...`
-roots. A dataset previously saved with corrected `AB`/`P1` roots but legacy
-neutral daughters is upgraded automatically on the next naming rebuild.
+produces `ABa` and `ABp`, and `P1` produces `EMS` and `P2`. The same invariant
+continues through later named predecessors: for example, `ABa` produces its
+RuleManager pair, `EMS` produces `E`/`MS`, and `P2` produces `C`/`P3`.
+Recovered or four-cell axes order the sisters when possible. If a call is tied,
+AceTree preserves a consistent loaded pair or uses stable successor order and
+reports the lower-confidence fallback; it does not break the lineage with
+unrelated `Nuc...` names. A dataset previously saved with corrected roots but
+legacy neutral descendants is upgraded automatically on the next naming
+rebuild.
 
-Orientation precedence is: valid explicit AuxInfo v2 (including a manual landmark frame), a supported AuxInfo v1 orientation, per-timepoint lineage geometry, then static founder geometry. A present but unusable v2 file (missing, malformed, non-finite, zero, or parallel AP/LR vectors) does not mask valid v1 metadata. Invalid placeholder metadata is ignored. Automatic geometry uses AP from P2 toward ABa and a DV seed from EMS toward ABp, projected perpendicular to AP; it does not treat ABa–ABp as LR. Manual correction is recommended when compression, sparse tracking, or uncertain handedness makes that estimate weak.
+Orientation precedence is: valid explicit AuxInfo v2 (including a manual landmark frame), a supported AuxInfo v1 orientation, per-timepoint lineage geometry, then the best complete frame retained from the valid four-cell window. A present but unusable v2 file (missing, malformed, non-finite, zero, or parallel AP/LR vectors) does not mask valid v1 metadata. Invalid placeholder metadata is ignored. Automatic geometry uses AP from P2 toward ABa and a DV seed from EMS toward ABp, projected perpendicular to AP; it does not treat ABa–ABp as LR. Manual correction is recommended when compression, sparse tracking, or uncertain handedness makes that estimate weak.
 
 ### 11.2 Unnamed Cells
 
-Cells that can't be automatically named receive placeholder names like `Nuc042_15_200_300` (3-digit zero-padded timepoint, then z, x, y). These are typically polar bodies or cells at the edges of the tracked lineage.
+Cells that have no known predecessor family receive placeholder names like
+`Nuc042_15_200_300` (3-digit zero-padded timepoint, then z, x, y). These are
+typically polar bodies, disconnected detections, cells at the edge of the
+tracked lineage, or records behind malformed/non-reciprocal links. A valid
+two-daughter division from a named predecessor does not use this placeholder:
+its daughters receive the exact RuleManager family even when sister order has
+low confidence.
 
 ### 11.3 Manual Overrides
 

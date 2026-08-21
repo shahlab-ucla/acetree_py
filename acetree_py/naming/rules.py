@@ -29,6 +29,21 @@ from .sulston_names import LETTER_TO_AXIS, complement
 logger = logging.getLogger(__name__)
 
 
+# Early founder divisions do not all follow the ordinary ``parent + suffix``
+# convention.  Keep their biological daughter families available even when a
+# legacy rule resource is missing or incomplete.  Loaded ``new_rules.tsv``
+# entries still take precedence, so their empirical axis vectors remain the
+# authoritative definitions in normal installations.
+_SPECIAL_DAUGHTER_PAIRS: dict[str, tuple[str, str]] = {
+    "P0": ("AB", "P1"),
+    "P1": ("EMS", "P2"),
+    "EMS": ("E", "MS"),
+    "P2": ("C", "P3"),
+    "P3": ("D", "P4"),
+    "P4": ("Z2", "Z3"),
+}
+
+
 @dataclass
 class Rule:
     """A division rule describing how a parent cell divides.
@@ -230,10 +245,17 @@ class RuleManager:
             # Default: "a" (anterior/posterior division)
             letter = "a"
 
-        # Build daughter names
-        comp = complement(letter)
-        dau1 = parent_name + letter
-        dau2 = parent_name + comp
+        # Build daughter names.  Most Sulston names extend the parent with a
+        # complementary suffix, but the early founder lineage has several
+        # non-concatenative transitions (for example P1 -> EMS/P2).  These are
+        # exact family invariants, not orientation guesses.
+        special_pair = _SPECIAL_DAUGHTER_PAIRS.get(parent_name)
+        if special_pair is not None:
+            dau1, dau2 = special_pair
+        else:
+            comp = complement(letter)
+            dau1 = parent_name + letter
+            dau2 = parent_name + comp
 
         # Build axis vector from letter
         axis = LETTER_TO_AXIS.get(letter, (1.0, 0.0, 0.0))

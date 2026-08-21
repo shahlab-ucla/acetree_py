@@ -18,7 +18,7 @@ import logging
 import os
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1986,6 +1986,46 @@ class AceTreeApp:
             return None
         return result
 
+    @staticmethod
+    def _reconcile_division_suggestion_with_first_override(
+        suggestion,
+        first_daughter,
+        inherited_parent_lock: bool,
+    ):
+        """Make a preview/commit agree with a preserved first-daughter lock.
+
+        A cell may have been explicitly named while it still looked like a
+        continuation.  Once a second successor proves that it is a daughter,
+        preserve a genuine daughter override and swap the automatic pair when
+        that override names the proposed second daughter.  Inherited parent
+        locks are cleared by the existing division workflow and do not reorder
+        the pair.
+        """
+        if suggestion is None or inherited_parent_lock:
+            return suggestion
+        locked_name = (first_daughter.assigned_id or "").strip()
+        if not locked_name or locked_name == suggestion.first_name:
+            return suggestion
+        if locked_name == suggestion.second_name:
+            return replace(
+                suggestion,
+                first_name=suggestion.second_name,
+                second_name=suggestion.first_name,
+                confidence=0.0,
+                source="forced first-daughter override",
+                ambiguous=True,
+            )
+        # A foreign curator name is an intentional exception to the canonical
+        # pair.  Report the actual effective first name instead of previewing a
+        # placement that the assigned_id will immediately mask.
+        return replace(
+            suggestion,
+            first_name=locked_name,
+            confidence=0.0,
+            source="forced first-daughter override",
+            ambiguous=True,
+        )
+
     def _handle_add_click(self, x: float, y: float) -> bool:
         """Handle a left-click in add mode — place a nucleus at (x, y).
 
@@ -2165,6 +2205,11 @@ class AceTreeApp:
                 inherited_parent_lock = bool(
                     parent_nuc_ref.assigned_id
                     and first_daughter.assigned_id == parent_nuc_ref.assigned_id
+                )
+                suggestion = self._reconcile_division_suggestion_with_first_override(
+                    suggestion,
+                    first_daughter,
+                    inherited_parent_lock,
                 )
                 # The second successor proves that the apparent continuation
                 # is a daughter.  Always clear its inherited automatic parent
@@ -2411,6 +2456,11 @@ class AceTreeApp:
                 inherited_parent_lock = bool(
                     parent_nuc_ref.assigned_id
                     and first_daughter.assigned_id == parent_nuc_ref.assigned_id
+                )
+                suggestion = self._reconcile_division_suggestion_with_first_override(
+                    suggestion,
+                    first_daughter,
+                    inherited_parent_lock,
                 )
                 first_name_state = SetCellNameState(
                     time=time,

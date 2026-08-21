@@ -45,6 +45,50 @@ class TestSulstonNames:
 class TestRuleManager:
     """Test rule loading and generation."""
 
+    @pytest.mark.parametrize(
+        ("parent", "expected"),
+        [
+            ("P0", ("AB", "P1")),
+            ("P1", ("EMS", "P2")),
+            ("EMS", ("E", "MS")),
+            ("P2", ("C", "P3")),
+            ("P3", ("D", "P4")),
+            ("P4", ("Z2", "Z3")),
+        ],
+    )
+    def test_special_founder_daughter_families_are_exact(
+        self,
+        parent: str,
+        expected: tuple[str, str],
+    ):
+        rm = RuleManager()
+        rule = rm.get_rule(parent)
+
+        assert (rule.daughter1, rule.daughter2) == expected
+
+    @pytest.mark.parametrize(
+        ("parent", "expected"),
+        [
+            ("P0", ("AB", "P1")),
+            ("P1", ("EMS", "P2")),
+            ("EMS", ("E", "MS")),
+            ("P2", ("C", "P3")),
+            ("P3", ("D", "P4")),
+            ("P4", ("Z2", "Z3")),
+        ],
+    )
+    def test_special_founder_families_survive_missing_rule_resource(
+        self,
+        parent: str,
+        expected: tuple[str, str],
+    ):
+        rm = RuleManager()
+        rm._new_rules.clear()
+
+        rule = rm.get_rule(parent)
+
+        assert (rule.daughter1, rule.daughter2) == expected
+
     def test_loads_precomputed_rules(self):
         rm = RuleManager()
         assert rm.num_precomputed > 600  # NewRules.txt has ~621 entries
@@ -52,6 +96,11 @@ class TestRuleManager:
     def test_loads_names_hash(self):
         rm = RuleManager()
         assert rm.num_hash_entries > 50  # namesHash.txt has ~61 entries
+
+    def test_precomputed_special_rule_remains_authoritative(self):
+        rm = RuleManager()
+
+        assert rm.get_rule("P2") is rm._new_rules["P2"]
 
     def test_get_precomputed_rule(self):
         rm = RuleManager()
@@ -194,3 +243,164 @@ class TestDivisionCaller:
         # Should still produce valid names
         assert name1 != ""
         assert name2 != ""
+
+    def test_lineage_mode_uses_complete_seed_after_landmark_dropout(
+        self,
+        rule_manager,
+    ):
+        """A later missing lineage must not discard the four-cell frame."""
+        record = [[
+            self._make_nucleus(0, 0, 0.0),
+            self._make_nucleus(10, 0, 0.0),
+            self._make_nucleus(0, 10, 0.0),
+        ]]
+        dc = DivisionCaller(
+            rule_manager=rule_manager,
+            z_pix_res=1.0,
+            lineage_map=[["ABa", "ABp", "EMS"]],
+            nuclei_record=record,
+            seed_ap=np.array([-1.0, 0.0, 0.0]),
+            seed_lr=np.array([0.0, 0.0, 1.0]),
+            seed_dv=np.array([0.0, 1.0, 0.0]),
+        )
+        parent = self._make_nucleus(10, 0, 0.0, identity="AB")
+        daughter1 = self._make_nucleus(0, 0, 0.0)
+        daughter2 = self._make_nucleus(20, 0, 0.0)
+
+        assert dc._get_local_axes(0) is None
+        assert dc.has_complete_body_frame(0)
+        assert dc.assign_names(
+            parent,
+            daughter1,
+            daughter2,
+            timepoint=0,
+        ) == ("ABa", "ABp")
+
+    def test_lineage_mode_uses_complete_seed_after_local_axis_degeneracy(
+        self,
+        rule_manager,
+    ):
+        """Collinear landmarks fall back to the retained seed frame."""
+        record = [[
+            self._make_nucleus(30, 0, 0.0),
+            self._make_nucleus(20, 0, 0.0),
+            self._make_nucleus(10, 0, 0.0),
+            self._make_nucleus(0, 0, 0.0),
+        ]]
+        dc = DivisionCaller(
+            rule_manager=rule_manager,
+            z_pix_res=1.0,
+            lineage_map=[["ABa", "ABp", "EMS", "P2"]],
+            nuclei_record=record,
+            seed_ap=np.array([-1.0, 0.0, 0.0]),
+            seed_lr=np.array([0.0, 0.0, 1.0]),
+            seed_dv=np.array([0.0, 1.0, 0.0]),
+        )
+        parent = self._make_nucleus(10, 0, 0.0, identity="AB")
+        daughter1 = self._make_nucleus(0, 0, 0.0)
+        daughter2 = self._make_nucleus(20, 0, 0.0)
+
+        assert dc._get_local_axes(0) is None
+        assert dc.has_complete_body_frame(0)
+        assert dc.assign_names(
+            parent,
+            daughter1,
+            daughter2,
+            timepoint=0,
+        ) == ("ABa", "ABp")
+
+    def test_lineage_mode_does_not_mix_incomplete_static_frames(
+        self,
+        rule_manager,
+    ):
+        """Partial seed and founder inputs cannot form a synthetic frame."""
+        record = [[self._make_nucleus(0, 0, 0.0)]]
+        dc = DivisionCaller(
+            rule_manager=rule_manager,
+            z_pix_res=1.0,
+            founder_dv=np.array([0.0, 1.0, 0.0]),
+            lineage_map=[[""]],
+            nuclei_record=record,
+            seed_ap=np.array([-1.0, 0.0, 0.0]),
+            seed_lr=np.array([0.0, 0.0, 1.0]),
+        )
+        parent = self._make_nucleus(10, 0, 0.0, identity="AB")
+
+        assert not dc.has_complete_body_frame(0)
+        assert dc.assign_names(
+            parent,
+            self._make_nucleus(0, 0, 0.0),
+            self._make_nucleus(20, 0, 0.0),
+            timepoint=0,
+        ) == ("ABa", "ABp")
+        assert dc.classifications[-1].confidence == 0.0
+
+    def test_lineage_mode_prefers_available_dynamic_axes_over_seed(
+        self,
+        rule_manager,
+    ):
+        """The seed is a fallback, not a replacement for per-frame geometry."""
+        record = [[
+            self._make_nucleus(0, 10, 0.0),
+            self._make_nucleus(10, 0, 0.0),
+            self._make_nucleus(0, 0, 0.0),
+            self._make_nucleus(0, 0, 0.0),
+        ]]
+        dc = DivisionCaller(
+            rule_manager=rule_manager,
+            z_pix_res=1.0,
+            lineage_map=[["ABa", "ABp", "EMS", "P2"]],
+            nuclei_record=record,
+            seed_ap=np.array([-1.0, 0.0, 0.0]),
+            seed_lr=np.array([0.0, 0.0, 1.0]),
+            seed_dv=np.array([0.0, 1.0, 0.0]),
+        )
+
+        corrected = dc._measurement_correction(
+            np.array([10.0, 0.0, 0.0]),
+            timepoint=0,
+        )
+
+        np.testing.assert_allclose(corrected, [0.0, 10.0, 0.0])
+
+    def test_lineage_mode_uses_seed_when_fresh_axes_are_low_quality(
+        self,
+        rule_manager,
+        monkeypatch,
+    ):
+        """Weak near-collinear geometry cannot replace a trusted quartet frame."""
+        import acetree_py.naming.division_caller as division_caller_module
+
+        seed = (
+            np.array([-1.0, 0.0, 0.0]),
+            np.array([0.0, 0.0, 1.0]),
+            np.array([0.0, 1.0, 0.0]),
+        )
+
+        def low_quality_axes(*_args, **_kwargs):
+            return (
+                np.array([0.0, -1.0, 0.0]),
+                np.array([1.0, 0.0, 0.0]),
+                np.array([0.0, 0.0, 1.0]),
+                0.01,
+            )
+
+        monkeypatch.setattr(
+            division_caller_module,
+            "compute_local_axes",
+            low_quality_axes,
+        )
+        caller = DivisionCaller(
+            rule_manager=rule_manager,
+            lineage_map=[["ABa"]],
+            nuclei_record=[[self._make_nucleus(0, 0, 0.0)]],
+            seed_ap=seed[0],
+            seed_lr=seed[1],
+            seed_dv=seed[2],
+        )
+
+        axes = caller._get_local_axes(0)
+
+        assert axes is not None
+        for actual, expected in zip(axes, seed):
+            np.testing.assert_allclose(actual, expected)

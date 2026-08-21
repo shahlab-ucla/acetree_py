@@ -63,9 +63,9 @@ class TestSisterSuffixes:
         assert len(warnings) == 0
 
     def test_dv_complements(self):
-        parent = _make_cell("ABal", fate=CellFate.DIVIDED, end=5)
-        d1 = _make_cell("ABald", start=6)
-        d2 = _make_cell("ABalv", start=6)
+        parent = _make_cell("Caapp", fate=CellFate.DIVIDED, end=5)
+        d1 = _make_cell("Caappd", start=6)
+        d2 = _make_cell("Caappv", start=6)
         parent.add_child(d1)
         parent.add_child(d2)
 
@@ -73,7 +73,7 @@ class TestSisterSuffixes:
         warnings = _check_sister_suffixes(tree)
         assert len(warnings) == 0
 
-    def test_skips_auto_generated_names(self):
+    def test_flags_auto_generated_daughter_that_breaks_named_parent_family(self):
         parent = _make_cell("AB", fate=CellFate.DIVIDED, end=5)
         d1 = _make_cell("Nuc0001_5_100_200", start=6)
         d2 = _make_cell("ABp", start=6)
@@ -82,7 +82,22 @@ class TestSisterSuffixes:
 
         tree = _make_tree_with_cells([parent, d1, d2])
         warnings = _check_sister_suffixes(tree)
-        assert len(warnings) == 0
+        assert len(warnings) == 1
+        assert warnings[0].category == "sister_mismatch"
+
+    def test_flags_wrong_special_founder_family(self):
+        parent = _make_cell("P1", fate=CellFate.DIVIDED, end=5)
+        d1 = _make_cell("P1a", start=6)
+        d2 = _make_cell("P1p", start=6)
+        parent.add_child(d1)
+        parent.add_child(d2)
+
+        warnings = _check_sister_suffixes(
+            _make_tree_with_cells([parent, d1, d2]),
+        )
+
+        assert len(warnings) == 1
+        assert "EMS, P2" in warnings[0].message
 
 
 class TestDuplicateNames:
