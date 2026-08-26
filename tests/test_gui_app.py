@@ -364,27 +364,55 @@ class TestTracking:
         app.set_time(5)
         assert app.current_plane == 20  # Not changed
 
-    def test_z_nav_preserves_cell_selection(self):
-        """Z navigation keeps the selection and time-follow behavior."""
+    def test_user_z_nav_clears_cell_selection(self):
+        """User Z navigation deselects, matching Java AceTree.
+
+        The active cell is bound to the slice it lives on, so scrolling away
+        from that slice leaves the cell — the selection must not survive.
+        """
         app = _make_app()
         app.current_cell_name = "AB"
         app.tracking = True
         app.current_plane = 15
-        app.set_plane(20)
-        # Cell stays selected and remains ready to follow through time.
-        assert app.current_cell_name == "AB"
-        assert app.tracking is True
+        app.set_plane(20, user_initiated=True)
+        assert app.current_cell_name == ""
+        assert app.selection_anchor is None
+        assert app.tracking is False
+        # The user's plane wins — deselection must not revert it.
         assert app.current_plane == 20
 
-    def test_time_advance_follows_selected_cell_after_manual_z_navigation(self):
-        """Regression: a manual Z move must not silently disable following."""
+    def test_time_advance_does_not_follow_after_user_z_navigation(self):
+        """A user Z move ends follow mode, so time navigation keeps the plane."""
+        app = _make_app()
+        app.select_cell("AB", time=4)
+        app.set_plane(20, user_initiated=True)
+
+        app.next_time()
+
+        # Nothing is being followed any more: AB's z=14 at T5 is ignored and
+        # the slice the user chose stays put.
+        assert app.current_time == 5
+        assert app.current_plane == 20
+        assert app.current_cell_name == ""
+        assert app.tracking is False
+
+    def test_programmatic_z_nav_preserves_cell_selection(self):
+        """``set_plane()`` without the flag keeps selection and follow mode.
+
+        Auto-tracking review and tracking-preview centering drive the slice on
+        behalf of the active cell, so that path must not deselect.
+        """
         app = _make_app()
         app.select_cell("AB", time=4)
         app.set_plane(20)
 
+        assert app.current_plane == 20
+        assert app.current_cell_name == "AB"
+        assert app.tracking is True
+
         app.next_time()
 
-        # AB moves from z=15 at T4 to z=14 at T5.
+        # Follow mode is intact: AB moves from z=15 at T4 to z=14 at T5.
         assert app.current_time == 5
         assert app.current_plane == 14
         assert app.current_cell_name == "AB"

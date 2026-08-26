@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 try:
-    from qtpy.QtCore import Qt
+    from qtpy.QtCore import QEvent, Qt
     from qtpy.QtWidgets import (
         QAbstractItemView,
         QHBoxLayout,
@@ -66,6 +66,12 @@ class LineageListWidget(QWidget):  # type: ignore[misc]
         # Map cell name -> QTreeWidgetItem for quick lookup
         self._items: dict[str, QTreeWidgetItem] = {}
         self._current_selection: str = ""
+        # Mouse button that started the most recent press on the tree
+        # viewport.  See ``eventFilter`` / ``_on_item_clicked`` — it exists
+        # purely to tell a left-click apart from a right-click, because
+        # ``itemClicked`` alone cannot.  Must be set before ``_build_ui()``
+        # installs the filter.
+        self._last_press_button = Qt.LeftButton
 
         self._build_ui()
         self._populate_tree()
@@ -134,12 +140,28 @@ class LineageListWidget(QWidget):  # type: ignore[misc]
             }
         """)
 
-        # Connect signals
+        # Connect signals.  ``itemClicked`` carries no button information, and
+        # several Qt versions emit it on right-button release as well as left,
+        # so the raw press is intercepted on the viewport to record the button
+        # (see ``eventFilter``) and ``_on_item_clicked`` gates on it.
+        self._tree.viewport().installEventFilter(self)
         self._tree.itemClicked.connect(self._on_item_clicked)
         self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_right_click)
 
         layout.addWidget(self._tree)
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt naming
+        """Record which mouse button started the latest press on the tree.
+
+        The tree viewport is filtered rather than subclassing ``QTreeWidget``
+        so the widget hierarchy stays unchanged; ``QMouseEvent.button()`` is
+        the only place the pressed button is reliably available, since neither
+        ``itemClicked`` nor ``customContextMenuRequested`` carries it.
+        """
+        if event.type() == QEvent.MouseButtonPress:
+            self._last_press_button = event.button()
+        return super().eventFilter(obj, event)
 
     def _populate_tree(self) -> None:
         """Build the tree from the lineage data.
@@ -235,7 +257,18 @@ class LineageListWidget(QWidget):  # type: ignore[misc]
     # ── Signal handlers ────────────────────────────────────────────
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
-        """Handle left-click on a tree item: select cell at start time."""
+        """Handle left-click on a tree item: select cell at start time.
+
+        Right-clicks are dropped here.  ``QAbstractItemView`` emits ``clicked``
+        on right-button release in several Qt versions, so without this guard a
+        single right-click would run *both* handlers: select at ``start_time``
+        (here) and then at ``end_time`` (``_on_right_click``).  Because
+        ``select_cell`` snaps the slice to the cell's centroid z, that shows up
+        as a visible double jump in time *and* Z, plus a wasted full redraw.
+        """
+        if self._last_press_button == Qt.RightButton:
+            return
+
         cell_name = item.data(0, Qt.UserRole)
         if cell_name:
             cell = self.app.manager.get_cell(cell_name)

@@ -1501,8 +1501,9 @@ class ViewerIntegration:
     def _on_click(self, layer, event):
         """Handle mouse clicks on the shapes layer.
 
-        Left-click:  Toggle the clicked cell's label on/off.
-        Right-click: Select the clicked cell and make it active (also shows label).
+        Left-click:  Toggle the clicked cell's label on/off (never moves Z).
+        Right-click: Select the clicked cell and make it active (also shows
+                     its label and snaps the slice onto its centroid z).
 
         The action is queued only after napari delivers mouse release and
         closes this drag generator. Redrawing the active layer before release
@@ -1682,10 +1683,24 @@ class ViewerIntegration:
             if nuc is None or not nuc.is_alive:
                 return
             app._set_selection_from_nucleus(time, nuc)
+            # Java AceTree binds the active cell to the displayed slice.  A
+            # hit is scored against the nucleus's *sphere*, so a right-click
+            # can land several planes away from the centroid and leave the
+            # newly active cell out of focus.  Snap before the single redraw
+            # below so ``update_display()`` already paints the new plane --
+            # ``_snap_plane_to_nucleus`` deliberately does not redraw itself.
+            # ``plane`` (the press-time slice guarded at the top of this
+            # method) is not read again after this point, so moving
+            # ``app.current_plane`` here cannot invalidate a later check.
+            app._snap_plane_to_nucleus(nuc)
             app.update_display()
             return
 
         if intent == "label" and target_anchor is not None:
+            # Deliberately no z-snap here: a label toggle is a pure overlay
+            # change and does not make the nucleus active, so moving the
+            # slice would yank the view away from whatever the user is
+            # actually looking at.  Only selection binds the slice.
             nuc = app._nucleus_at_anchor(target_anchor)
             if nuc is None or not nuc.is_alive:
                 return

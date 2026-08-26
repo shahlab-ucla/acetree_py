@@ -164,7 +164,7 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         self._plane_spin.setRange(min_plane, max(min_plane, max_plane))
         self._plane_spin.setValue(self.app.current_plane)
         self._plane_spin.setPrefix("z=")
-        self._plane_spin.valueChanged.connect(self.app.set_plane)
+        self._plane_spin.valueChanged.connect(self._on_plane_spin_changed)
 
         self._plane_label = QLabel()
 
@@ -244,6 +244,17 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         self._time_spin.blockSignals(False)
         self._time_slider.blockSignals(False)
         self._plane_spin.blockSignals(False)
+
+    def _on_plane_spin_changed(self, plane: int) -> None:
+        """Route the ``z=`` spinbox through the user-initiated Z path.
+
+        Reaching this slot means a human edited the spinbox: ``refresh()``
+        blocks the widget's signals around both ``setValue()`` and
+        ``setRange()``, so programmatic plane syncs never emit
+        ``valueChanged``.  User Z navigation deselects the active cell, which
+        is why this cannot connect straight to ``app.set_plane``.
+        """
+        self.app.set_plane(int(plane), user_initiated=True)
 
     def _toggle_play(self, direction: int) -> None:
         """Start or toggle playback direction."""

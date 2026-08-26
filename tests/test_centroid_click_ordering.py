@@ -81,6 +81,13 @@ def _two_dimensional_harness():
     app._set_selection_from_nucleus = lambda time, nuc: calls.append(
         ("select", time, nuc.index)
     )
+    # Selection binds the active cell to the displayed slice (see
+    # tests/test_click_select_z_snap.py).  These fixtures put every nucleus
+    # on the starting plane, so the snap is a no-op here and the ordering
+    # assertions below stay about the click pipeline.
+    app._snap_plane_to_nucleus = lambda nuc: setattr(
+        app, "current_plane", int(round(nuc.z))
+    )
     app.update_display = lambda: calls.append(("redraw",))
     app.deselect_cell = lambda: calls.append(("deselect",))
 

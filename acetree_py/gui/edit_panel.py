@@ -1071,6 +1071,13 @@ class EditPanel(QWidget):  # type: ignore[misc]
         # render once on the old slice and then again on the new slice, which
         # could leave partially replaced/overlapping centroid markers while
         # napari was processing the first redraw.
+        #
+        # Assigning current_plane directly is now load-bearing for a second
+        # reason: set_plane(user_initiated=True) deliberately deselects the
+        # active cell, because a user Z gesture means "stop following".  An
+        # edit-driven Z move means the opposite -- the slice is chasing the
+        # nucleus the user is still editing -- so this path must never route
+        # through set_plane().
         old_plane = self.app.current_plane
         old_tracking = self.app.tracking
         plane_changed = False
@@ -1084,9 +1091,8 @@ class EditPanel(QWidget):  # type: ignore[misc]
             plane_changed = new_plane != old_plane
             if plane_changed:
                 self.app.current_plane = new_plane
-                # Match set_plane(): the current slice follows the edit, and
-                # the selected cell remains in follow mode for the next time
-                # navigation.
+                # The slice follows the edit and the selected cell stays in
+                # follow mode, so the next time navigation keeps tracking it.
 
         change_counter = getattr(self.app.edit_history, "change_counter", None)
         try:

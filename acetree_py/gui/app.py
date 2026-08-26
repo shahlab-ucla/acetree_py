@@ -1584,33 +1584,48 @@ class AceTreeApp:
 
         self.update_display()
 
-    def set_plane(self, plane: int) -> None:
+    def set_plane(self, plane: int, *, user_initiated: bool = False) -> None:
         """Navigate to a specific z-plane.
 
-        Manual Z navigation changes the slice at the current timepoint while
-        preserving both the selected cell and follow mode.  The next time
-        navigation therefore resumes at the selected cell's Z centroid.
-        Selection/follow mode is only stopped explicitly, for example by
-        clicking empty space, pressing Deselect/Space, or by a caller setting
-        ``tracking`` to false.
+        The active cell is bound to the displayed slice: selecting a nucleus
+        snaps the view onto its centroid z (see ``_snap_plane_to_nucleus``).
+        Java AceTree therefore treats a user's Z move as leaving that cell —
+        once the user scrolls off the nucleus's slice, the highlighted cell no
+        longer corresponds to what is on screen.  We match that: when
+        *user_initiated* is true (Up/Down and W/S keys, the ``z=`` spinbox, and
+        the ± plane buttons), an actual plane change clears the selection and
+        stops follow mode.
+
+        Programmatic navigation passes ``user_initiated=False`` (the default)
+        and preserves the selection: auto-tracking review and tracking-preview
+        centering move the slice *on behalf of* the active cell, so dropping
+        the selection there would defeat the feature.
+
+        3D mode is exempt for the same reason the rule exists.  There is no
+        slice on screen to scroll off, so a Z gesture cannot walk the view
+        away from the active cell — deselecting would just look like the
+        selection vanished for no reason.
 
         Args:
             plane: 1-based z-plane index.
+            user_initiated: True when the move came straight from a user Z
+                navigation gesture, which deselects the active cell.
         """
-        config = self.manager.config
-        plane_start = int(config.plane_start) if config is not None else 1
-        if self.image_provider is not None:
-            plane_end = plane_start + max(0, int(self.image_provider.num_planes) - 1)
-        elif config is not None:
-            plane_end = int(config.plane_end)
-        else:
-            plane_end = plane_start + 29
+        plane_start, plane_end = self._plane_bounds()
         plane = max(plane_start, min(plane, plane_end))
         if plane == self.current_plane:
             return
         self._exit_roi_mode()
+        had_selection = bool(self.current_cell_name) or self.selection_anchor is not None
         self.current_plane = plane
-        if self.current_cell_name:
+        if user_initiated and had_selection and not self._3d_mode:
+            # Clear the selection *after* committing the new plane and refresh
+            # exactly once: deselect_cell() would redraw a second time, and a
+            # redraw ordered before the plane assignment would render the old
+            # slice.  The user's plane is what must survive this call.
+            self._clear_selection_state()
+            self.update_display()
+        elif self.current_cell_name:
             self.update_display()
         else:
             self._update_display_plane_only()
@@ -1624,12 +1639,12 @@ class AceTreeApp:
         self.set_time(self.current_time - 1)
 
     def next_plane(self) -> None:
-        """Go to the next z-plane."""
-        self.set_plane(self.current_plane + 1)
+        """Go to the next z-plane (user gesture: Up / W key, ▲ button)."""
+        self.set_plane(self.current_plane + 1, user_initiated=True)
 
     def prev_plane(self) -> None:
-        """Go to the previous z-plane."""
-        self.set_plane(self.current_plane - 1)
+        """Go to the previous z-plane (user gesture: Down / S key, ▼ button)."""
+        self.set_plane(self.current_plane - 1, user_initiated=True)
 
     def _nucleus_at_anchor(self, anchor: tuple[int, int] | None = None):
         """Return the raw nucleus at an immutable ``(time, index)`` anchor."""
@@ -1862,11 +1877,20 @@ class AceTreeApp:
 
         self.update_display()
 
-    def deselect_cell(self) -> None:
-        """Clear the current cell selection and stop follow-mode."""
+    def _clear_selection_state(self) -> None:
+        """Drop the active selection without refreshing the display.
+
+        Split out of ``deselect_cell()`` so callers that already own a redraw
+        (notably user-initiated ``set_plane()``) can clear the selection and
+        still emit exactly one ``update_display()``.
+        """
         self.current_cell_name = ""
         self.selection_anchor = None
         self.tracking = False
+
+    def deselect_cell(self) -> None:
+        """Clear the current cell selection and stop follow-mode."""
+        self._clear_selection_state()
         self.update_display()
 
     def select_cell_at_position(self, x: float, y: float) -> None:
@@ -3306,6 +3330,12 @@ class AceTreeApp:
 
         if intent == "select":
             self._set_selection_from_nucleus(time, nuc)
+            # Keep the hidden 2D slice in step with the new selection so
+            # toggling out of 3D lands on the active cell instead of whatever
+            # plane was showing before.  _snap_plane_to_nucleus() only touches
+            # current_plane — it must not kick off a 2D redraw while the
+            # viewer is in 3D mode.
+            self._snap_plane_to_nucleus(nuc)
             if self._viewer_integration:
                 display_name = nuc.effective_name or f"Nuc{nuc.index}"
                 self._viewer_integration._shown_labels.add(display_name)
@@ -3975,6 +4005,34 @@ class AceTreeApp:
                 )
                 self._image_layers.append(layer)
 
+    def _plane_bounds(self) -> tuple[int, int]:
+        """Return the inclusive ``(first, last)`` z-plane of the current movie."""
+        config = self.manager.config
+        plane_start = int(config.plane_start) if config is not None else 1
+        if self.image_provider is not None:
+            plane_end = plane_start + max(0, int(self.image_provider.num_planes) - 1)
+        elif config is not None:
+            plane_end = int(config.plane_end)
+        else:
+            plane_end = plane_start + 29
+        return plane_start, plane_end
+
+    def _snap_plane_to_nucleus(self, nuc) -> None:
+        """Force the displayed slice onto *nuc*'s centroid z.
+
+        This is the single binding between the active cell and the image
+        display: whenever a nucleus becomes active, the slice follows it.
+        Callers that must not trigger a redraw can rely on this touching
+        only ``current_plane`` -- it never calls ``update_display()``.
+        """
+        if nuc is None:
+            return
+        plane_start, plane_end = self._plane_bounds()
+        self.current_plane = max(
+            plane_start,
+            min(round(nuc.z + NUCZINDEXOFFSET), plane_end),
+        )
+
     def _track_cell_at_time(self) -> None:
         """Update current_plane to follow the tracked cell's z position.
 
@@ -3987,6 +4045,10 @@ class AceTreeApp:
         in ``nuclei_record`` starting from the cell's known nuclei.  This
         keeps the slice snapping to the right Z across time even for cells
         that aren't fully materialised in the lineage tree.
+
+        Last resort: if neither lookup finds a nucleus at this timepoint,
+        snap to the selection's anchored nucleus so the slice still tracks
+        the active cell.
         """
         cell = self.get_selected_cell()
         if cell is None:
@@ -4015,20 +4077,19 @@ class AceTreeApp:
             nuc = self._find_nucleus_via_chain(cell, self.current_time)
         if nuc:
             self._set_selection_from_nucleus(self.current_time, nuc)
-            config = self.manager.config
-            plane_start = int(config.plane_start) if config is not None else 1
-            if self.image_provider is not None:
-                plane_end = plane_start + max(
-                    0, int(self.image_provider.num_planes) - 1
-                )
-            elif config is not None:
-                plane_end = int(config.plane_end)
-            else:
-                plane_end = plane_start + 29
-            self.current_plane = max(
-                plane_start,
-                min(round(nuc.z + NUCZINDEXOFFSET), plane_end),
-            )
+            self._snap_plane_to_nucleus(nuc)
+            return
+
+        # Last resort: keep the display bound to the active cell even when
+        # this timepoint has no nucleus to follow.  _find_nucleus_via_chain
+        # only walks *outside* the cell's known range, so an interior gap
+        # (present at T3 and T5, missing at T4) lands here — as does a time
+        # past a cell's death with no real daughter.  Snapping to the
+        # anchored nucleus puts the slice at the best Z we know for this
+        # cell instead of stranding the user on an unrelated plane.  The
+        # anchor itself is deliberately left alone: there is no nucleus at
+        # ``current_time`` to re-anchor onto.
+        self._snap_plane_to_nucleus(self._nucleus_at_anchor())
 
     def _find_nucleus_via_chain(self, cell, target_time: int):
         """Walk the predecessor / successor chain in ``nuclei_record``

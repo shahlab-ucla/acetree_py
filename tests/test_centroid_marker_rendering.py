@@ -124,7 +124,7 @@ def test_viewer_model_curated_layer_is_locked_and_click_workflows_survive(
     viewer = napari.components.ViewerModel()
     calls: list[tuple] = []
     queued: list = []
-    nucleus = SimpleNamespace(index=1, effective_name="AB", is_alive=True)
+    nucleus = SimpleNamespace(index=1, effective_name="AB", is_alive=True, z=1.0)
     app = SimpleNamespace(
         viewer=viewer,
         _delete_active_nucleus=lambda: calls.append(("delete",)),
@@ -154,6 +154,12 @@ def test_viewer_model_curated_layer_is_locked_and_click_workflows_survive(
         integration._shown_labels.add("AB")
 
     app._set_selection_from_nucleus = set_selection
+    # Selection also snaps the slice onto the nucleus centroid (covered in
+    # tests/test_click_select_z_snap.py); the fake nucleus already sits on
+    # the starting plane so layer state here is unaffected.
+    app._snap_plane_to_nucleus = lambda nuc: setattr(
+        app, "current_plane", int(round(nuc.z))
+    )
     integration.setup_layers()
     monkeypatch.setattr(
         "acetree_py.gui.viewer_integration.QTimer.singleShot",
