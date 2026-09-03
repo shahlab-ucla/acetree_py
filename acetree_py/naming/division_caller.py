@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -46,6 +46,25 @@ _LR_CONTINUITY_GAP = 3       # Max gap for continuity-based sign correction
 # Deferred naming: re-evaluate with look-ahead when confidence is below this
 _DEFERRED_CONFIDENCE_THRESHOLD = 0.3
 _DEFERRED_LOOKAHEAD_FRAMES = 8  # Max frames to look ahead
+
+
+def _complete_axis_frame(
+    ap: np.ndarray | None,
+    lr: np.ndarray | None,
+    dv: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Copy one valid, complete anatomical frame without mixing sources."""
+    if ap is None or lr is None or dv is None:
+        return None
+    frame = tuple(np.asarray(axis, dtype=np.float64).copy() for axis in (ap, lr, dv))
+    if any(
+        axis.shape != (3,)
+        or not np.all(np.isfinite(axis))
+        or float(np.linalg.norm(axis)) <= 1e-12
+        for axis in frame
+    ):
+        return None
+    return frame
 
 
 @dataclass
@@ -95,6 +114,8 @@ class DivisionCaller:
         nuclei_record: list[list] | None = None,
         seed_ap: np.ndarray | None = None,
         seed_lr: np.ndarray | None = None,
+        seed_dv: np.ndarray | None = None,
+        seed_time: int | None = None,
     ) -> None:
         """Initialize the DivisionCaller.
 
@@ -114,6 +135,10 @@ class DivisionCaller:
             seed_ap: Initial AP axis direction for sign anchoring
                 (typically from 4-cell midpoint).
             seed_lr: Initial LR axis direction for sign anchoring.
+            seed_dv: Initial DV axis direction.  When all three seed axes are
+                present, the four-cell seed is retained as an atomic static
+                fallback for lineage frames whose local axes are unavailable.
+            seed_time: Zero-based source timepoint for the retained seed frame.
         """
         self.rule_manager = rule_manager
         self.z_pix_res = z_pix_res
@@ -132,6 +157,8 @@ class DivisionCaller:
 
         # Cache for per-timepoint axes in lineage mode
         self._axes_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._axes_unavailable: set[int] = set()
+        self._axis_prefill_active = False
 
         # Anchor-based sign convention and temporal smoothing for LR.
         # Seed from the 4-cell midpoint axes for a reliable starting sign.
@@ -141,6 +168,20 @@ class DivisionCaller:
         self._lr_anchor_time: int = 0 if seed_lr is not None else -1
         self._ap_anchor: np.ndarray | None = (
             seed_ap.copy() if seed_ap is not None else None
+        )
+        # Retain only complete frames.  In particular, never combine two seed
+        # axes with a third founder axis: those triples may come from different
+        # estimates and need not describe one coherent anatomical frame.
+        self._seed_frame = _complete_axis_frame(seed_ap, seed_lr, seed_dv)
+        self.seed_time = (
+            int(seed_time)
+            if self._seed_frame is not None and seed_time is not None
+            else None
+        )
+        self._founder_frame = _complete_axis_frame(
+            founder_ap,
+            founder_lr,
+            founder_dv,
         )
         self._lr_history: list[tuple[int, np.ndarray, float]] = []
 
@@ -183,6 +224,24 @@ class DivisionCaller:
         """All division classifications made so far."""
         return self._classifications
 
+    def has_complete_body_frame(self, timepoint: int = -1) -> bool:
+        """Return whether anatomical 3D axes are usable for *timepoint*.
+
+        A lineage-mode caller must never treat raw microscope coordinates as
+        canonical anatomy when its centroid frame is unavailable.  A complete
+        static founder frame is an acceptable fallback; a lone AP vector is
+        not, because DV/LR daughter order would then depend on lab rotation.
+        """
+        if self.is_v2:
+            return True
+        if self.is_lineage_mode:
+            if timepoint >= 0 and self._get_local_axes(timepoint) is not None:
+                return True
+            return self._lineage_fallback_frame() is not None
+        if self.is_founder_mode:
+            return self.founder_dv is not None
+        return bool(self.axis_string and self._v1_sign_matrix is not None)
+
     def assign_names(
         self,
         parent: Nucleus,
@@ -213,6 +272,25 @@ class DivisionCaller:
             return "", ""
 
         rule = self.rule_manager.get_rule(parent_name)
+        if self.is_lineage_mode and not self.has_complete_body_frame(timepoint):
+            classification = DivisionClassification(
+                parent_name=parent_name,
+                daughter1_name=rule.daughter1,
+                daughter2_name=rule.daughter2,
+                axis_used=_dominant_rule_axis(rule),
+                confidence=0.0,
+                angle_from_rule=90.0,
+                dot_product=0.0,
+            )
+            self._classifications.append(classification)
+            logger.warning(
+                "%s: canonical daughter family retained at t=%d, but no "
+                "complete anatomical body frame is available; sister order "
+                "uses stable successor order",
+                parent_name, timepoint,
+            )
+            return rule.daughter1, rule.daughter2
+
         classification = self._classify_division(
             parent, daughter1, daughter2, rule, timepoint=timepoint,
         )
@@ -262,6 +340,14 @@ class DivisionCaller:
 
         rule = self.rule_manager.get_rule(parent_name)
 
+        if self.is_lineage_mode and not self.has_complete_body_frame(division_time):
+            return self.assign_names(
+                parent,
+                daughter1,
+                daughter2,
+                timepoint=division_time,
+            )
+
         # Compute averaged division vector
         avg_diff, avg_confidence = self._compute_averaged_diff(
             daughter1, daughter2, nuclei_record, division_time, n_frames,
@@ -296,7 +382,7 @@ class DivisionCaller:
             parent_name=parent_name,
             daughter1_name=name1,
             daughter2_name=name2,
-            axis_used=rule.sulston_letter,
+            axis_used=_dominant_rule_axis(rule),
             confidence=confidence,
             angle_from_rule=angle_deg,
             dot_product=dot,
@@ -345,6 +431,10 @@ class DivisionCaller:
                 daughter1, d1_next, d2_next, rule, timepoint=t,
             )
 
+            if not cls.daughter1_name or not cls.daughter2_name:
+                d1_cur, d2_cur = d1_next, d2_next
+                continue
+
             if cls.dot_product >= 0:
                 votes_positive += 1
             else:
@@ -371,7 +461,7 @@ class DivisionCaller:
             parent_name=daughter1.effective_name or rule.daughter1,
             daughter1_name=name1,
             daughter2_name=name2,
-            axis_used=rule.sulston_letter,
+            axis_used=_dominant_rule_axis(rule),
             confidence=vote_confidence,
             angle_from_rule=0.0,  # not meaningful for vote
             dot_product=float(votes_positive - votes_negative),
@@ -388,13 +478,30 @@ class DivisionCaller:
         When the LR axis quality is below ``LR_QUALITY_THRESHOLD``, substitutes
         a temporally smoothed LR from recent high-quality frames.
         """
+        if t < 0:
+            return None
         if t in self._axes_cache:
             return self._axes_cache[t]
+        if t in self._axes_unavailable:
+            return None
+
+        # Axis smoothing and sign continuity must not depend on the order in
+        # which the GUI happens to request frames.  Populate earlier frames in
+        # chronological order before evaluating this one.
+        if not self._axis_prefill_active and t > 0:
+            self._axis_prefill_active = True
+            try:
+                for earlier in range(t):
+                    if earlier not in self._axes_cache and earlier not in self._axes_unavailable:
+                        self._get_local_axes(earlier)
+            finally:
+                self._axis_prefill_active = False
 
         ap, lr, dv, lr_quality = compute_local_axes(
             self._nuclei_record, self._lineage_map, t, self.z_pix_res,
         )
         if ap is None or lr is None or dv is None:
+            self._axes_unavailable.add(t)
             return None
 
         # --- AP sign consistency against nearby cache ---
@@ -406,6 +513,12 @@ class DivisionCaller:
                     if np.dot(ap, self._axes_cache[prev_t][0]) < 0:
                         ap = -ap
                         dv = -dv
+            elif self._ap_anchor is not None and np.dot(ap, self._ap_anchor) < 0:
+                ap = -ap
+                dv = -dv
+        elif self._ap_anchor is not None and np.dot(ap, self._ap_anchor) < 0:
+            ap = -ap
+            dv = -dv
 
         # --- LR handling depends on quality ---
         if lr_quality < LR_QUALITY_THRESHOLD:
@@ -420,7 +533,17 @@ class DivisionCaller:
                 else:
                     return None
             else:
-                # No smoothing history — use any previous cache for sign
+                # With no reliable temporal history, use one coherent retained
+                # four-cell frame rather than allowing weak near-collinear
+                # geometry to rotate the anatomical axes arbitrarily.
+                fallback = self._lineage_fallback_frame()
+                if fallback is not None:
+                    result = tuple(axis.copy() for axis in fallback)
+                    self._axes_cache[t] = result
+                    return result
+                # No static frame exists, so preserve the old best-effort
+                # behavior while marking the resulting classification low
+                # confidence through its rule-vector angle.
                 lr, dv = self._correct_lr_sign(lr, dv, t, lr_quality)
         else:
             # High quality: only correct sign against nearby cache
@@ -448,6 +571,8 @@ class DivisionCaller:
           entry, since the fresh value is unreliable noise.
         """
         if not self._axes_cache:
+            if self._lr_anchor is not None and np.dot(lr, self._lr_anchor) < 0:
+                return -lr, -dv
             return lr, dv
 
         candidates = [k for k in self._axes_cache if k < t]
@@ -507,6 +632,16 @@ class DivisionCaller:
     ) -> DivisionClassification:
         """Classify a division with confidence scoring."""
         parent_name = parent.effective_name
+        if self.is_lineage_mode and not self.has_complete_body_frame(timepoint):
+            return DivisionClassification(
+                parent_name=parent_name,
+                daughter1_name=rule.daughter1,
+                daughter2_name=rule.daughter2,
+                axis_used=_dominant_rule_axis(rule),
+                confidence=0.0,
+                angle_from_rule=90.0,
+                dot_product=0.0,
+            )
         diff = self._diffs_corrected(daughter1, daughter2, timepoint=timepoint)
 
         # Dot product with rule axis
@@ -541,7 +676,7 @@ class DivisionCaller:
             parent_name=parent_name,
             daughter1_name=name1,
             daughter2_name=name2,
-            axis_used=rule.sulston_letter,
+            axis_used=_dominant_rule_axis(rule),
             confidence=confidence,
             angle_from_rule=angle_deg,
             dot_product=dot,
@@ -706,19 +841,33 @@ class DivisionCaller:
     def _apply_lineage_transform(self, da: np.ndarray, timepoint: int) -> np.ndarray:
         """Transform a vector into canonical frame using lineage centroids.
 
-        Computes body axes at *timepoint* from the spatial distribution
-        of ABa-lineage vs ABp-lineage cells, making this inherently
-        robust to global embryo rotations around the AP axis.
+        Computes body axes at *timepoint* from the ABa, ABp, EMS, and P2
+        lineage centroids, making this robust to global embryo motion while
+        all four anatomical landmark groups remain observable.
         """
         axes = self._get_local_axes(timepoint)
         if axes is None:
-            # Fallback to static founder axes if available
-            if self.founder_ap is not None and self.founder_lr is not None:
-                return self._apply_founder_transform(da)
-            return da  # No correction possible
+            # A complete four-cell seed is a usable static frame even when a
+            # later timepoint temporarily loses or degenerates one landmark
+            # lineage.  Dynamic axes remain preferred whenever available.
+            fallback = self._lineage_fallback_frame()
+            if fallback is not None:
+                ap_vec, lr_vec, dv_vec = fallback
+                return axes_to_canonical(da, ap_vec, lr_vec, dv_vec)
+            raise RuntimeError(
+                "Lineage division classification requires a complete body frame"
+            )
 
         ap_vec, lr_vec, dv_vec = axes
         return axes_to_canonical(da, ap_vec, lr_vec, dv_vec)
+
+    def _lineage_fallback_frame(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Return one complete static frame for a missing dynamic estimate."""
+        if self._seed_frame is not None:
+            return self._seed_frame
+        return self._founder_frame
 
     def _apply_founder_transform(self, da: np.ndarray) -> np.ndarray:
         """Transform a vector into canonical frame using founder-derived axes.
@@ -762,6 +911,12 @@ class DivisionCaller:
         da[1] = y_new
 
         return da
+
+
+def _dominant_rule_axis(rule: Rule) -> str:
+    """Return the anatomical axis represented by a canonical rule vector."""
+    dominant = int(np.argmax(np.abs(rule.axis_vector)))
+    return ("ap", "dv", "lr")[dominant]
 
 
 def _follow_successor(nuc: Nucleus, next_nuclei: list[Nucleus]) -> Nucleus | None:

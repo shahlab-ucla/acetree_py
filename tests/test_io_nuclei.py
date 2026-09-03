@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import stat
+import zipfile
 from pathlib import Path
 
 import pytest
 
-from acetree_py.core.nucleus import NILLI, Nucleus
+from acetree_py.core.nucleus import Nucleus
 from acetree_py.io.nuclei_reader import read_nuclei_zip
 from acetree_py.io.nuclei_writer import write_nuclei_zip
 
@@ -52,6 +55,34 @@ class TestReadNucleiZip:
         with pytest.raises(FileNotFoundError):
             read_nuclei_zip(tmp_path / "nonexistent.zip")
 
+    def test_preserves_leading_timepoint_offset(self, tmp_path: Path):
+        zip_path = tmp_path / "offset.zip"
+        nucleus = Nucleus(index=1, status=1, identity="late")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("nuclei/t050-nuclei", nucleus.to_text_line() + "\n")
+
+        nuclei_record = read_nuclei_zip(zip_path)
+
+        assert len(nuclei_record) == 50
+        assert all(not frame for frame in nuclei_record[:49])
+        assert [n.identity for n in nuclei_record[49]] == ["late"]
+
+    def test_preserves_internal_timepoint_gap(self, tmp_path: Path):
+        zip_path = tmp_path / "gap.zip"
+        first = Nucleus(index=1, status=1, identity="first")
+        third = Nucleus(index=1, status=1, identity="third")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("nuclei/t001-nuclei", first.to_text_line() + "\n")
+            zf.writestr("nuclei/t003-nuclei", third.to_text_line() + "\n")
+            zf.writestr("nuclei/t000-nuclei", first.to_text_line() + "\n")
+
+        nuclei_record = read_nuclei_zip(zip_path)
+
+        assert len(nuclei_record) == 3
+        assert [n.identity for n in nuclei_record[0]] == ["first"]
+        assert nuclei_record[1] == []
+        assert [n.identity for n in nuclei_record[2]] == ["third"]
+
 
 class TestWriteNucleiZip:
     """Test writing nuclei to ZIP archives."""
@@ -93,6 +124,44 @@ class TestWriteNucleiZip:
         names = {n.identity for n in read_back[1]}
         assert names == {"AB", "P1"}
 
+    def test_failed_write_preserves_last_good_archive(self, tmp_path: Path, monkeypatch):
+        zip_path = tmp_path / "output.zip"
+        old_contents = b"last known good archive"
+        zip_path.write_bytes(old_contents)
+        nucleus = Nucleus(index=1, status=1)
+
+        def fail_serialization():
+            raise RuntimeError("simulated serialization failure")
+
+        monkeypatch.setattr(nucleus, "to_text_line", fail_serialization)
+
+        with pytest.raises(RuntimeError, match="simulated"):
+            write_nuclei_zip([[nucleus]], zip_path)
+
+        assert zip_path.read_bytes() == old_contents
+        assert list(tmp_path.glob(".output.zip.*.tmp")) == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file mode semantics")
+    def test_atomic_replace_preserves_existing_file_mode(self, tmp_path: Path):
+        zip_path = tmp_path / "output.zip"
+        zip_path.write_bytes(b"old")
+        zip_path.chmod(0o640)
+
+        write_nuclei_zip([[Nucleus(index=1, status=1)]], zip_path)
+
+        assert stat.S_IMODE(zip_path.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file mode semantics")
+    def test_new_archive_uses_normal_umask_mode(self, tmp_path: Path):
+        zip_path = tmp_path / "output.zip"
+        previous = os.umask(0o027)
+        try:
+            write_nuclei_zip([[Nucleus(index=1, status=1)]], zip_path)
+        finally:
+            os.umask(previous)
+
+        assert stat.S_IMODE(zip_path.stat().st_mode) == 0o640
+
 
 class TestRoundTrip:
     """Test full read -> write -> read round trip."""
@@ -130,3 +199,25 @@ class TestRoundTrip:
                 assert rt.rwcorr2 == orig.rwcorr2
                 assert rt.rwcorr3 == orig.rwcorr3
                 assert rt.rwcorr4 == orig.rwcorr4
+
+    def test_round_trip_preserves_absolute_time_coordinates(self, tmp_path: Path):
+        source_path = tmp_path / "sparse-source.zip"
+        late = Nucleus(index=1, status=1, identity="late")
+        with zipfile.ZipFile(source_path, "w") as zf:
+            zf.writestr("nuclei/t003-nuclei", late.to_text_line() + "\n")
+            zf.writestr("nuclei/t006-nuclei", late.to_text_line() + "\n")
+
+        original = read_nuclei_zip(source_path)
+        output_path = tmp_path / "sparse-round-trip.zip"
+        write_nuclei_zip(original, output_path, start_time=1)
+        round_tripped = read_nuclei_zip(output_path)
+
+        assert len(round_tripped) == 6
+        assert [bool(frame) for frame in round_tripped] == [
+            False,
+            False,
+            True,
+            False,
+            False,
+            True,
+        ]

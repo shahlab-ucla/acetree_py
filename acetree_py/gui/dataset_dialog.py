@@ -4,7 +4,8 @@ Provides a wizard-style dialog that walks the user through:
 1. Selecting an image directory
 2. Configuring image format (single channel, side-by-side, separate dirs, multichannel stack)
 3. Setting voxel sizes and reviewing auto-detected parameters
-4. Choosing an output directory for the nuclei ZIP and config XML
+4. Choosing manual annotation or an initial automated tracking draft
+5. Choosing an output directory for the nuclei ZIP and config XML
 """
 
 from __future__ import annotations
@@ -12,7 +13,8 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+from ..io.config import AceTreeConfig, NamingMethod
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +31,10 @@ try:
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QMessageBox,
         QPushButton,
         QRadioButton,
+        QScrollArea,
         QSpinBox,
         QStackedWidget,
         QTextEdit,
@@ -42,9 +46,6 @@ try:
 except ImportError:
     _QT_AVAILABLE = False
     QDialog = object  # type: ignore[misc,assignment]
-
-from ..io.config import AceTreeConfig, NamingMethod
-
 
 class DatasetCreationDialog(QDialog):  # type: ignore[misc]
     """Multi-page wizard for creating a new AceTree dataset from images."""
@@ -68,12 +69,15 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._page1 = self._build_page1_directory()
         self._page2 = self._build_page2_format()
         self._page3 = self._build_page3_parameters()
-        self._page4 = self._build_page4_output()
+        self._page4 = self._build_page4_tracking()
+        self._page5 = self._build_page5_output()
 
         self._stack.addWidget(self._page1)
         self._stack.addWidget(self._page2)
         self._stack.addWidget(self._page3)
         self._stack.addWidget(self._page4)
+        self._stack.addWidget(self._page5)
+        self._stack.currentChanged.connect(self._update_nav_buttons)
 
         # Navigation buttons
         nav = QHBoxLayout()
@@ -90,6 +94,8 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         nav.addWidget(self._btn_next)
         layout.addLayout(nav)
 
+        self._connect_tracking_channel_controls()
+        self._sync_tracking_channel_range()
         self._update_nav_buttons()
 
     # ── Page 1: Image directory ───────────────────────────────────
@@ -115,6 +121,11 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._detect_label.setMaximumHeight(200)
         layout.addWidget(QLabel("Auto-detection results:"))
         layout.addWidget(self._detect_label)
+        self._image_validation_label = QLabel()
+        self._image_validation_label.setWordWrap(True)
+        self._image_validation_label.setAccessibleName("Image directory problem")
+        self._image_validation_label.setStyleSheet("QLabel { color: #a85f00; }")
+        layout.addWidget(self._image_validation_label)
         layout.addStretch()
         return page
 
@@ -156,7 +167,11 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         if d.get("num_timepoints"):
             self._timepoints_spin.setValue(d["num_timepoints"])
         if d.get("num_planes"):
-            self._planes_spin.setValue(d["num_planes"])
+            # Respect an already-selected multichannel layout when the user
+            # goes back and chooses a different image directory.  Writing the
+            # raw TIFF page count directly would save Z*C as the Z count.
+            self._recompute_planes()
+        self._refresh_tracking_validation()
 
     # ── Page 2: Image format ──────────────────────────────────────
 
@@ -215,6 +230,12 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         self._flip_check = QCheckBox("Flip left/right (mirror horizontally)")
         layout.addWidget(self._flip_check)
 
+        self._layout_validation_label = QLabel()
+        self._layout_validation_label.setWordWrap(True)
+        self._layout_validation_label.setAccessibleName("Image layout problem")
+        self._layout_validation_label.setStyleSheet("QLabel { color: #a85f00; }")
+        layout.addWidget(self._layout_validation_label)
+
         # Toggle visibility of sub-groups
         self._radio_separate.toggled.connect(self._sep_group.setVisible)
         self._radio_multistack.toggled.connect(self._stack_group.setVisible)
@@ -253,6 +274,278 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         d = QFileDialog.getExistingDirectory(self, "Select Channel 2 Directory")
         if d:
             self._ch2_dir_edit.setText(d)
+
+    def _connect_tracking_channel_controls(self) -> None:
+        """Keep the tracking channel choices synchronized with image layout."""
+
+        for radio in (
+            self._radio_single,
+            self._radio_split,
+            self._radio_separate,
+            self._radio_multistack,
+        ):
+            radio.toggled.connect(self._sync_tracking_channel_range)
+        self._n_channels_spin.valueChanged.connect(self._sync_tracking_channel_range)
+        self._ch2_dir_edit.textChanged.connect(self._refresh_tracking_validation)
+        self._dir_edit.textChanged.connect(self._refresh_tracking_validation)
+        self._output_edit.textChanged.connect(self._refresh_tracking_validation)
+        self._dataset_name_edit.textChanged.connect(self._refresh_tracking_validation)
+        self._radio_tracking_auto.toggled.connect(self._refresh_tracking_validation)
+        self._tracking_workflow_combo.currentIndexChanged.connect(
+            self._tracking_workflow_changed
+        )
+        self._tracking_starrynite_preset_combo.currentIndexChanged.connect(
+            self._tracking_workflow_changed
+        )
+        self._tracking_channel_spin.valueChanged.connect(
+            self._refresh_tracking_validation
+        )
+        self._tracking_detector_combo.currentIndexChanged.connect(
+            self._refresh_tracking_validation
+        )
+        self._tracking_tracker_combo.currentIndexChanged.connect(
+            self._tracking_tracker_changed
+        )
+        self._tracking_division_check.toggled.connect(
+            self._refresh_tracking_validation
+        )
+
+    def _available_tracking_channels(self) -> int:
+        if self._radio_multistack.isChecked():
+            return self._n_channels_spin.value()
+        if self._radio_split.isChecked() or self._radio_separate.isChecked():
+            return 2
+        return 1
+
+    def _sync_tracking_channel_range(self, *_args) -> None:
+        """Clamp the detector channel immediately after a layout change."""
+
+        available = self._available_tracking_channels()
+        self._tracking_channel_spin.setRange(1, available)
+        self._tracking_channel_spin.setToolTip(
+            f"Available channels for the selected image layout: 1–{available}"
+        )
+        self._tracking_channel_spin.setAccessibleDescription(
+            f"The selected image layout provides {available} channel(s)"
+        )
+        self._refresh_tracking_validation()
+
+    def _tracking_tracker_changed(self, *_args) -> None:
+        self._sync_tracking_division_capability(use_default=True)
+        if hasattr(self, "_output_edit"):
+            self._refresh_tracking_validation()
+
+    def _tracking_workflow_changed(self, *_args) -> None:
+        """Apply one understandable workflow to the hidden component choices."""
+
+        from ..tracking.workflows import tracking_workflow
+
+        workflow_id = self._tracking_workflow_combo.currentData()
+        if workflow_id is None:
+            return
+        workflow = tracking_workflow(str(workflow_id))
+        detector_index = self._tracking_detector_combo.findData(workflow.detector_id)
+        tracker_index = self._tracking_tracker_combo.findData(workflow.tracker_id)
+        if detector_index >= 0:
+            self._tracking_detector_combo.setCurrentIndex(detector_index)
+        if tracker_index >= 0:
+            self._tracking_tracker_combo.setCurrentIndex(tracker_index)
+        self._tracking_workflow_description.setText(workflow.description)
+        uses_starrynite = workflow.workflow_id == "modern_starrynite"
+        self._tracking_starrynite_preset_combo.setVisible(uses_starrynite)
+        self._tracking_starrynite_preset_label.setVisible(uses_starrynite)
+        if uses_starrynite:
+            try:
+                from ..tracking.starrynite import (
+                    bundled_parameter_preset,
+                    load_tuning_profile,
+                )
+
+                preset = bundled_parameter_preset(
+                    str(self._tracking_starrynite_preset_combo.currentData())
+                )
+                profile = load_tuning_profile(preset.parameter_file)
+                self._tracking_radius_spin.setValue(
+                    float(profile.detector_settings.get("RADIUS", 4.0))
+                )
+                self._tracking_threshold_spin.setValue(
+                    float(profile.detector_settings.get("INTENSITY_THRESHOLD", 5.0))
+                )
+            except (KeyError, OSError, ValueError):
+                pass
+        self._sync_tracking_division_capability(use_default=True)
+        if hasattr(self, "_output_edit"):
+            self._refresh_tracking_validation()
+
+    def _sync_tracking_division_capability(
+        self,
+        *,
+        use_default: bool = True,
+    ) -> None:
+        """Match the division choice to the selected tracker's contract."""
+
+        from ..tracking.registry import get_default_registry
+
+        tracker_id = self._tracking_tracker_combo.currentData()
+        capable = False
+        default = False
+        display_name = self._tracking_tracker_combo.currentText() or "Selected tracker"
+        if tracker_id is not None:
+            try:
+                registry = get_default_registry()
+                descriptor = registry.get_descriptor(str(tracker_id))
+                schema = descriptor.settings_schema
+                capabilities = {
+                    str(capability).strip().lower()
+                    for capability in descriptor.capabilities
+                }
+                capable = (
+                    "splitting" in capabilities
+                    and "ALLOW_TRACK_SPLITTING" in schema
+                )
+                default = bool(
+                    registry.default_settings(str(tracker_id)).get(
+                        "ALLOW_TRACK_SPLITTING",
+                        False,
+                    )
+                )
+            except (KeyError, ValueError):
+                capable = False
+
+        self._tracking_division_check.setEnabled(capable)
+        if not capable:
+            self._tracking_division_check.setChecked(False)
+        elif use_default:
+            self._tracking_division_check.setChecked(default)
+        self._tracking_division_check.setToolTip(
+            "Include proposed two-daughter branches in the uncommitted draft. "
+            "Every division must still be reviewed before acceptance."
+            if capable
+            else "The selected tracker does not support two-daughter divisions."
+        )
+        if capable:
+            self._tracking_capability_label.setText(
+                f"{display_name} can propose two-daughter divisions. Keep the "
+                "division option on to include them in the uncommitted review draft; "
+                "turn it off for continuation-only tracking. Merges are never enabled."
+            )
+        else:
+            self._tracking_capability_label.setText(
+                f"{display_name} links continuations and short gaps but does not "
+                "propose divisions or merges. Choose a division-aware tracker to "
+                "include reviewed two-daughter branches in the draft."
+            )
+
+    def _tracking_validation_error(self) -> str:
+        layout_error = self._image_layout_validation_error()
+        if layout_error:
+            return layout_error
+        if not self._radio_tracking_auto.isChecked():
+            return ""
+        if self._tracking_detector_combo.count() == 0:
+            return "No compatible detector is installed; choose Manual annotation."
+        if self._tracking_tracker_combo.count() == 0:
+            return "No compatible tracker is installed; choose Manual annotation."
+        if (
+            self._tracking_division_check.isChecked()
+            and not self._tracking_division_check.isEnabled()
+        ):
+            return "The selected tracker cannot propose divisions; turn divisions off."
+
+        available = self._available_tracking_channels()
+        channel = self._tracking_channel_spin.value()
+        if not 1 <= channel <= available:
+            return (
+                f"Detection channel {channel} is unavailable for this layout; "
+                f"choose a channel from 1 to {available}."
+            )
+        return ""
+
+    def _image_source_validation_error(self) -> str:
+        """Return a blocking problem with the primary image directory."""
+
+        text = self._dir_edit.text().strip()
+        if not text:
+            return "Choose an image directory containing TIFF files."
+        directory = Path(text)
+        try:
+            if not directory.is_dir():
+                return "The selected image directory does not exist."
+        except OSError as exc:
+            return f"The selected image directory cannot be read: {exc}"
+        if not _tiff_files(directory):
+            return "The selected image directory contains no TIFF files."
+        error = self._detected.get("error")
+        if error:
+            return f"The image source could not be validated: {error}"
+        return ""
+
+    def _image_layout_validation_error(self) -> str:
+        """Validate the selected channel layout independent of tracker mode."""
+
+        if self._radio_separate.isChecked():
+            text = self._ch2_dir_edit.text().strip()
+            if not text:
+                return "Choose the Channel 2 directory for the separate-channel layout."
+            directory = Path(text)
+            try:
+                if not directory.is_dir():
+                    return "The Channel 2 directory does not exist."
+            except OSError as exc:
+                return f"The Channel 2 directory cannot be read: {exc}"
+            if not _tiff_files(directory):
+                return "The Channel 2 directory contains no TIFF files."
+
+        if self._radio_multistack.isChecked():
+            raw_pages = self._detected.get("num_planes")
+            channels = self._n_channels_spin.value()
+            if raw_pages and raw_pages % channels:
+                return (
+                    f"The detected stack has {raw_pages} pages, which cannot be "
+                    f"divided evenly across {channels} channels."
+                )
+        return ""
+
+    def _output_validation_error(self) -> str:
+        """Return a blocking output-path or dataset-name problem."""
+
+        text = self._output_edit.text().strip()
+        if not text:
+            return "Choose an output directory for the dataset files."
+        output = Path(text)
+        try:
+            if output.exists() and not output.is_dir():
+                return "The output location is a file, not a directory."
+            ancestor = output
+            while not ancestor.exists() and ancestor != ancestor.parent:
+                ancestor = ancestor.parent
+            if not ancestor.is_dir():
+                return "The output directory has no usable parent directory."
+        except OSError as exc:
+            return f"The output directory is not usable: {exc}"
+
+        name = self._dataset_name_edit.text().strip() or "dataset"
+        if name in {".", ".."} or re.search(r'[<>:"/\\|?*\x00-\x1f]', name):
+            return "Use a dataset name without path separators or reserved filename characters."
+        if name.endswith((" ", ".")):
+            return "The dataset name must not end with a space or period."
+        return ""
+
+    def _refresh_tracking_validation(self, *_args) -> None:
+        error = self._tracking_validation_error()
+        self._tracking_validation_label.setText(error)
+        self._tracking_validation_label.setVisible(bool(error))
+        image_error = self._image_source_validation_error()
+        self._image_validation_label.setText(image_error)
+        self._image_validation_label.setVisible(bool(image_error))
+        layout_error = self._image_layout_validation_error()
+        self._layout_validation_label.setText(layout_error)
+        self._layout_validation_label.setVisible(bool(layout_error))
+        output_error = self._output_validation_error()
+        self._output_validation_label.setText(output_error)
+        self._output_validation_label.setVisible(bool(output_error))
+        if hasattr(self, "_btn_next"):
+            self._update_nav_buttons()
 
     # ── Page 3: Parameters ────────────────────────────────────────
 
@@ -293,11 +586,188 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
     # ── Page 4: Output ────────────────────────────────────────────
 
-    def _build_page4_output(self) -> QWidget:
+    def _build_page4_tracking(self) -> QWidget:
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page.setAccessibleName("Initial tracking setup")
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        page.setWidget(content)
+        layout.addWidget(QLabel("<b>Step 4: Initial Tracking</b>"))
+        self._tracking_explanation_label = QLabel(
+            "Choose manual annotation or prepare a reviewed whole-movie draft. After "
+            "this dataset or an existing XML dataset opens, use the Tracking menu or "
+            "the Edit & Tracking panel for Manual Track, Track Selected Cell, and Track "
+            "Whole Movie. Automated results are never accepted automatically."
+        )
+        self._tracking_explanation_label.setWordWrap(True)
+        self._tracking_explanation_label.setAccessibleName(
+            "Initial tracking review explanation"
+        )
+        layout.addWidget(self._tracking_explanation_label)
+
+        mode_group = QGroupBox("Starting workflow")
+        mode_layout = QVBoxLayout(mode_group)
+        self._radio_tracking_manual = QRadioButton(
+            "Manual annotation + optional selected-cell forward tracking"
+        )
+        self._radio_tracking_manual.setChecked(True)
+        self._radio_tracking_auto = QRadioButton(
+            "Open a reviewed whole-movie tracking draft"
+        )
+        mode_layout.addWidget(self._radio_tracking_manual)
+        mode_layout.addWidget(self._radio_tracking_auto)
+        layout.addWidget(mode_group)
+
+        self._tracking_settings_group = QGroupBox("Draft settings")
+        settings = QFormLayout(self._tracking_settings_group)
+
+        from ..tracking.registry import get_default_registry
+        from ..tracking.workflows import INITIAL_TRACKING_WORKFLOWS
+
+        registry = get_default_registry()
+        self._tracking_workflow_combo = QComboBox()
+        for workflow in INITIAL_TRACKING_WORKFLOWS:
+            self._tracking_workflow_combo.addItem(
+                workflow.display_name, workflow.workflow_id
+            )
+        self._tracking_workflow_combo.setToolTip(
+            "Modern StarryNite is division-aware; LoG/DoG with LAP provide simpler "
+            "general-purpose whole-movie alternatives."
+        )
+        settings.addRow("Tracking method:", self._tracking_workflow_combo)
+
+        self._tracking_workflow_description = QLabel()
+        self._tracking_workflow_description.setWordWrap(True)
+        settings.addRow("", self._tracking_workflow_description)
+
+        from ..tracking.starrynite import bundled_parameter_presets
+
+        self._tracking_starrynite_preset_combo = QComboBox()
+        for preset in bundled_parameter_presets():
+            self._tracking_starrynite_preset_combo.addItem(
+                preset.display_name, preset.preset_id
+            )
+            index = self._tracking_starrynite_preset_combo.count() - 1
+            self._tracking_starrynite_preset_combo.setItemData(
+                index, preset.description, Qt.ToolTipRole
+            )
+        settings.addRow("Imaging preset:", self._tracking_starrynite_preset_combo)
+        self._tracking_starrynite_preset_label = settings.labelForField(
+            self._tracking_starrynite_preset_combo
+        )
+
+        self._tracking_detector_combo = QComboBox()
+        for descriptor in registry.detector_descriptors():
+            self._tracking_detector_combo.addItem(
+                descriptor.display_name,
+                descriptor.plugin_id,
+            )
+        settings.addRow("Detector:", self._tracking_detector_combo)
+        self._tracking_detector_combo.hide()
+        settings.labelForField(self._tracking_detector_combo).hide()
+
+        self._tracking_tracker_combo = QComboBox()
+        for descriptor in registry.tracker_descriptors():
+            if "global_only" in descriptor.capabilities:
+                continue
+            self._tracking_tracker_combo.addItem(
+                descriptor.display_name,
+                descriptor.plugin_id,
+            )
+        settings.addRow("Tracker:", self._tracking_tracker_combo)
+        self._tracking_tracker_combo.hide()
+        settings.labelForField(self._tracking_tracker_combo).hide()
+
+        self._tracking_channel_spin = QSpinBox()
+        self._tracking_channel_spin.setRange(1, 8)
+        self._tracking_channel_spin.setValue(1)
+        self._tracking_channel_spin.setToolTip(
+            "One-based image channel, matching TrackMate"
+        )
+        settings.addRow("Detection channel:", self._tracking_channel_spin)
+
+        self._tracking_radius_spin = QDoubleSpinBox()
+        self._tracking_radius_spin.setRange(0.05, 100.0)
+        self._tracking_radius_spin.setDecimals(2)
+        self._tracking_radius_spin.setValue(4.0)
+        self._tracking_radius_spin.setSuffix(" µm")
+        self._tracking_radius_spin.setToolTip(
+            "Approximate nucleus radius in physical units"
+        )
+        settings.addRow("Expected radius:", self._tracking_radius_spin)
+
+        self._tracking_threshold_spin = QDoubleSpinBox()
+        self._tracking_threshold_spin.setRange(0.0, 1_000_000.0)
+        self._tracking_threshold_spin.setDecimals(4)
+        self._tracking_threshold_spin.setValue(5.0)
+        self._tracking_threshold_spin.setToolTip(
+            "Minimum scale-space response (in image-intensity units)"
+        )
+        settings.addRow("Quality threshold:", self._tracking_threshold_spin)
+
+        self._tracking_link_distance_spin = QDoubleSpinBox()
+        self._tracking_link_distance_spin.setRange(0.05, 1_000.0)
+        self._tracking_link_distance_spin.setDecimals(2)
+        self._tracking_link_distance_spin.setValue(8.0)
+        self._tracking_link_distance_spin.setSuffix(" µm")
+        settings.addRow("Maximum displacement:", self._tracking_link_distance_spin)
+
+        self._tracking_gap_spin = QSpinBox()
+        self._tracking_gap_spin.setRange(0, 20)
+        self._tracking_gap_spin.setValue(1)
+        self._tracking_gap_spin.setToolTip(
+            "Maximum number of missing frames bridged by a draft link"
+        )
+        settings.addRow("Missing frames allowed:", self._tracking_gap_spin)
+
+        self._tracking_division_check = QCheckBox(
+            "Propose two-daughter divisions for review"
+        )
+        self._tracking_division_check.setChecked(False)
+        self._tracking_division_check.setAccessibleName(
+            "Propose divisions in the initial tracking draft"
+        )
+        settings.addRow("Division handling:", self._tracking_division_check)
+
+        self._tracking_settings_group.setEnabled(False)
+        self._radio_tracking_auto.toggled.connect(
+            self._tracking_settings_group.setEnabled
+        )
+        layout.addWidget(self._tracking_settings_group)
+
+        self._tracking_capability_label = QLabel(
+            "Modern StarryNite can propose reviewed two-daughter divisions. LoG + LAP "
+            "and DoG + LAP are simpler one-to-one alternatives. Advanced custom and "
+            "source-bound legacy exact replay are available in Track Whole Movie after "
+            "the empty dataset opens."
+        )
+        self._tracking_capability_label.setWordWrap(True)
+        self._tracking_capability_label.setAccessibleName(
+            "Selected tracker capabilities"
+        )
+        layout.addWidget(self._tracking_capability_label)
+
+        self._tracking_validation_label = QLabel()
+        self._tracking_validation_label.setWordWrap(True)
+        self._tracking_validation_label.setAccessibleName(
+            "Initial tracking settings problem"
+        )
+        self._tracking_validation_label.setStyleSheet("QLabel { color: #a85f00; }")
+        self._tracking_validation_label.hide()
+        layout.addWidget(self._tracking_validation_label)
+        layout.addStretch()
+        self._tracking_workflow_changed()
+        return page
+
+    def _build_page5_output(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("<b>Step 4: Output Location</b>"))
-        layout.addWidget(QLabel("Choose where to save the dataset files (nuclei ZIP + config XML)."))
+        layout.addWidget(QLabel("<b>Step 5: Output Location</b>"))
+        layout.addWidget(
+            QLabel("Choose where to save the dataset files (nuclei ZIP + config XML).")
+        )
 
         dir_row = QHBoxLayout()
         self._output_edit = QLineEdit()
@@ -322,6 +792,12 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         layout.addWidget(QLabel("Summary:"))
         layout.addWidget(self._summary_label)
 
+        self._output_validation_label = QLabel()
+        self._output_validation_label.setWordWrap(True)
+        self._output_validation_label.setAccessibleName("Dataset output problem")
+        self._output_validation_label.setStyleSheet("QLabel { color: #a85f00; }")
+        layout.addWidget(self._output_validation_label)
+
         layout.addStretch()
         return page
 
@@ -340,23 +816,76 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
 
     def _go_next(self) -> None:
         idx = self._stack.currentIndex()
+        page = self._stack.widget(idx)
+        error = self._page_validation_error(page)
+        if error:
+            self._show_page_validation_error(page, error)
+            self._update_nav_buttons()
+            return
         if idx < self._stack.count() - 1:
             self._stack.setCurrentIndex(idx + 1)
             if idx + 1 == self._stack.count() - 1:
                 self._update_summary()
         else:
             # Last page — "Create" pressed
+            if not self._confirm_overwrite():
+                return
             self.accept()
         self._update_nav_buttons()
 
-    def _update_nav_buttons(self) -> None:
+    def _update_nav_buttons(self, *_args) -> None:
         idx = self._stack.currentIndex()
         self._btn_back.setEnabled(idx > 0)
         is_last = idx == self._stack.count() - 1
         self._btn_next.setText("Create" if is_last else "Next")
+        self._btn_next.setEnabled(not bool(self._page_validation_error(self._stack.widget(idx))))
+
+    def _page_validation_error(self, page: QWidget) -> str:
+        if page is self._page1:
+            return self._image_source_validation_error()
+        if page is self._page2:
+            return self._image_layout_validation_error()
+        if page is self._page4:
+            return self._tracking_validation_error()
+        if page is self._page5:
+            return self._output_validation_error()
+        return ""
+
+    def _show_page_validation_error(self, page: QWidget, error: str) -> None:
+        if page is self._page1:
+            label = self._image_validation_label
+        elif page is self._page2:
+            label = self._layout_validation_label
+        elif page is self._page4:
+            label = self._tracking_validation_label
+        else:
+            label = self._output_validation_label
+        label.setText(error)
+        label.show()
+
+    def _confirm_overwrite(self) -> bool:
+        """Require an explicit opt-in before replacing either dataset file."""
+
+        output = Path(self._output_edit.text().strip())
+        name = self.get_dataset_name()
+        existing = [
+            path for path in (output / f"{name}.zip", output / f"{name}.xml")
+            if path.exists()
+        ]
+        if not existing:
+            return True
+        files = "\n".join(f"• {path.name}" for path in existing)
+        reply = QMessageBox.question(
+            self,
+            "Replace Existing Dataset?",
+            "Creating this dataset will replace the following existing file(s):\n\n"
+            f"{files}\n\nThis cannot be undone. Replace them?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
 
     def _update_summary(self) -> None:
-        d = self._detected
         lines = [
             f"Image directory: {self._dir_edit.text()}",
             f"Format: {self._format_description()}",
@@ -365,6 +894,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             f"Z res: {self._z_res_spin.value()} \u00b5m",
             f"Timepoints: {self._timepoints_spin.value()}",
             f"Z-planes: {self._planes_spin.value()}",
+            f"Initial tracking: {self._tracking_description()}",
             f"Output: {self._output_edit.text()}",
             f"Dataset name: {self._dataset_name_edit.text()}",
         ]
@@ -381,10 +911,28 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             return f"Interleaved multichannel TIFF stack ({n_ch} channels, order={ordering})"
         return "Single channel"
 
+    def _tracking_description(self) -> str:
+        if not self._radio_tracking_auto.isChecked():
+            return "Manual annotation with optional Track Selected Cell"
+        return (
+            "Uncommitted review: "
+            f"{self._tracking_workflow_combo.currentText()} draft "
+            f"(radius={self._tracking_radius_spin.value():g} µm, "
+            f"max displacement={self._tracking_link_distance_spin.value():g} µm, "
+            "divisions="
+            f"{'on' if self._tracking_division_check.isChecked() else 'off'})"
+        )
+
     # ── Results ───────────────────────────────────────────────────
 
     def get_config(self) -> AceTreeConfig:
         """Build an AceTreeConfig from the dialog's current values."""
+        validation_error = (
+            self._image_source_validation_error()
+            or self._image_layout_validation_error()
+        )
+        if validation_error:
+            raise ValueError(validation_error)
         d = self._detected
         image_dir = Path(self._dir_edit.text())
 
@@ -401,7 +949,7 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             image_file = image_dir / f"{prefix}1.tif"
         else:
             # Fallback: use first tif in directory
-            tifs = sorted(image_dir.glob("*.tif")) + sorted(image_dir.glob("*.tiff"))
+            tifs = _tiff_files(image_dir)
             image_file = tifs[0] if tifs else image_dir / "image_t001.tif"
 
         # Multi-channel config
@@ -413,10 +961,10 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
             num_channels = 2
             image_channels[1] = image_file
             ch2_dir = Path(self._ch2_dir_edit.text())
-            if ch2_dir.exists():
-                ch2_tifs = sorted(ch2_dir.glob("*.tif")) + sorted(ch2_dir.glob("*.tiff"))
-                if ch2_tifs:
-                    image_channels[2] = ch2_tifs[0]
+            # Layout validation above guarantees that a real Channel 2 TIFF is
+            # present.  Never degrade a requested two-channel dataset to one
+            # channel and silently clamp the detector to Channel 1 later.
+            image_channels[2] = _tiff_files(ch2_dir)[0]
         elif self._radio_multistack.isChecked():
             num_channels = self._n_channels_spin.value()
             stack_interleaved = True
@@ -453,7 +1001,10 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         return config
 
     def get_output_directory(self) -> Path:
-        return Path(self._output_edit.text())
+        validation_error = self._output_validation_error()
+        if validation_error:
+            raise ValueError(validation_error)
+        return Path(self._output_edit.text().strip())
 
     def get_dataset_name(self) -> str:
         return self._dataset_name_edit.text().strip() or "dataset"
@@ -461,8 +1012,103 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
     def get_num_timepoints(self) -> int:
         return self._timepoints_spin.value()
 
+    def get_tracking_request(self):
+        """Return an initial global tracking request, or ``None`` for manual mode."""
+        if not self._radio_tracking_auto.isChecked():
+            return None
+
+        validation_error = self._tracking_validation_error()
+        if validation_error:
+            raise ValueError(validation_error)
+
+        from ..tracking.api import ComponentSpec, TrackingRequest, TrackingScope
+        from ..tracking.registry import get_default_registry
+
+        max_distance = self._tracking_link_distance_spin.value()
+        gap_frames = self._tracking_gap_spin.value()
+        registry = get_default_registry()
+        detector_id = str(self._tracking_detector_combo.currentData())
+        tracker_id = str(self._tracking_tracker_combo.currentData())
+        detector_settings = registry.default_settings(detector_id)
+        tracker_settings = registry.default_settings(tracker_id)
+        if self._tracking_workflow_combo.currentData() == "modern_starrynite":
+            from ..tracking.starrynite import (
+                bundled_parameter_preset,
+                load_tuning_profile,
+                native_detector_settings,
+            )
+
+            preset = bundled_parameter_preset(
+                str(self._tracking_starrynite_preset_combo.currentData())
+            )
+            profile = load_tuning_profile(
+                preset.parameter_file,
+                fallback_radius_um=self._tracking_radius_spin.value(),
+            )
+            detector_settings.update(
+                native_detector_settings(profile.detector_settings)
+            )
+            tracker_settings.update(profile.tracker_settings)
+        detector_common = {
+            "TARGET_CHANNEL": self._tracking_channel_spin.value(),
+            "RADIUS": self._tracking_radius_spin.value(),
+            "THRESHOLD": self._tracking_threshold_spin.value(),
+            "DO_MEDIAN_FILTERING": False,
+        }
+        if detector_id == "acetree.starrynite_detector":
+            detector_common["THRESHOLD"] = 0.0
+            detector_common["INTENSITY_THRESHOLD"] = (
+                self._tracking_threshold_spin.value()
+            )
+        tracker_common = {
+            "LINKING_MAX_DISTANCE": max_distance,
+            "ALLOW_GAP_CLOSING": gap_frames > 0,
+            "GAP_CLOSING_MAX_DISTANCE": max_distance,
+            "MAX_FRAME_GAP": gap_frames + 1 if gap_frames > 0 else 1,
+            "ALLOW_TRACK_SPLITTING": self._tracking_division_check.isChecked(),
+            "ALLOW_TRACK_MERGING": False,
+        }
+        detector_schema = registry.get_descriptor(detector_id).settings_schema
+        tracker_schema = registry.get_descriptor(tracker_id).settings_schema
+        detector_settings.update(
+            (key, value) for key, value in detector_common.items()
+            if key in detector_schema
+        )
+        tracker_settings.update(
+            (key, value) for key, value in tracker_common.items()
+            if key in tracker_schema
+        )
+        return TrackingRequest(
+            detector=ComponentSpec(
+                plugin_id=detector_id,
+                settings=detector_settings,
+            ),
+            tracker=ComponentSpec(
+                plugin_id=tracker_id,
+                settings=tracker_settings,
+            ),
+            scope=TrackingScope(
+                kind="global",
+                start_frame=1,
+                end_frame=self._timepoints_spin.value(),
+            ),
+        )
+
 
 # ── Auto-detection helpers ────────────────────────────────────────
+
+
+def _tiff_files(directory: Path) -> list[Path]:
+    """Return TIFF files with case-insensitive suffix handling."""
+
+    try:
+        return sorted(
+            path
+            for path in directory.iterdir()
+            if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+        )
+    except OSError:
+        return []
 
 
 def _auto_detect_format(directory: Path) -> dict:
@@ -474,15 +1120,7 @@ def _auto_detect_format(directory: Path) -> dict:
     """
     result: dict = {"num_files": 0, "error": None}
 
-    tifs = sorted(directory.glob("*.tif")) + sorted(directory.glob("*.tiff"))
-    # Deduplicate (in case .tif and .tiff overlap)
-    seen = set()
-    unique_tifs = []
-    for t in tifs:
-        if t.name not in seen:
-            seen.add(t.name)
-            unique_tifs.append(t)
-    tifs = unique_tifs
+    tifs = _tiff_files(directory)
     result["num_files"] = len(tifs)
 
     if not tifs:

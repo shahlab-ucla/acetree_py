@@ -15,6 +15,10 @@ Ported from: org.rhwlab.acetree.AceTree (the monolithic 4000+ line Java class)
 from __future__ import annotations
 
 import logging
+import os
+import stat
+import tempfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,14 +26,60 @@ import numpy as np
 
 if TYPE_CHECKING:
     import napari
+    from ..core.nucleus import Nucleus
+    from ..tracking.api import (
+        Calibration,
+        ComponentSpec,
+        Detection,
+        TrackingRequest,
+        TrackingResult,
+    )
 
 from ..core.nuclei_manager import NucleiManager
-from ..editing.history import EditHistory
+from ..editing.history import EditHistory, PostCommitCallbackError
 from ..io.config import AceTreeConfig, load_config
-from ..io.image_provider import ImageProvider, create_image_provider_from_config
+from ..io.image_provider import (
+    ImageProvider,
+    clone_image_provider_for_worker,
+    close_worker_image_provider,
+    create_image_provider_from_config,
+)
 from .color_rules import ColorRuleEngine
+from .marker_layers import (
+    configure_curated_points_layer,
+    passed_drag_threshold,
+    point_anchor,
+    pointer_position,
+    replace_points_layer,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _stage_config_xml(config: AceTreeConfig, destination: Path) -> Path:
+    """Serialize a config to a private sibling for a coordinated Save."""
+
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".save-config.tmp",
+    )
+    os.close(descriptor)
+    staged = Path(name)
+    try:
+        if destination.exists():
+            os.chmod(staged, stat.S_IMODE(destination.stat().st_mode))
+        from ..io.config_writer import write_config_xml
+
+        # The sibling lives in the destination directory, so relative paths in
+        # the staged XML are exactly those of the eventual config file.
+        write_config_xml(config, staged)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    return staged
 
 # Java AceTree stored this constant as `NUCZINDEXOFFSET = 1`, but in our
 # Python port ``nuc.z`` and ``current_plane`` are in the *same* 1-based
@@ -39,6 +89,40 @@ logger = logging.getLogger(__name__)
 # the true centroid — visible symptom: the slice follows a selected cell
 # across time but stops one plane short of the nucleus.  Set to 0.
 NUCZINDEXOFFSET = 0
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingAnalysisSnapshot:
+    """Immutable document context consumed by a background tracking run.
+
+    Every nucleus is copied on the GUI thread before the worker starts. The
+    provider is a template: built-in providers are cloned with independent
+    file-handle caches in the worker. The monotonic change counter catches
+    edit→undo sequences that return to the same history revision.
+    """
+
+    request: TrackingRequest
+    image_provider: ImageProvider
+    calibration: Calibration
+    nuclei_record: list[list[Nucleus]]
+    revision: int
+    change_counter: int
+
+
+@dataclass(frozen=True, slots=True)
+class DetectorPreviewSnapshot:
+    """Minimal immutable context for one background detector test.
+
+    Unlike a tracking snapshot, this deliberately carries no nuclei-record
+    copy because current-frame detection reads only the image and calibration.
+    """
+
+    detector: ComponentSpec
+    frame: int
+    image_provider: ImageProvider
+    calibration: Calibration
+    revision: int
+    change_counter: int
 
 
 class AceTreeApp:
@@ -80,7 +164,40 @@ class AceTreeApp:
         self.current_time: int = 1
         self.current_plane: int = 1
         self.current_cell_name: str = ""
+        # Stable physical anchor for the selection.  Cell names are mutable:
+        # automatic naming, manual overrides, relinks, and undo/redo can all
+        # change them.  Keeping the nucleus that was actually picked prevents
+        # a rename elsewhere from stealing the selection and makes unnamed
+        # selections safe across time navigation.
+        self.selection_anchor: tuple[int, int] | None = None
         self.tracking: bool = True
+
+        # Save As becomes the target for subsequent Save operations even for
+        # headless/new managers that do not yet own an AceTreeConfig.
+        self._save_path_override: Path | None = None
+
+        # Accepted image-analysis runs are retained as provenance and written
+        # to the optional tracking sidecar on Save.  They never replace the
+        # legacy XML/nuclei ZIP contract.
+        self._tracking_results: list[TrackingResult] = []
+        self._tracking_sidecar_managed: bool = False
+        # A rendering failure happens after an edit has already crossed the
+        # history boundary. Retain the most recent failure so proposal
+        # acceptance can make one redraw retry without executing the command
+        # again (which would duplicate detections/markers).
+        self._last_post_commit_refresh_error: Exception | None = None
+        # Whole-dataset tracking is always proposal-first.  Dataset creation
+        # retains the wizard request until the viewer exists so the result can
+        # be inspected in the same 2D/3D overlays used for curation.
+        self._pending_initial_tracking_request: TrackingRequest | None = None
+        self._last_global_tracking_request: TrackingRequest | None = None
+        self._global_tracking_dialog = None
+        self._global_tracking_jobs: dict[tuple[int, int], tuple] = {}
+        # A worker can be complete while its QThread is still draining queued
+        # teardown events. Keep those Qt objects alive without treating the
+        # analysis as active or blocking the next workbench.
+        self._global_tracking_retiring_jobs: dict[tuple[int, int], tuple] = {}
+        self._tracking_shutdown_connected = False
 
         # GUI components (initialized in launch())
         self.viewer: napari.Viewer | None = None
@@ -89,8 +206,19 @@ class AceTreeApp:
         self._cell_info_panel = None
         self._contrast_tools = None
         self._edit_panel = None
+        self._tracking_menu = None
+        self._tracking_menu_actions: dict[str, object] = {}
         self._lineage_widgets: list = []  # Multiple lineage tree panels
+        self._expression_plot_windows: list = []
+        self._expression_plot_window_counter: int = 0
+        self._expression_comparison_windows: list = []
+        self._expression_comparison_window_counter: int = 0
+        self._expression_dataset_repository = None
+        self._expression_repository_shutdown_connected = False
+        self._panel_menu_actions: dict[str, object] = {}
         self._lineage_list = None
+        # 0-based image channel most recently chosen by File -> Measure.
+        self.current_expression_channel: int = 0
 
         # Cached image layers (one per channel)
         self._image_layers: list = []
@@ -99,6 +227,7 @@ class AceTreeApp:
 
         # 3D view state
         self._3d_mode: bool = False
+        self._changing_ndisplay: bool = False
         self._points_layer = None  # napari Points layer for 3D nuclei
         self._trail_points_layer = None  # 3D ghost trail Points layer
 
@@ -109,6 +238,7 @@ class AceTreeApp:
         # Click-to-place nucleus mode (Track button)
         self._placement_mode: bool = False
         self._placement_parent_name: str | None = None  # None = root mode
+        self._placement_parent_anchor: tuple[int, int] | None = None
         self._placement_default_size: int = 20
 
         # Click-to-add nucleus mode (Add button)
@@ -153,6 +283,23 @@ class AceTreeApp:
                 logger.warning("No image provider could be created from config")
 
         app = cls(manager, image_provider)
+        tracking_sidecar = config.zip_file.with_suffix(".tracking.json")
+        if tracking_sidecar.exists():
+            try:
+                from ..tracking.persistence import read_tracking_proposal
+
+                app._tracking_results.append(
+                    read_tracking_proposal(tracking_sidecar)
+                )
+                app._tracking_sidecar_managed = True
+            except Exception:
+                # Tracking provenance is optional and must never make a
+                # backward-compatible nuclei dataset impossible to open.
+                logger.warning(
+                    "Could not read tracking sidecar %s",
+                    tracking_sidecar,
+                    exc_info=True,
+                )
         app.current_time = 1
         # Set initial plane to middle of stack
         if image_provider is not None and image_provider.num_planes > 0:
@@ -167,6 +314,7 @@ class AceTreeApp:
         config: AceTreeConfig,
         num_timepoints: int,
         output_dir: Path,
+        tracking_request: TrackingRequest | None = None,
     ) -> AceTreeApp:
         """Create an AceTreeApp for a brand-new dataset (empty nuclei).
 
@@ -177,6 +325,10 @@ class AceTreeApp:
             config: Configuration built from DatasetCreationDialog.
             num_timepoints: Number of timepoints detected from images.
             output_dir: Where to save the nuclei ZIP and config XML.
+            tracking_request: Optional automated draft settings. The request
+                remains uncommitted until the launched viewer's global review
+                workbench explicitly accepts it. ``None`` preserves the
+                manual-annotation workflow.
 
         Returns:
             A fully initialized AceTreeApp ready for manual annotation.
@@ -213,6 +365,9 @@ class AceTreeApp:
             app.current_plane = max(1, image_provider.num_planes // 2)
         else:
             app.current_plane = max(1, (manager.movie.num_planes or 30) // 2)
+        if tracking_request is not None:
+            app._pending_initial_tracking_request = tracking_request
+            app._last_global_tracking_request = tracking_request
         return app
 
     @classmethod
@@ -225,24 +380,30 @@ class AceTreeApp:
         from .dataset_dialog import DatasetCreationDialog
 
         # Need a QApplication for the dialog
-        from qtpy.QtWidgets import QApplication
+        from qtpy.QtWidgets import QApplication, QDialog
         qt_app = QApplication.instance()
         if qt_app is None:
             qt_app = QApplication([])
 
         dlg = DatasetCreationDialog()
-        if dlg.exec_() != dlg.Accepted:
+        if dlg.exec_() != QDialog.Accepted:
             return None
 
         config = dlg.get_config()
         output_dir = dlg.get_output_directory()
         dataset_name = dlg.get_dataset_name()
         num_timepoints = dlg.get_num_timepoints()
+        tracking_request = dlg.get_tracking_request()
 
         # Set zip_file name from dataset name
         config.zip_file = output_dir / f"{dataset_name}.zip"
 
-        return cls.from_new_dataset(config, num_timepoints, output_dir)
+        return cls.from_new_dataset(
+            config,
+            num_timepoints,
+            output_dir,
+            tracking_request=tracking_request,
+        )
 
     def launch(self) -> None:
         """Create the napari viewer and add all dock widgets.
@@ -260,11 +421,30 @@ class AceTreeApp:
         from .contrast_tools import ContrastTools
         from .edit_panel import EditPanel
         from .lineage_list import LineageListWidget
-        from .lineage_widget import LineageWidget
         from .player_controls import PlayerControls
         from .viewer_integration import ViewerIntegration
 
         self.viewer = napari.Viewer(title="AceTree")
+        if not self._tracking_shutdown_connected:
+            from qtpy.QtWidgets import QApplication
+
+            qt_app = QApplication.instance()
+            if qt_app is not None:
+                qt_app.aboutToQuit.connect(self._shutdown_global_tracking_workers)
+                self._tracking_shutdown_connected = True
+        if not self._expression_repository_shutdown_connected:
+            from qtpy.QtWidgets import QApplication
+
+            qt_app = QApplication.instance()
+            if qt_app is not None:
+                qt_app.aboutToQuit.connect(
+                    self._shutdown_expression_dataset_repository
+                )
+                self._expression_repository_shutdown_connected = True
+        try:
+            self.viewer.dims.events.ndisplay.connect(self._on_native_ndisplay_changed)
+        except (AttributeError, TypeError):
+            logger.debug("napari does not expose an ndisplay change event")
 
         # Hide napari's default layer list and layer controls — they're
         # rarely needed and consume valuable dock space.  Still accessible
@@ -307,11 +487,11 @@ class AceTreeApp:
             area="left",
         )
 
-        # Right: Edit Tools (compact — D-pad and history are popups)
+        # Right: Edit & Tracking Tools (scrollable; D-pad/history are popups)
         self._edit_panel = EditPanel(self)
         self.viewer.window.add_dock_widget(
             self._edit_panel,
-            name="Edit Tools",
+            name="Edit & Tracking Tools",
             area="right",
         )
 
@@ -324,6 +504,9 @@ class AceTreeApp:
 
         # Add toggle actions to Window menu so closed panels can be reopened
         self._add_panel_menu_actions()
+        # Tracking entry points must remain reachable even if the Edit &
+        # Tracking dock is closed or scrolled on a small display.
+        self._add_tracking_menu_actions()
         # Add File → Measure… action
         self._add_file_menu_actions()
 
@@ -333,6 +516,14 @@ class AceTreeApp:
         # Initial display
         self.update_display()
 
+        if self._pending_initial_tracking_request is not None:
+            # The review workbench needs ViewerIntegration's preview layers,
+            # and image analysis must not start before Qt's event loop is able
+            # to deliver progress and cancellation signals.
+            from qtpy.QtCore import QTimer
+
+            QTimer.singleShot(0, self._open_pending_initial_tracking)
+
         logger.info("AceTree GUI launched")
 
     def run(self) -> None:
@@ -341,11 +532,622 @@ class AceTreeApp:
         import napari
         napari.run()
 
+    def run_tracking_request(
+        self,
+        request: TrackingRequest,
+        *,
+        progress=None,
+        cancelled=None,
+    ) -> TrackingResult:
+        """Analyze images and accept the result as one undoable draft edit."""
+        proposal, revision = self.analyze_tracking_request(
+            request,
+            progress=progress,
+            cancelled=cancelled,
+        )
+        self.accept_tracking_proposal(proposal, expected_revision=revision)
+        return proposal
+
+    def analyze_tracking_request(
+        self,
+        request: TrackingRequest,
+        *,
+        progress=None,
+        cancelled=None,
+    ) -> tuple[TrackingResult, int]:
+        """Return an uncommitted proposal and its source document revision.
+
+        Synchronous callers retain the original API.  GUI workbenches call
+        :meth:`prepare_tracking_analysis` on the GUI thread, then execute the
+        returned snapshot in a worker with :meth:`analyze_prepared_tracking`.
+        """
+
+        snapshot = self.prepare_tracking_analysis(request)
+        proposal = self.analyze_prepared_tracking(
+            snapshot,
+            progress=progress,
+            cancelled=cancelled,
+        )
+        return proposal, snapshot.revision
+
+    def prepare_tracking_analysis(
+        self,
+        request: TrackingRequest,
+    ) -> TrackingAnalysisSnapshot:
+        """Capture a worker-safe, immutable view of the current document."""
+
+        if self.image_provider is None:
+            raise ValueError("This dataset has no readable image source")
+        config = self.manager.config
+        if config is None:
+            raise ValueError("Tracking requires dataset calibration")
+        if (
+            request.tracker.plugin_id == "acetree.starrynite_legacy_exact"
+            and self.manager.num_timepoints != self.image_provider.num_timepoints
+        ):
+            raise ValueError(
+                "Exact StarryNite whole-movie tracking requires the nuclei record "
+                "and image source to describe the same number of timepoints "
+                f"(record: {self.manager.num_timepoints}; images: "
+                f"{self.image_provider.num_timepoints})."
+            )
+
+        from ..tracking.api import Calibration
+
+        revision = self.edit_history.revision
+        change_counter = self.edit_history.change_counter
+        calibration = Calibration(
+            xy_um=config.xy_res,
+            z_um=config.z_res,
+            plane_start=config.plane_start,
+        )
+        nuclei_snapshot = [
+            [nucleus.copy() for nucleus in frame]
+            for frame in self.manager.nuclei_record
+        ]
+        return TrackingAnalysisSnapshot(
+            request=request,
+            image_provider=self.image_provider,
+            calibration=calibration,
+            nuclei_record=nuclei_snapshot,
+            revision=revision,
+            change_counter=change_counter,
+        )
+
+    def analyze_prepared_tracking(
+        self,
+        snapshot: TrackingAnalysisSnapshot,
+        *,
+        progress=None,
+        cancelled=None,
+    ) -> TrackingResult:
+        """Analyze a previously captured snapshot, normally in a worker."""
+
+        from ..tracking.pipeline import TrackingPipeline
+
+        if (
+            self.edit_history.revision != snapshot.revision
+            or self.edit_history.change_counter != snapshot.change_counter
+        ):
+            raise RuntimeError(
+                "The dataset changed before tracking started; recompute the draft"
+            )
+        worker_provider = clone_image_provider_for_worker(snapshot.image_provider)
+        owns_provider = worker_provider is not None
+        if worker_provider is None:
+            # Compatibility for external/in-memory providers that predate the
+            # clone contract. Built-in disk providers never take this path.
+            worker_provider = snapshot.image_provider
+        try:
+            proposal = TrackingPipeline().run(
+                worker_provider,
+                snapshot.calibration,
+                snapshot.request,
+                nuclei_record=snapshot.nuclei_record,
+                progress=progress,
+                cancelled=cancelled,
+            )
+        finally:
+            if owns_provider:
+                close_worker_image_provider(worker_provider)
+        if (
+            self.edit_history.revision != snapshot.revision
+            or self.edit_history.change_counter != snapshot.change_counter
+        ):
+            raise RuntimeError(
+                "The dataset changed while tracking was running; recompute the draft"
+            )
+        return proposal
+
+    def prepare_detector_preview(
+        self,
+        detector: ComponentSpec,
+        frame: int,
+    ) -> DetectorPreviewSnapshot:
+        """Capture the small worker-safe context for a one-frame detector test."""
+
+        if self.image_provider is None:
+            raise ValueError("This dataset has no readable image source")
+        config = self.manager.config
+        if config is None:
+            raise ValueError("Detector preview requires dataset calibration")
+        frame = int(frame)
+        if frame < 1 or frame > self.image_provider.num_timepoints:
+            raise ValueError(
+                f"Detector preview frame {frame} is outside the image source"
+            )
+
+        from ..tracking.api import Calibration
+
+        return DetectorPreviewSnapshot(
+            detector=detector,
+            frame=frame,
+            image_provider=self.image_provider,
+            calibration=Calibration(
+                xy_um=config.xy_res,
+                z_um=config.z_res,
+                plane_start=config.plane_start,
+            ),
+            revision=self.edit_history.revision,
+            change_counter=self.edit_history.change_counter,
+        )
+
+    def analyze_prepared_detector_preview(
+        self,
+        snapshot: DetectorPreviewSnapshot,
+        *,
+        progress=None,
+        cancelled=None,
+    ) -> tuple[Detection, ...]:
+        """Run one detector without copying nuclei or constructing a tracker."""
+
+        from ..tracking.pipeline import TrackingPipeline
+
+        if (
+            self.edit_history.revision != snapshot.revision
+            or self.edit_history.change_counter != snapshot.change_counter
+        ):
+            raise RuntimeError(
+                "The dataset changed before detector preview started; run it again"
+            )
+        worker_provider = clone_image_provider_for_worker(snapshot.image_provider)
+        owns_provider = worker_provider is not None
+        if worker_provider is None:
+            worker_provider = snapshot.image_provider
+        try:
+            detections = TrackingPipeline().detect_frame(
+                worker_provider,
+                snapshot.calibration,
+                snapshot.detector,
+                frame=snapshot.frame,
+                progress=progress,
+                cancelled=cancelled,
+            )
+        finally:
+            if owns_provider:
+                close_worker_image_provider(worker_provider)
+        if (
+            self.edit_history.revision != snapshot.revision
+            or self.edit_history.change_counter != snapshot.change_counter
+        ):
+            raise RuntimeError(
+                "The dataset changed while detector preview was running; run it again"
+            )
+        return detections
+
+    def accept_tracking_proposal(
+        self,
+        proposal: TrackingResult,
+        *,
+        expected_revision: int,
+    ) -> dict[str, tuple[int, int]]:
+        """Commit a reviewed proposal and return detection-to-nucleus locations."""
+        if self.edit_history.revision != expected_revision:
+            raise RuntimeError(
+                "The dataset changed after preview; recompute the tracking draft"
+            )
+        config = self.manager.config
+        if config is None:
+            raise ValueError("Tracking requires dataset calibration")
+
+        from ..tracking.api import Calibration
+        from ..tracking.integration import ApplyTrackingProposal
+
+        calibration = Calibration(
+            xy_um=config.xy_res,
+            z_um=config.z_res,
+            plane_start=config.plane_start,
+        )
+        command = ApplyTrackingProposal(result=proposal, calibration=calibration)
+        self._last_post_commit_refresh_error = None
+        try:
+            self.edit_history.do(command)
+        except PostCommitCallbackError as error:
+            # ``EditHistory`` raises this only after data, revision, and undo
+            # state have committed. Reading the mapping also verifies that
+            # this particular proposal is applied before we report success.
+            # Retry only the post-commit work -- never execute the command a
+            # second time, which would create overlapping duplicate nuclei.
+            mapping = command.detection_mapping
+            self._report_committed_refresh_failure(
+                command,
+                error.__cause__ or error,
+            )
+            try:
+                self.edit_history.retry_post_commit(error)
+            except Exception as retry_error:
+                self._report_committed_refresh_failure(command, retry_error)
+            return mapping
+
+        mapping = command.detection_mapping
+        if self._last_post_commit_refresh_error is not None:
+            # Structural/model rebuilding completed, but the presentation
+            # refresh failed. One direct redraw retry is safe and avoids an
+            # expensive second naming pass. A failed retry remains a warning
+            # because the proposal itself is already committed and undoable.
+            try:
+                self.update_display()
+            except Exception as retry_error:
+                self._report_committed_refresh_failure(command, retry_error)
+        return mapping
+
+    def _open_pending_initial_tracking(self) -> None:
+        """Open the wizard request and test its detector on one frame first."""
+
+        request = self._pending_initial_tracking_request
+        if request is not None:
+            self.set_time(request.scope.start_frame)
+            dialog = self.open_global_tracking_workbench(
+                initial_request=request,
+                auto_preview_current_frame=True,
+            )
+            if dialog is not None:
+                self._pending_initial_tracking_request = None
+
+    def open_global_tracking_workbench(
+        self,
+        *,
+        initial_request: TrackingRequest | None = None,
+        auto_start: bool = False,
+        auto_preview_current_frame: bool = False,
+    ):
+        """Show proposal-first whole-dataset tracking for an empty dataset."""
+
+        if self._global_tracking_dialog is not None:
+            try:
+                if self._global_tracking_dialog.isVisible():
+                    self._global_tracking_dialog.raise_()
+                    self._global_tracking_dialog.activateWindow()
+                    return self._global_tracking_dialog
+            except RuntimeError:
+                self._global_tracking_dialog = None
+
+        from qtpy.QtWidgets import QMessageBox
+
+        if self._global_tracking_jobs:
+            parent = None
+            if self.viewer is not None:
+                parent = self.viewer.window._qt_window
+            QMessageBox.information(
+                parent,
+                "Previous Analysis Is Stopping",
+                "Please wait for the previous whole-movie analysis to finish "
+                "canceling before starting another run.",
+            )
+            return None
+        if self.viewer is None:
+            logger.warning("Global tracking review requires the launched viewer")
+            return None
+
+        if self.image_provider is None:
+            QMessageBox.warning(
+                self.viewer.window._qt_window,
+                "Images Unavailable",
+                "Whole-dataset tracking needs a readable image source.",
+            )
+            return None
+        if any(frame for frame in self.manager.nuclei_record):
+            QMessageBox.information(
+                self.viewer.window._qt_window,
+                "Dataset Is Not Empty",
+                "Whole-dataset tracking currently adds a new initial draft and is only "
+                "available before curation begins. Undo the accepted initial draft, or "
+                "use Track Selected Cell for a selected lineage.",
+            )
+            return None
+
+        from qtpy.QtCore import QTimer
+
+        from ..tracking.api import Calibration
+        from .global_tracking_dialog import GlobalTrackingDialog
+
+        config = self.manager.config
+        if config is None:
+            QMessageBox.warning(
+                self.viewer.window._qt_window,
+                "Calibration Unavailable",
+                "Whole-dataset tracking needs pixel and Z calibration.",
+            )
+            return None
+        record_timepoints = self.manager.num_timepoints
+        image_timepoints = self.image_provider.num_timepoints
+        end_time = min(record_timepoints, image_timepoints)
+        exact_scope_error = ""
+        if record_timepoints != image_timepoints:
+            exact_scope_error = (
+                "Exact StarryNite whole-movie tracking is unavailable because "
+                f"the nuclei record has {record_timepoints} timepoint(s), while "
+                f"the image source has {image_timepoints}. Reopen the dataset with "
+                "matching movie and nuclei ranges."
+            )
+        request = initial_request or self._last_global_tracking_request
+        dialog = GlobalTrackingDialog(
+            start_time=1,
+            end_time=max(1, end_time),
+            num_channels=max(1, self.image_provider.num_channels),
+            parent=self.viewer.window._qt_window,
+            initial_request=request,
+            viewer_integration=self._viewer_integration,
+            calibration=Calibration(
+                config.xy_res,
+                config.z_res,
+                config.plane_start,
+            ),
+            analysis_starter=self._start_global_tracking_analysis,
+            detector_preview_starter=self._start_global_detector_preview,
+            accept_callback=lambda proposal, revision: self.accept_tracking_proposal(
+                proposal,
+                expected_revision=int(revision),
+            ),
+            revision_getter=lambda: (
+                self.edit_history.revision,
+                self.edit_history.change_counter,
+            ),
+            navigate_to_frame=self.set_time,
+            current_frame_getter=lambda: self.current_time,
+            dataset_empty_getter=lambda: not any(
+                frame for frame in self.manager.nuclei_record
+            ),
+            exact_scope_error=exact_scope_error,
+        )
+        dialog.finished.connect(
+            lambda _result, dlg=dialog: self._global_tracking_dialog_closed(dlg)
+        )
+        dialog.draftAccepted.connect(
+            lambda count: self._set_tracking_status(
+                f"Accepted {count} reviewed whole-movie positions"
+            )
+        )
+        dialog.draftDiscarded.connect(
+            lambda: self._set_tracking_status(
+                "Discarded the whole-movie draft; no positions were added"
+            )
+        )
+        self._global_tracking_dialog = dialog
+        self._pause_playback_for_tracking_review()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        if auto_start:
+            QTimer.singleShot(0, dialog.start_analysis)
+        elif auto_preview_current_frame:
+            QTimer.singleShot(0, dialog.start_detector_preview)
+        return dialog
+
+    def _start_global_tracking_analysis(self, request, run_id: int, dialog):
+        """Start one cancellable worker and return its cancellation handle."""
+
+        snapshot = self.prepare_tracking_analysis(request)
+
+        def analysis(progress, cancelled):
+            proposal = self.analyze_prepared_tracking(
+                snapshot,
+                progress=progress,
+                cancelled=cancelled,
+            )
+            return (
+                proposal,
+                snapshot.revision,
+                run_id,
+                (snapshot.revision, snapshot.change_counter),
+            )
+
+        return self._start_global_tracking_worker(
+            analysis,
+            run_id,
+            dialog,
+            success_slot=dialog.finish_worker_result,
+            failure_slot=dialog.fail_analysis,
+        )
+
+    def _start_global_detector_preview(
+        self,
+        detector,
+        frame: int,
+        run_id: int,
+        dialog,
+    ):
+        """Start one lightweight detector-only current-frame worker."""
+
+        snapshot = self.prepare_detector_preview(detector, frame)
+
+        def analysis(progress, cancelled):
+            detections = self.analyze_prepared_detector_preview(
+                snapshot,
+                progress=progress,
+                cancelled=cancelled,
+            )
+            return (
+                detections,
+                snapshot.frame,
+                run_id,
+                (snapshot.revision, snapshot.change_counter),
+            )
+
+        return self._start_global_tracking_worker(
+            analysis,
+            run_id,
+            dialog,
+            success_slot=dialog.finish_detector_preview_worker_result,
+            failure_slot=dialog.fail_detector_preview,
+        )
+
+    def _start_global_tracking_worker(
+        self,
+        analysis,
+        run_id: int,
+        dialog,
+        *,
+        success_slot,
+        failure_slot,
+    ):
+        """Run either tracking mode with kind-safe queued Qt callbacks."""
+
+        from threading import Event
+
+        from qtpy.QtCore import QThread
+
+        from .tracking_worker import TrackingAnalysisWorker, TrackingWorkerRelay
+
+        cancel_event = Event()
+
+        def cancel_matching_run(requested_run_id: int) -> None:
+            # The worker can enter plugin code before ``start_analysis`` has
+            # received and stored the returned cancellation handle. Keep a
+            # direct signal path so closing during that startup window cannot
+            # strand a background job.
+            if int(requested_run_id) == int(run_id):
+                cancel_event.set()
+
+        thread = QThread()
+        worker = TrackingAnalysisWorker(analysis, cancel_event)
+        job_key = (id(dialog), run_id)
+        relay = TrackingWorkerRelay(
+            run_id,
+            dialog.update_analysis_progress,
+            success_slot,
+            failure_slot,
+            lambda key=job_key: self._global_tracking_worker_finished(key),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(relay.progress)
+        worker.succeeded.connect(relay.succeeded)
+        worker.failed.connect(relay.failed)
+        # This queued GUI-thread callback clears the active-job guard as soon
+        # as plugin code returns. The tuple moves to a retiring collection so
+        # the QThread cannot be destroyed before its own ``finished`` signal.
+        worker.finished.connect(relay.finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda key=job_key: self._global_tracking_thread_finished(key)
+        )
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(relay.deleteLater)
+        dialog.cancelRequested.connect(cancel_matching_run)
+        self._global_tracking_jobs[job_key] = (
+            thread,
+            worker,
+            cancel_event,
+            relay,
+            cancel_matching_run,
+        )
+        thread.start()
+        return cancel_event.set
+
+    def _global_tracking_worker_finished(self, job_key: tuple[int, int]) -> None:
+        """Mark completed plugin code inactive while retaining Qt teardown refs."""
+
+        job = self._global_tracking_jobs.pop(job_key, None)
+        if job is not None:
+            self._global_tracking_retiring_jobs[job_key] = job
+
+    def _global_tracking_thread_finished(self, job_key: tuple[int, int]) -> None:
+        """Release worker references after Qt has dispatched ``finished``.
+
+        Dropping the last Python reference to a ``QThread`` from inside its own
+        ``finished`` signal can destroy the wrapper while Qt is still unwinding
+        that signal.  This is especially easy to hit when a canceled analysis
+        is immediately followed by another workbench.  Keep the retiring tuple
+        alive for one GUI turn so destruction happens from the ordinary event
+        loop instead of the thread's completion callback.
+        """
+
+        from qtpy.QtCore import QTimer
+
+        QTimer.singleShot(
+            0,
+            lambda key=job_key: self._release_global_tracking_job(key),
+        )
+
+    def _release_global_tracking_job(self, job_key: tuple[int, int]) -> None:
+        """Drop references for a worker whose Qt completion signal has returned."""
+
+        self._global_tracking_jobs.pop(job_key, None)
+        self._global_tracking_retiring_jobs.pop(job_key, None)
+
+    def _global_tracking_dialog_closed(self, dialog) -> None:
+        # Closing is allowed during the tiny interval between ``thread.start``
+        # and the dialog receiving its callable cancellation handle. Reinforce
+        # the dialog signal at the host boundary for every run it owns.
+        for (dialog_id, _run_id), job in tuple(self._global_tracking_jobs.items()):
+            if dialog_id == id(dialog):
+                job[2].set()
+        try:
+            self._last_global_tracking_request = dialog.get_request()
+        except (AttributeError, RuntimeError, ValueError):
+            pass
+        if self._global_tracking_dialog is dialog:
+            self._global_tracking_dialog = None
+
+    def _shutdown_global_tracking_workers(self, timeout_ms: int = 1500) -> None:
+        """Cancel global workers and allow a bounded cooperative shutdown."""
+
+        import time
+
+        jobs = [
+            *self._global_tracking_jobs.values(),
+            *self._global_tracking_retiring_jobs.values(),
+        ]
+        for _thread, _worker, cancel_event, *_relay in jobs:
+            cancel_event.set()
+        deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
+        for thread, _worker, _cancel_event, *_relay in jobs:
+            try:
+                if not thread.isRunning():
+                    continue
+                thread.quit()
+                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                if remaining_ms:
+                    thread.wait(remaining_ms)
+                if thread.isRunning():
+                    logger.warning(
+                        "A tracking plugin did not stop within the shutdown timeout"
+                    )
+            except RuntimeError:
+                # Qt may already have released a thread that finished while
+                # shutdown callbacks were being delivered.
+                continue
+
+    def _pause_playback_for_tracking_review(self) -> None:
+        player = self._player_controls
+        if player is not None and bool(getattr(player, "_playing", False)):
+            stop = getattr(player, "_stop_play", None)
+            if callable(stop):
+                stop()
+
+    def _set_tracking_status(self, message: str) -> None:
+        if self._edit_panel is not None:
+            self._edit_panel._status_label.setText(message)
+
     # ── Save ──────────────────────────────────────────────────────
 
     @property
     def _default_save_path(self) -> Path | None:
         """Return the original nuclei ZIP path from config, if available."""
+        if self._save_path_override is not None:
+            return self._save_path_override
         if self.manager.config and str(self.manager.config.zip_file):
             zf = self.manager.config.zip_file
             # Path() defaults to '.' — treat as unset
@@ -388,12 +1190,91 @@ class AceTreeApp:
         if not path_str:
             return None  # User cancelled
 
-        return self._do_save(Path(path_str))
+        saved_path = self._do_save(Path(path_str), mark_saved=False)
+        if saved_path is None:
+            return None
 
-    def _do_save(self, path: Path) -> Path | None:
+        config = self.manager.config
+        old_zip_path = config.zip_file if config is not None else None
+        if config is not None:
+            config.zip_file = saved_path
+            config_path = config.config_file
+            if config_path != Path() and config_path.suffix.lower() == ".xml":
+                try:
+                    from ..io.config_writer import write_config_xml
+
+                    write_config_xml(config, config_path)
+                except Exception:
+                    # The target ZIP is a valid standalone copy, but Save As
+                    # is not a successful retarget unless the source config
+                    # will reopen it.  Keep both in-memory and on-disk config
+                    # pointing at the previous dataset and leave history dirty.
+                    config.zip_file = old_zip_path
+                    logger.exception(
+                        "Saved nuclei to %s but could not update config %s",
+                        saved_path,
+                        config_path,
+                    )
+                    from qtpy.QtWidgets import QMessageBox
+
+                    QMessageBox.critical(
+                        self.viewer.window._qt_window,
+                        "Save As Incomplete",
+                        "The nuclei copy was written, but the dataset config "
+                        "could not be updated. The current Save target was "
+                        "not changed.",
+                    )
+                    return None
+
+        self.manager._config_dirty = False
+        self._save_path_override = saved_path
+        self.edit_history.mark_saved()
+        return saved_path
+
+    def _do_save(self, path: Path, *, mark_saved: bool = True) -> Path | None:
         """Write nuclei_record to *path* and report success/failure."""
+        config_stage: Path | None = None
         try:
-            self.manager.save(path)
+            config = self.manager.config
+            final_commit = None
+            if (
+                mark_saved
+                and config is not None
+                and bool(getattr(self.manager, "_config_dirty", False))
+            ):
+                config_path = Path(config.config_file)
+                if config_path != Path() and config_path.suffix.lower() == ".xml":
+                    config_stage = _stage_config_xml(config, config_path)
+                    staged_path = config_stage
+
+                    def commit_config() -> None:
+                        os.replace(staged_path, config_path)
+
+                    final_commit = commit_config
+
+            if final_commit is None:
+                self.manager.save(path)
+            else:
+                self.manager.save(path, final_commit=final_commit)
+                self.manager._config_dirty = False
+            if self._tracking_results:
+                from ..tracking.persistence import (
+                    tracking_sidecar_path,
+                    write_tracking_proposal,
+                )
+
+                write_tracking_proposal(
+                    tracking_sidecar_path(path),
+                    self._tracking_results[-1],
+                )
+                self._tracking_sidecar_managed = True
+            elif self._tracking_sidecar_managed:
+                from ..tracking.persistence import tracking_sidecar_path
+
+                tracking_sidecar_path(path).unlink(missing_ok=True)
+                self._tracking_sidecar_managed = False
+            if mark_saved:
+                self.edit_history.mark_saved()
             logger.info("Saved nuclei to %s", path)
             return path
         except Exception:
@@ -406,6 +1287,16 @@ class AceTreeApp:
                     f"Could not save to:\n{path}\n\nSee log for details.",
                 )
             return None
+        finally:
+            if config_stage is not None:
+                try:
+                    config_stage.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "Could not remove staged config after Save: %s",
+                        config_stage,
+                        exc_info=True,
+                    )
 
     # ── Screenshot + export ─────────────────────────────────────
 
@@ -508,14 +1399,12 @@ class AceTreeApp:
     def set_plane(self, plane: int) -> None:
         """Navigate to a specific z-plane.
 
-        Manual Z navigation disables auto-tracking (the slice should stop
-        snapping to the selected cell's centroid on time-scrubs) but
-        keeps ``current_cell_name`` set.  Previously we cleared the cell
-        name entirely — which broke Add/Track modes where the user wants
-        to adjust the Z slice to place a new nucleus while still
-        inheriting the selected cell's name as the predecessor.  The
-        selection is only explicitly cleared by clicking empty space,
-        selecting a different cell, or pressing Escape.
+        Manual Z navigation changes the slice at the current timepoint while
+        preserving both the selected cell and follow mode.  The next time
+        navigation therefore resumes at the selected cell's Z centroid.
+        Selection/follow mode is only stopped explicitly, for example by
+        clicking empty space, pressing Deselect/Space, or by a caller setting
+        ``tracking`` to false.
 
         Args:
             plane: 1-based z-plane index.
@@ -525,10 +1414,6 @@ class AceTreeApp:
         if plane == self.current_plane:
             return
         self.current_plane = plane
-        # Preserve current_cell_name so Add/Track modes keep their
-        # predecessor.  Just freeze auto-tracking so scrubbing time next
-        # doesn't yank Z back to the cell's centroid.
-        self.tracking = False
         if self.current_cell_name:
             self.update_display()
         else:
@@ -550,6 +1435,163 @@ class AceTreeApp:
         """Go to the previous z-plane."""
         self.set_plane(self.current_plane - 1)
 
+    def _nucleus_at_anchor(self, anchor: tuple[int, int] | None = None):
+        """Return the raw nucleus at an immutable ``(time, index)`` anchor."""
+        if anchor is None:
+            anchor = self.selection_anchor
+        if anchor is None:
+            return None
+        time, index = anchor
+        t_idx = time - 1
+        n_idx = index - 1
+        nr = self.manager.nuclei_record
+        if not (0 <= t_idx < len(nr)):
+            return None
+        if not (0 <= n_idx < len(nr[t_idx])):
+            return None
+        return nr[t_idx][n_idx]
+
+    def _cell_for_nucleus(self, time: int, nuc):
+        """Resolve the lineage Cell containing *nuc* without using its name."""
+        tree = self.manager.lineage_tree
+        if tree is None:
+            return None
+        if nuc.hash_key:
+            cell = tree.cells_by_hash.get(nuc.hash_key)
+            if cell is not None:
+                return cell
+
+        # Defensive fallback for hand-built trees without nucleus hash keys.
+        for cell in tree.all_cells():
+            if any(t == time and candidate is nuc for t, candidate in cell.nuclei):
+                return cell
+        return None
+
+    def _selection_name(self, time: int, nuc) -> str:
+        """Return the current display name for a physically anchored nucleus."""
+        if not nuc.effective_name:
+            # A bare ``idx=N`` can target an unrelated nucleus after a time
+            # scrub, so raw fallbacks are always time-qualified.
+            return f"idx={time}:{nuc.index}"
+        cell = self._cell_for_nucleus(time, nuc)
+        return cell.name if cell is not None else nuc.effective_name
+
+    def _set_selection_from_nucleus(self, time: int, nuc) -> None:
+        """Select a concrete nucleus and derive its mutable name from it."""
+        old_name = self.current_cell_name
+        self.selection_anchor = (time, nuc.index)
+        self.current_cell_name = self._selection_name(time, nuc)
+        self.tracking = True
+        if self._viewer_integration is not None:
+            if old_name and old_name != self.current_cell_name:
+                self._viewer_integration._shown_labels.discard(old_name)
+            if self.current_cell_name:
+                self._viewer_integration._shown_labels.add(self.current_cell_name)
+
+    def _resolve_selection_after_rebuild(self) -> None:
+        """Re-resolve the selected name from its stable physical anchor."""
+        if self.selection_anchor is None:
+            # Compatibility for callers/tests that still assign the name
+            # directly.  Normal GUI selection paths set the anchor eagerly.
+            if not self.current_cell_name:
+                return
+            cell = self.manager.get_cell(self.current_cell_name)
+            if cell is None:
+                return
+            nuc = cell.get_nucleus_at(self.current_time)
+            if nuc is None and cell.nuclei:
+                anchor_time, nuc = min(
+                    cell.nuclei, key=lambda item: abs(item[0] - self.current_time)
+                )
+            else:
+                anchor_time = self.current_time
+            if nuc is None:
+                return
+            self.selection_anchor = (anchor_time, nuc.index)
+
+        nuc = self._nucleus_at_anchor()
+        if nuc is None or not nuc.is_alive:
+            self.current_cell_name = ""
+            self.selection_anchor = None
+            self.tracking = False
+            return
+
+        anchor_time, _ = self.selection_anchor
+        old_name = self.current_cell_name
+        self.current_cell_name = self._selection_name(anchor_time, nuc)
+        if self._viewer_integration is not None and old_name != self.current_cell_name:
+            if old_name:
+                self._viewer_integration._shown_labels.discard(old_name)
+            if self.current_cell_name:
+                self._viewer_integration._shown_labels.add(self.current_cell_name)
+
+    def get_selected_nucleus(self, time: int | None = None):
+        """Return ``(nucleus, time, index)`` for the stable selection."""
+        target_time = self.current_time if time is None else time
+
+        if self.selection_anchor is None and self.current_cell_name:
+            cell = self.manager.get_cell(self.current_cell_name)
+            if cell is not None:
+                nuc = cell.get_nucleus_at(target_time)
+                if nuc is None and cell.nuclei:
+                    anchor_time, nuc = min(
+                        cell.nuclei,
+                        key=lambda item: abs(item[0] - target_time),
+                    )
+                else:
+                    anchor_time = target_time
+                if nuc is not None:
+                    self.selection_anchor = (anchor_time, nuc.index)
+            elif self.current_cell_name.startswith("idx="):
+                raw = self.current_cell_name[4:]
+                try:
+                    if ":" in raw:
+                        anchor_time, anchor_index = (
+                            int(value) for value in raw.split(":", 1)
+                        )
+                    else:  # qualify legacy in-memory state immediately
+                        anchor_time, anchor_index = target_time, int(raw)
+                    self.selection_anchor = (anchor_time, anchor_index)
+                except ValueError:
+                    return None
+
+        anchor = self.selection_anchor
+        anchor_nuc = self._nucleus_at_anchor(anchor)
+        if anchor is None or anchor_nuc is None:
+            return None
+        anchor_time, _ = anchor
+        if target_time == anchor_time:
+            return anchor_nuc, target_time, anchor_nuc.index
+
+        cell = self._cell_for_nucleus(anchor_time, anchor_nuc)
+        if cell is not None:
+            nuc = cell.get_nucleus_at(target_time)
+            if nuc is not None:
+                return nuc, target_time, nuc.index
+        return None
+
+    def get_selected_cell(self):
+        """Return the physically selected lineage cell.
+
+        Names are intentionally not used when a selection anchor exists:
+        disconnected cells can temporarily share an effective name while a
+        conflict is being corrected.  Name lookup remains only as a legacy
+        bridge for programmatic callers that set ``current_cell_name``
+        directly without selecting a nucleus.
+        """
+        if self.selection_anchor is None:
+            # Qualify legacy name-only state into a physical anchor while the
+            # current tree still provides the lookup context.
+            if self.get_selected_nucleus() is None:
+                return None
+
+        anchor = self.selection_anchor
+        nuc = self._nucleus_at_anchor(anchor)
+        if anchor is None or nuc is None or not nuc.is_alive:
+            return None
+        anchor_time, _ = anchor
+        return self._cell_for_nucleus(anchor_time, nuc)
+
     def select_cell(self, name: str, time: int | None = None) -> None:
         """Select a cell by name, optionally jumping to a specific time.
 
@@ -562,7 +1604,7 @@ class AceTreeApp:
             logger.warning("Cell '%s' not found in lineage tree", name)
             return
 
-        self.current_cell_name = name
+        self.current_cell_name = cell.name
         # Explicitly selecting a cell re-enables follow-mode.  This undoes
         # any prior ↑/↓ Z nudge that disabled tracking, so subsequent
         # time-scrubbing snaps the slice back to the selected cell.
@@ -573,18 +1615,30 @@ class AceTreeApp:
         elif self.current_time < cell.start_time or self.current_time > cell.end_time:
             self.current_time = cell.start_time
 
+        nuc = cell.get_nucleus_at(self.current_time)
+        if nuc is None and cell.nuclei:
+            anchor_time, nuc = min(
+                cell.nuclei, key=lambda item: abs(item[0] - self.current_time)
+            )
+        else:
+            anchor_time = self.current_time
+        self.selection_anchor = (
+            (anchor_time, nuc.index) if nuc is not None else None
+        )
+
         # Track to cell's z-plane
         self._track_cell_at_time()
 
         # Show label for the selected cell
         if self._viewer_integration is not None:
-            self._viewer_integration._shown_labels.add(name)
+            self._viewer_integration._shown_labels.add(self.current_cell_name)
 
         self.update_display()
 
     def deselect_cell(self) -> None:
         """Clear the current cell selection and stop follow-mode."""
         self.current_cell_name = ""
+        self.selection_anchor = None
         self.tracking = False
         self.update_display()
 
@@ -603,16 +1657,15 @@ class AceTreeApp:
             x, y, float(self.current_plane), self.current_time,
             require_hit=True, image_plane=self.current_plane,
         )
-        if nuc and nuc.effective_name:
-            self.select_cell(nuc.effective_name, self.current_time)
-        elif nuc:
+        if nuc:
             # Unnamed nucleus — highlight it and re-enable tracking so
             # subsequent time-scrubbing still snaps Z to follow it (via
             # the predecessor/successor chain fallback in
             # _track_cell_at_time).
-            self.current_cell_name = nuc.effective_name or f"idx={nuc.index}"
-            self.tracking = True
+            self._set_selection_from_nucleus(self.current_time, nuc)
             self.update_display()
+        else:
+            self.deselect_cell()
 
     # ── Relink pick mode (Feature 4) ─────────────────────────────
 
@@ -625,6 +1678,13 @@ class AceTreeApp:
         Args:
             callback: Called with (time: int, nuc: Nucleus) when user picks.
         """
+        # Interaction modes are exclusive.  A relink target click must never
+        # also be interpreted as an Add/Track gesture afterward.
+        self.exit_add_mode()
+        self.exit_placement_mode()
+        if self._edit_panel is not None:
+            self._edit_panel._btn_add.setChecked(False)
+            self._edit_panel._btn_track.setChecked(False)
         self._relink_pick_mode = True
         self._relink_pick_callback = callback
         self._focus_viewer_canvas()
@@ -633,6 +1693,14 @@ class AceTreeApp:
         """Exit pick mode without choosing a target."""
         self._relink_pick_mode = False
         self._relink_pick_callback = None
+
+    def cancel_relink_pick_mode(self) -> None:
+        """Cancel relink and synchronize the panel's pending source state."""
+        self.exit_relink_pick_mode()
+        if self._edit_panel is not None:
+            cancel = getattr(self._edit_panel, "_on_relink_cancelled", None)
+            if cancel is not None:
+                cancel()
 
     def _handle_relink_pick(self, x: float, y: float) -> bool:
         """If in pick mode, handle a right-click as a pick event.
@@ -656,7 +1724,19 @@ class AceTreeApp:
 
     def enter_add_mode(self) -> None:
         """Enter click-to-add mode. Left-click places a nucleus."""
+        switch_from_3d = self._3d_mode
+        if self._relink_pick_mode:
+            self.cancel_relink_pick_mode()
+        self.exit_placement_mode()
+        if self._edit_panel is not None:
+            self._edit_panel._btn_track.setChecked(False)
         self._add_mode = True
+        if switch_from_3d:
+            # A 3D camera ray does not supply an unambiguous Z placement.
+            # Arm Add before switching so the toolbar remains checked when
+            # the 2D view refreshes.
+            self.set_3d_mode(False)
+            self._say("Add placement uses the 2D slice view")
         self._focus_viewer_canvas()
 
     def exit_add_mode(self) -> None:
@@ -677,6 +1757,14 @@ class AceTreeApp:
         """
         if self.viewer is None:
             return
+        if self._3d_mode and self._points_layer is not None:
+            self._make_curated_points_read_only(self._points_layer)
+            try:
+                self.viewer.layers.selection.active = self._points_layer
+            except Exception:
+                pass
+        elif self._viewer_integration is not None:
+            self._viewer_integration._ensure_nuclei_active()
         try:
             qt_viewer = self.viewer.window.qt_viewer  # type: ignore[attr-defined]
         except Exception:
@@ -728,6 +1816,132 @@ class AceTreeApp:
         self._3d_windows.append(win)
         win.show()
 
+    def open_expression_plot_window(self) -> None:
+        """Open an independent, modeless expression plot window."""
+
+        from .expression_plot_window import ExpressionPlotWindow
+
+        self._expression_plot_window_counter += 1
+        parent = None
+        try:
+            parent = self.viewer.window._qt_window if self.viewer is not None else None
+        except (AttributeError, RuntimeError):
+            parent = None
+        window = ExpressionPlotWindow(
+            self,
+            window_number=self._expression_plot_window_counter,
+            parent=parent,
+        )
+        self._expression_plot_windows.append(window)
+        window.show()
+
+    def expression_dataset_repository(self):
+        """Return the application-scoped cross-dataset expression cache."""
+
+        if self._expression_dataset_repository is None:
+            from ..analysis.expression_dataset_repository import (
+                ExpressionDatasetRepository,
+            )
+
+            self._expression_dataset_repository = ExpressionDatasetRepository()
+        return self._expression_dataset_repository
+
+    def open_expression_comparison_window(self) -> None:
+        """Open an independent multi-dataset expression comparison window."""
+
+        from .expression_comparison_window import ExpressionComparisonWindow
+
+        self._expression_comparison_window_counter += 1
+        parent = None
+        try:
+            parent = self.viewer.window._qt_window if self.viewer is not None else None
+        except (AttributeError, RuntimeError):
+            parent = None
+        window = ExpressionComparisonWindow(
+            self,
+            repository=self.expression_dataset_repository(),
+            window_number=self._expression_comparison_window_counter,
+            parent=parent,
+        )
+        self._expression_comparison_windows.append(window)
+        window.show()
+
+    def open_expression_comparison_result_window(self, path=None):
+        """Open a portable comparison in a new source-independent window.
+
+        Loading and validating the result happens before any window-list or
+        counter mutation. Legacy v1 captures remain fixed and never instantiate
+        the shared repository. Full v2 measurement sets use the application
+        repository only for optional XML attachment/recomputation; all plotting,
+        retargeting, and export remain available from embedded caches offline.
+        """
+
+        from qtpy.QtWidgets import QFileDialog, QMessageBox
+
+        from ..analysis.expression_comparison_result import (
+            EXPRESSION_COMPARISON_RESULT_SUFFIX,
+            load_expression_comparison_result,
+        )
+        from .expression_comparison_window import ExpressionComparisonWindow
+
+        parent = None
+        try:
+            parent = self.viewer.window._qt_window if self.viewer is not None else None
+        except (AttributeError, RuntimeError):
+            parent = None
+        if path is None:
+            path, _selected_filter = QFileDialog.getOpenFileName(
+                parent,
+                "Open expression measurement set or legacy result",
+                "",
+                "AceTree expression sets and results (*.aceexpr)",
+            )
+            if not path:
+                return None
+        try:
+            result = load_expression_comparison_result(path)
+            next_number = self._expression_comparison_window_counter + 1
+            window = ExpressionComparisonWindow(
+                self,
+                # Schema-v2 measurement sets remain source-independent for
+                # plotting, but they may be extended with new XML datasets or
+                # refreshed from attached sources.  Give those windows the
+                # same application-scoped repository as live comparisons.
+                # Legacy schema-v1 captures intentionally keep the old fixed,
+                # repository-free boundary.
+                repository=(
+                    self.expression_dataset_repository()
+                    if result.measurement_caches
+                    else None
+                ),
+                result=result,
+                result_path=str(path),
+                window_number=next_number,
+                parent=parent,
+            )
+        except Exception as error:  # noqa: BLE001 - malformed files fail closed
+            logger.exception("Could not open portable expression result %s", path)
+            QMessageBox.warning(
+                parent,
+                "Cannot open expression result",
+                f"The selected {EXPRESSION_COMPARISON_RESULT_SUFFIX} file could not "
+                f"be opened:\n{error}",
+            )
+            return None
+        self._expression_comparison_window_counter = next_number
+        self._expression_comparison_windows.append(window)
+        window.show()
+        return window
+
+    def _shutdown_expression_dataset_repository(self) -> None:
+        repository = self._expression_dataset_repository
+        self._expression_dataset_repository = None
+        if repository is not None:
+            try:
+                repository.close()
+            except Exception:  # noqa: BLE001 - best-effort application teardown
+                logger.exception("Could not close expression dataset repository")
+
     def _say(self, msg: str) -> None:
         """Set a one-line status message on the napari status bar.
 
@@ -740,33 +1954,77 @@ class AceTreeApp:
         except Exception:
             pass
 
-    def _division_suffixes(
+    def _suggest_division_names_safe(
         self,
+        parent,
         first_pos: tuple[float, float, float],
         new_pos: tuple[float, float, float],
         time: int,
-    ) -> tuple[str, str]:
-        """Decide which of two division daughters gets the ``"a"`` suffix.
+    ):
+        """Ask the naming model for daughter names, or safely defer to it.
 
-        Projects both daughter positions onto the embryo's AP direction
-        (resolved via ``NucleiManager.get_ap_direction_at``) and returns
-        ``(suffix_for_first_daughter, suffix_for_new_daughter)`` — always
-        one ``"a"`` and one ``"p"``.
-
-        Falls back to Java AceTree's "+X is anterior" convention when no
-        axis information is available — see ``get_ap_direction_at``'s
-        4-source priority order.
+        Older managers do not expose the suggestion API.  In that case the
+        click still creates the division with unlocked daughter identities;
+        the normal post-edit naming pass determines their names.  No GUI-level
+        axis or ``a/p`` assumption is made.
         """
-        import numpy as np
-        ap = self.manager.get_ap_direction_at(time)
-        p1 = np.asarray(first_pos, dtype=float)
-        p2 = np.asarray(new_pos, dtype=float)
-        proj_first = float(np.dot(p1, ap))
-        proj_new = float(np.dot(p2, ap))
-        # Larger projection along AP = more anterior = "a".
-        if proj_first >= proj_new:
-            return ("a", "p")  # first_daughter is anterior
-        return ("p", "a")
+        suggest = getattr(self.manager, "suggest_division_names", None)
+        if suggest is None:
+            return None
+        try:
+            result = suggest(parent, first_pos, new_pos, time)
+        except Exception:
+            logger.exception("Division-name suggestion failed at t=%d", time)
+            return None
+        if not result or not result.first_name or not result.second_name:
+            return None
+        if result.first_name == result.second_name:
+            logger.warning(
+                "Ignoring non-distinct division-name suggestion '%s' at t=%d",
+                result.first_name, time,
+            )
+            return None
+        return result
+
+    @staticmethod
+    def _reconcile_division_suggestion_with_first_override(
+        suggestion,
+        first_daughter,
+        inherited_parent_lock: bool,
+    ):
+        """Make a preview/commit agree with a preserved first-daughter lock.
+
+        A cell may have been explicitly named while it still looked like a
+        continuation.  Once a second successor proves that it is a daughter,
+        preserve a genuine daughter override and swap the automatic pair when
+        that override names the proposed second daughter.  Inherited parent
+        locks are cleared by the existing division workflow and do not reorder
+        the pair.
+        """
+        if suggestion is None or inherited_parent_lock:
+            return suggestion
+        locked_name = (first_daughter.assigned_id or "").strip()
+        if not locked_name or locked_name == suggestion.first_name:
+            return suggestion
+        if locked_name == suggestion.second_name:
+            return replace(
+                suggestion,
+                first_name=suggestion.second_name,
+                second_name=suggestion.first_name,
+                confidence=0.0,
+                source="forced first-daughter override",
+                ambiguous=True,
+            )
+        # A foreign curator name is an intentional exception to the canonical
+        # pair.  Report the actual effective first name instead of previewing a
+        # placement that the assigned_id will immediately mask.
+        return replace(
+            suggestion,
+            first_name=locked_name,
+            confidence=0.0,
+            source="forced first-daughter override",
+            ambiguous=True,
+        )
 
     def _handle_add_click(self, x: float, y: float) -> bool:
         """Handle a left-click in add mode — place a nucleus at (x, y).
@@ -777,15 +2035,19 @@ class AceTreeApp:
         from the parent cell's last nucleus when available.
 
         Manual-division handling: if the click is the second successor of
-        the selected parent, the two daughters are named via the AP axis
-        (``parent_name + "a"`` / ``parent_name + "p"``) so they don't
-        collide on the parent's forced name.  Triple-successor attempts
-        are rejected with a status message.
+        the selected parent, daughter identities are suggested by the same
+        lineage/geometry model used by automated naming. Triple-successor
+        attempts are rejected with a status message.
         """
         if not self._add_mode:
             return False
 
-        from ..editing.commands import AddNucleus, RelinkWithInterpolation, RenameCell
+        from ..editing.commands import (
+            AddNucleus,
+            CompositeCommand,
+            RelinkWithInterpolation,
+            SetCellNameState,
+        )
         from ..editing.validators import validate_add_nucleus
 
         ix, iy = round(x), round(y)
@@ -807,9 +2069,12 @@ class AceTreeApp:
         # happens — matching the "Predecessor: <name>" hint shown in the
         # status bar.  Also advance ``current_time`` so the user sees the
         # newly placed nucleus.
-        parent_name = self.current_cell_name
-        if parent_name:
-            cell = self.manager.get_cell(parent_name)
+        cell = self.get_selected_cell()
+        parent_name = cell.name if cell is not None else None
+        if self.selection_anchor is not None and cell is None:
+            self._say("Selected nucleus is no longer in the lineage tree")
+            return False
+        if cell is not None:
             # Guard against phantom cells (created by the dummy-ancestor
             # scaffold in lineage.py or by _track_cell_at_time following a
             # phantom child).  If current_cell_name maps to a cell with no
@@ -896,13 +2161,10 @@ class AceTreeApp:
                             parent_nuc = nr[t_idx_p][p_idx_p]
                             parent_nuc_ref = parent_nuc
                             size = parent_nuc.size  # inherit diameter
-                            # Plant the parent's effective name as a forced
-                            # name (assigned_id) on the new nucleus.  The
-                            # naming pipeline's _propagate_assigned_ids
-                            # will sweep it backward/forward through the
-                            # continuation chain, unifying the cell across
-                            # timepoints.
-                            assigned_id = parent_nuc.effective_name or parent_name
+                            # Only a genuinely manual parent override is
+                            # inherited.  Copying an automatic effective name
+                            # into assigned_id would silently lock the chain.
+                            assigned_id = parent_nuc.assigned_id
                             if gap == 1:
                                 predecessor = parent_end_index
 
@@ -918,12 +2180,12 @@ class AceTreeApp:
             logger.info("Add rejected: %s", errors[0])
             return False
 
-        # Manual-division detection.  If the click is making the parent
-        # dividing (parent already has exactly one successor and we're
-        # about to add a second), rename both daughters with "a"/"p"
-        # suffixes along the embryo's AP axis so they don't collide on
-        # the parent's forced name.
-        rename_first_to: str | None = None
+        # Daughter names come from the manager's lineage/axis-aware naming
+        # model and remain automatic identities.  A first daughter that
+        # inherited its parent's manual lock while it looked like a
+        # continuation is unlocked once the second daughter proves division.
+        first_name_state = None
+        first_idx = -1
         if (parent_nuc_ref is not None
                 and predecessor != -1
                 and parent_nuc_ref.successor1 != -1
@@ -934,35 +2196,58 @@ class AceTreeApp:
             first_idx = parent_nuc_ref.successor1 - 1
             if 0 <= t_idx < len(nr) and 0 <= first_idx < len(nr[t_idx]):
                 first_daughter = nr[t_idx][first_idx]
-                base = parent_nuc_ref.effective_name or parent_name
                 first_pos = (float(first_daughter.x), float(first_daughter.y),
                              float(first_daughter.z))
                 new_pos = (float(ix), float(iy), float(iz))
-                first_sfx, new_sfx = self._division_suffixes(
-                    first_pos, new_pos, time,
+                suggestion = self._suggest_division_names_safe(
+                    parent_nuc_ref, first_pos, new_pos, time,
                 )
-                # Only rename the first daughter if it's still carrying
-                # the naive "extension" name (same as the parent).  If
-                # the user has customised its name, respect that and
-                # only suffix the new daughter's name.
-                if first_daughter.assigned_id == base:
-                    rename_first_to = base + first_sfx
-                assigned_id = base + new_sfx
-                identity = assigned_id
-                self._say(
-                    f"Division: {base} \u2192 "
-                    f"{rename_first_to or first_daughter.effective_name} + {assigned_id}",
+                inherited_parent_lock = bool(
+                    parent_nuc_ref.assigned_id
+                    and first_daughter.assigned_id == parent_nuc_ref.assigned_id
+                )
+                suggestion = self._reconcile_division_suggestion_with_first_override(
+                    suggestion,
+                    first_daughter,
+                    inherited_parent_lock,
+                )
+                # The second successor proves that the apparent continuation
+                # is a daughter.  Always clear its inherited automatic parent
+                # identity when geometry is unavailable; otherwise a partial
+                # dataset would retain a duplicate parent name on one branch.
+                first_name_state = SetCellNameState(
+                    time=time,
+                    index=first_idx + 1,
+                    identity=suggestion.first_name if suggestion else "",
+                    assigned_id=(
+                        "" if inherited_parent_lock
+                        else first_daughter.assigned_id
+                    ),
                 )
 
-        # Issue AddNucleus FIRST so that set_all_successors marks the
-        # parent as dividing (successor2 set to the new nucleus).  The
-        # subsequent RenameCell on the first daughter then walks only
-        # that daughter's continuation chain — the backward walk stops
-        # at the now-dividing parent instead of bleeding into the
-        # parent cell.  Issuing them in the opposite order would
-        # rename the parent too (it and the first daughter were a
-        # single continuation chain until the second daughter landed).
-        cmd = AddNucleus(
+                assigned_id = ""
+                identity = suggestion.second_name if suggestion else ""
+                if suggestion:
+                    self._say(
+                        f"Division: {suggestion.first_name} + "
+                        f"{suggestion.second_name} "
+                        f"({suggestion.axis_label}, {suggestion.source}, "
+                        f"confidence {suggestion.confidence:.0%})"
+                    )
+                else:
+                    self._say(
+                        "Division created; biological daughter ordering is "
+                        "deferred until a complete body frame is available"
+                    )
+
+        # Issue AddNucleus first so the parent becomes a division before the
+        # first daughter's continuation component is updated.  Reversing the
+        # order would let SetCellNameState walk backward into the parent.
+        nr = self.edit_history.nuclei_record
+        predicted_index = (
+            len(nr[time - 1]) + 1 if 0 <= time - 1 < len(nr) else 1
+        )
+        add_cmd = AddNucleus(
             time=time,
             x=ix,
             y=iy,
@@ -972,14 +2257,9 @@ class AceTreeApp:
             predecessor=predecessor,
             assigned_id=assigned_id,
         )
-        self.edit_history.do(cmd)
-        new_index = cmd._added_index
-
-        if rename_first_to is not None:
-            self.edit_history.do(
-                RenameCell(time=time, index=first_idx + 1,
-                           new_name=rename_first_to),
-            )
+        commands = [add_cmd]
+        if first_name_state is not None:
+            commands.append(first_name_state)
 
         # Fill gap > 1 with interpolation
         if (parent_name and parent_end_time is not None
@@ -990,9 +2270,15 @@ class AceTreeApp:
                     start_time=parent_end_time,
                     start_index=parent_end_index,
                     end_time=time,
-                    end_index=new_index,
+                    end_index=predicted_index,
                 )
-                self.edit_history.do(interp_cmd)
+                commands.append(interp_cmd)
+
+        command = CompositeCommand(
+            commands=commands,
+            label=f"Add nucleus at t={time}",
+        )
+        self._run_edit_action(self.edit_history.do, command)
 
         return True
 
@@ -1009,15 +2295,33 @@ class AceTreeApp:
             parent_name: Name of parent cell to extend, or None for root mode.
             default_size: Default nucleus diameter for placed nuclei.
         """
+        switch_from_3d = self._3d_mode
+        if self._relink_pick_mode:
+            self.cancel_relink_pick_mode()
+        self.exit_add_mode()
+        if self._edit_panel is not None:
+            self._edit_panel._btn_add.setChecked(False)
         self._placement_mode = True
         self._placement_parent_name = parent_name
+        self._placement_parent_anchor = None
+        if parent_name is not None:
+            selected_cell = self.get_selected_cell()
+            if selected_cell is not None and selected_cell.name == parent_name:
+                self._placement_parent_anchor = self.selection_anchor
         self._placement_default_size = default_size
+        if switch_from_3d:
+            # Track placement needs the current image plane for a definite Z.
+            # Arm Track before switching so its checked state survives the
+            # 2D-view refresh and the next right click works immediately.
+            self.set_3d_mode(False)
+            self._say("Manual Track placement uses the 2D slice view")
         self._focus_viewer_canvas()
 
     def exit_placement_mode(self) -> None:
         """Exit click-to-place mode."""
         self._placement_mode = False
         self._placement_parent_name = None
+        self._placement_parent_anchor = None
 
     def _handle_placement_click(self, x: float, y: float) -> bool:
         """Handle a click in placement mode — create a nucleus at (x, y).
@@ -1027,7 +2331,12 @@ class AceTreeApp:
         if not self._placement_mode:
             return False
 
-        from ..editing.commands import AddNucleus, RelinkWithInterpolation, RenameCell
+        from ..editing.commands import (
+            AddNucleus,
+            CompositeCommand,
+            RelinkWithInterpolation,
+            SetCellNameState,
+        )
         from ..editing.validators import validate_add_nucleus
 
         ix, iy = round(x), round(y)
@@ -1045,30 +2354,74 @@ class AceTreeApp:
         parent_end_time = None
         parent_end_index = None
         if parent_name:
-            cell = self.manager.get_cell(parent_name)
+            cell = None
+            if self._placement_parent_anchor is not None:
+                anchor = self._placement_parent_anchor
+                anchor_nuc = self._nucleus_at_anchor(anchor)
+                if anchor_nuc is not None and anchor_nuc.is_alive:
+                    cell = self._cell_for_nucleus(anchor[0], anchor_nuc)
+                if cell is None:
+                    self._say("Tracked parent is no longer in the lineage tree")
+                    return False
+            else:
+                # Compatibility for programmatic callers that start Track
+                # with a name but no GUI selection.
+                cell = self.manager.get_cell(parent_name)
             if cell is not None:
-                parent_end_time = cell.end_time
-                gap = time - parent_end_time
-                if gap <= 0:
-                    # Same or earlier timepoint as parent — can't link;
-                    # treat as independent root placement (e.g. single-frame
-                    # annotation where multiple nuclei exist at t=1).
-                    parent_name = None
+                parent_name = cell.name
+                existing_here = cell.get_nucleus_at(time)
+                is_division_click = False
+                if (existing_here is not None
+                        and time > 1
+                        and existing_here.predecessor != NILLI):
+                    # As in Add mode, a placement during the cell's lifetime
+                    # is a retroactive division.  At the terminal frame a far
+                    # click is a division while a close click is left as an
+                    # unlinked placement (Track extensions should be made at
+                    # a later frame selected by the user).
+                    if time < cell.end_time:
+                        is_division_click = True
+                    else:
+                        dx_ex = ix - existing_here.x
+                        dy_ex = iy - existing_here.y
+                        is_division_click = (
+                            dx_ex * dx_ex + dy_ex * dy_ex
+                            > float(existing_here.size) ** 2
+                        )
+
+                if is_division_click:
+                    parent_end_time = time - 1
+                    parent_end_index = existing_here.predecessor
+                    nr = self.manager.nuclei_record
+                    t0 = parent_end_time - 1
+                    j0 = parent_end_index - 1
+                    if 0 <= t0 < len(nr) and 0 <= j0 < len(nr[t0]):
+                        parent_nuc_ref = nr[t0][j0]
+                        size = parent_nuc_ref.size
+                        identity = parent_nuc_ref.effective_name
+                        assigned_id = parent_nuc_ref.assigned_id
+                        predecessor = parent_end_index
+                    else:
+                        parent_name = None
                 else:
-                    identity = parent_name
-                    parent_nuc = cell.get_nucleus_at(parent_end_time)
-                    if parent_nuc is not None:
-                        parent_nuc_ref = parent_nuc
-                        parent_end_index = parent_nuc.index
-                        size = parent_nuc.size  # inherit diameter
-                        # Plant parent's effective name as a forced name on
-                        # the new nucleus so the naming pipeline propagates
-                        # it through the continuation chain (see bug 3).
-                        assigned_id = parent_nuc.effective_name or parent_name
-                        if gap == 1:
-                            # Adjacent: set predecessor directly
-                            predecessor = parent_end_index
-                        # gap > 1 handled after AddNucleus via interpolation
+                    parent_end_time = cell.end_time
+                    gap = time - parent_end_time
+                    if gap <= 0:
+                        # Same/earlier close placement is independent (for
+                        # example, adding multiple roots at the first frame).
+                        parent_name = None
+                    else:
+                        identity = parent_name
+                        parent_nuc = cell.get_nucleus_at(parent_end_time)
+                        if parent_nuc is not None:
+                            parent_nuc_ref = parent_nuc
+                            parent_end_index = parent_nuc.index
+                            size = parent_nuc.size  # inherit diameter
+                            assigned_id = parent_nuc.assigned_id
+                            if gap == 1:
+                                # Adjacent: set predecessor directly
+                                predecessor = parent_end_index
+                            # gap > 1 handled after AddNucleus via interpolation
 
         # Validate BEFORE creating the command — reject triple-successor
         # attempts with a status message instead of silently letting
@@ -1081,11 +2434,9 @@ class AceTreeApp:
             logger.info("Placement rejected: %s", errors[0])
             return False
 
-        # Manual-division detection (mirrors _handle_add_click).  If the
-        # new nucleus is the second successor of the parent, rename the
-        # first daughter and the new daughter with axis-aware "a"/"p"
-        # suffixes so they don't collide on the parent's forced name.
-        rename_first_to: str | None = None
+        # Manual-division detection mirrors Add mode and delegates all
+        # biological name choice to the manager.
+        first_name_state = None
         first_idx = -1
         if (parent_nuc_ref is not None
                 and predecessor != NILLI
@@ -1096,25 +2447,52 @@ class AceTreeApp:
             first_idx = parent_nuc_ref.successor1 - 1
             if 0 <= t_idx < len(nr) and 0 <= first_idx < len(nr[t_idx]):
                 first_daughter = nr[t_idx][first_idx]
-                base = parent_nuc_ref.effective_name or parent_name
                 first_pos = (float(first_daughter.x), float(first_daughter.y),
                              float(first_daughter.z))
                 new_pos = (float(ix), float(iy), float(iz))
-                first_sfx, new_sfx = self._division_suffixes(
-                    first_pos, new_pos, time,
+                suggestion = self._suggest_division_names_safe(
+                    parent_nuc_ref, first_pos, new_pos, time,
                 )
-                if first_daughter.assigned_id == base:
-                    rename_first_to = base + first_sfx
-                assigned_id = base + new_sfx
-                identity = assigned_id
-                self._say(
-                    f"Division: {base} \u2192 "
-                    f"{rename_first_to or first_daughter.effective_name} + {assigned_id}",
+                inherited_parent_lock = bool(
+                    parent_nuc_ref.assigned_id
+                    and first_daughter.assigned_id == parent_nuc_ref.assigned_id
                 )
+                suggestion = self._reconcile_division_suggestion_with_first_override(
+                    suggestion,
+                    first_daughter,
+                    inherited_parent_lock,
+                )
+                first_name_state = SetCellNameState(
+                    time=time,
+                    index=first_idx + 1,
+                    identity=suggestion.first_name if suggestion else "",
+                    assigned_id=(
+                        "" if inherited_parent_lock
+                        else first_daughter.assigned_id
+                    ),
+                )
+                assigned_id = ""
+                identity = suggestion.second_name if suggestion else ""
+                if suggestion:
+                    self._say(
+                        f"Division: {suggestion.first_name} + "
+                        f"{suggestion.second_name} "
+                        f"({suggestion.axis_label}, {suggestion.source}, "
+                        f"confidence {suggestion.confidence:.0%})"
+                    )
+                else:
+                    self._say(
+                        "Division created; biological daughter ordering is "
+                        "deferred until a complete body frame is available"
+                    )
 
-        # AddNucleus first, RenameCell second — see _handle_add_click for
-        # why the ordering matters (parent-vs-daughter continuation chain).
-        cmd = AddNucleus(
+        # AddNucleus first, SetCellNameState second — see
+        # _handle_add_click for why the structural ordering matters.
+        nr = self.edit_history.nuclei_record
+        predicted_index = (
+            len(nr[time - 1]) + 1 if 0 <= time - 1 < len(nr) else 1
+        )
+        add_cmd = AddNucleus(
             time=time,
             x=ix,
             y=iy,
@@ -1124,14 +2502,9 @@ class AceTreeApp:
             predecessor=predecessor,
             assigned_id=assigned_id,
         )
-        self.edit_history.do(cmd)
-        new_index = cmd._added_index
-
-        if rename_first_to is not None:
-            self.edit_history.do(
-                RenameCell(time=time, index=first_idx + 1,
-                           new_name=rename_first_to),
-            )
+        commands = [add_cmd]
+        if first_name_state is not None:
+            commands.append(first_name_state)
 
         # Handle gap > 1 with interpolation
         if (parent_name and parent_end_time is not None
@@ -1142,29 +2515,103 @@ class AceTreeApp:
                     start_time=parent_end_time,
                     start_index=parent_end_index,
                     end_time=time,
-                    end_index=new_index,
+                    end_index=predicted_index,
                 )
-                self.edit_history.do(interp_cmd)
+                commands.append(interp_cmd)
+
+        command = CompositeCommand(
+            commands=commands,
+            label=f"Track nucleus at t={time}",
+        )
+        self._run_edit_action(self.edit_history.do, command)
 
         # Mode continuation
         if parent_name is None:
             # Root mode: exit after single placement
             self.exit_placement_mode()
+            if self._edit_panel is not None:
+                self._edit_panel.refresh()
         # else: stay in placement mode for continued tracking
 
         return True
 
     # ── 3D view toggle ─────────────────────────────────────────────
 
+    def stack_z_from_plane(self, plane: float) -> float:
+        """Translate AceTree's absolute Z-plane coordinate to stack-local Z."""
+
+        config = self.manager.config
+        plane_start = config.plane_start if config is not None else 1
+        return float(plane) - float(plane_start)
+
+    def physical_to_stack_coordinates(
+        self,
+        x_um: float,
+        y_um: float,
+        z_um: float,
+    ) -> tuple[float, float, float]:
+        """Return napari ``(z, y, x)`` coordinates for a physical position."""
+
+        config = self.manager.config
+        if config is None:
+            return float(z_um), float(y_um), float(x_um)
+        return (
+            float(z_um) / config.z_res,
+            float(y_um) / config.xy_res,
+            float(x_um) / config.xy_res,
+        )
+
     def toggle_3d(self) -> None:
         """Toggle between 2D slice view and 3D volume view."""
+        self.set_3d_mode(not self._3d_mode)
+
+    def set_3d_mode(self, enabled: bool) -> None:
+        """Idempotently synchronize AceTree and napari display modes."""
+
         if self.viewer is None:
+            self._3d_mode = False
             return
-        self._3d_mode = not self._3d_mode
-        if self._3d_mode:
-            self._enter_3d()
-        else:
-            self._exit_3d()
+        enabled = bool(enabled)
+        if enabled and (self._add_mode or self._placement_mode):
+            # Manual placement requires a definite image plane. Do not carry
+            # an armed 2D click mode into 3D, where the same buttons would be
+            # interpreted as label/camera interactions.
+            self.exit_add_mode()
+            self.exit_placement_mode()
+            if self._edit_panel is not None:
+                try:
+                    self._edit_panel._btn_add.setChecked(False)
+                    self._edit_panel._btn_track.setChecked(False)
+                except Exception:
+                    pass
+            self._say(
+                "Exited Add/Manual Track because placement uses the 2D slice view"
+            )
+        if enabled == self._3d_mode:
+            expected = 3 if enabled else 2
+            if int(getattr(self.viewer.dims, "ndisplay", expected)) == expected:
+                return
+        self._3d_mode = enabled
+        self._changing_ndisplay = True
+        try:
+            if enabled:
+                self._enter_3d()
+            else:
+                self._exit_3d()
+        finally:
+            self._changing_ndisplay = False
+        if self._player_controls is not None:
+            self._player_controls.refresh()
+
+    def _on_native_ndisplay_changed(self, event) -> None:
+        """Route napari's built-in 2D/3D button through AceTree setup."""
+
+        if self._changing_ndisplay:
+            return
+        value = int(getattr(event, "value", getattr(self.viewer.dims, "ndisplay", 2)))
+        desired = value == 3
+        if desired != self._3d_mode:
+            self.set_3d_mode(desired)
 
     def _enter_3d(self) -> None:
         """Switch to 3D volume rendering with nucleus spheres."""
@@ -1198,12 +2645,18 @@ class AceTreeApp:
                 self._viewer_integration._division_line_layer.visible = False
             if self._viewer_integration._trails_layer:
                 self._viewer_integration._trails_layer.visible = False
+            if self._viewer_integration._tracking_preview_spots_layer:
+                self._viewer_integration._tracking_preview_spots_layer.visible = False
+            if self._viewer_integration._tracking_preview_links_layer:
+                self._viewer_integration._tracking_preview_links_layer.visible = False
 
         # Build 3D Points layer for nuclei
         self._update_3d_points()
 
         # Switch viewer to 3D
         self.viewer.dims.ndisplay = 3
+        if self._viewer_integration:
+            self._viewer_integration.refresh_tracking_preview()
 
     def _exit_3d(self) -> None:
         """Switch back to 2D slice view."""
@@ -1241,6 +2694,7 @@ class AceTreeApp:
                 self._viewer_integration._division_line_layer.visible = True
             if self._viewer_integration._trails_layer:
                 self._viewer_integration._trails_layer.visible = True
+            self._viewer_integration.refresh_tracking_preview()
 
         # Reload 2D plane
         self.update_display()
@@ -1252,6 +2706,18 @@ class AceTreeApp:
 
         nuclei = self.manager.alive_nuclei_at(self.current_time)
         z_scale = self.manager.z_pix_res
+        selection_resolver = getattr(self, "get_selected_nucleus", None)
+        resolved_selection = (
+            selection_resolver(self.current_time)
+            if callable(selection_resolver)
+            else None
+        )
+        selected_nucleus = (
+            resolved_selection[0]
+            if resolved_selection is not None
+            and resolved_selection[1] == self.current_time
+            else None
+        )
 
         coords = []
         sizes = []
@@ -1259,7 +2725,7 @@ class AceTreeApp:
 
         for nuc in nuclei:
             # Points coords in (z, y, x) — z in pixel units, scaled by layer
-            coords.append([nuc.z, nuc.y, nuc.x])
+            coords.append([self.stack_z_from_plane(nuc.z), nuc.y, nuc.x])
             sizes.append(nuc.size)
             names_list.append(nuc.effective_name or f"Nuc{nuc.index}")
 
@@ -1268,15 +2734,28 @@ class AceTreeApp:
             colors = [
                 list(c) for c in self.color_engine.colors_for_frame(
                     nuclei, self.manager, self.current_time,
-                    selected_name=self.current_cell_name,
+                    # Forced names need not be unique while a conflict is
+                    # being corrected. Highlight the physically anchored
+                    # nucleus below instead of every matching name.
+                    selected_name="",
                 )
             ]
+            selected_color = list(
+                getattr(
+                    self.color_engine,
+                    "selected_color",
+                    (1.0, 1.0, 1.0, 1.0),
+                )
+            )
+            for i, nuc in enumerate(nuclei):
+                if nuc is selected_nucleus:
+                    colors[i] = selected_color
         else:
             # Editing mode — status-based palette
             colors = []
             for nuc in nuclei:
                 name = nuc.effective_name or ""
-                if name == self.current_cell_name and name:
+                if nuc is selected_nucleus:
                     colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
                 elif name.startswith("Nuc"):
                     colors.append([1.0, 0.6, 0.15, 0.8])  # Orange — unnamed
@@ -1287,7 +2766,29 @@ class AceTreeApp:
 
         if not coords:
             if self._points_layer is not None:
-                self._points_layer.data = np.empty((0, 3))
+                try:
+                    completed = replace_points_layer(
+                        self._points_layer,
+                        data=np.empty((0, 3)),
+                        size=np.empty(0),
+                        face_color=np.empty((0, 4)),
+                        features={
+                            "name": [],
+                            "acetree_time": [],
+                            "acetree_index": [],
+                        },
+                    )
+                    if not completed:
+                        raise RuntimeError(
+                            "Centroid marker redraw failed; the previous "
+                            "complete marker set was restored"
+                        )
+                finally:
+                    self._make_curated_points_read_only(self._points_layer)
+            # Trails are a separate native layer.  They still need to be
+            # cleared when the current frame contains no live nuclei;
+            # otherwise positions from the previous frame remain visible.
+            self._update_3d_trail()
             return
 
         coords_arr = np.array(coords)
@@ -1302,9 +2803,17 @@ class AceTreeApp:
                 display_names.append(n)
             else:
                 display_names.append("")
+        point_features = {
+            "name": display_names,
+            "acetree_time": [self.current_time] * len(nuclei),
+            "acetree_index": [nuc.index for nuc in nuclei],
+        }
 
         if self._points_layer is None:
-            self._points_layer = self.viewer.add_points(
+            # Create once, then lock the returned layer. Retrying a broad
+            # TypeError with different kwargs can duplicate a layer if napari
+            # partially completed the first constructor call.
+            layer = self.viewer.add_points(
                 coords_arr,
                 size=sizes_arr,
                 face_color=colors_arr,
@@ -1312,23 +2821,63 @@ class AceTreeApp:
                 name="Nuclei 3D",
                 scale=(z_scale, 1.0, 1.0),
                 opacity=0.7,
+                features=point_features,
             )
-            self._points_layer.features = {"name": display_names}
-            self._points_layer.text = {
-                "string": "{name}",
-                "color": "white",
-                "size": 10,
-            }
-            # Click callback for 3D selection
-            self._points_layer.mouse_drag_callbacks.append(self._on_3d_click)
+            self._points_layer = layer
+            configure_curated_points_layer(
+                layer,
+                callback=self._on_3d_click,
+                lock=self._make_curated_points_read_only,
+            )
         else:
-            self._points_layer.data = coords_arr
-            self._points_layer.size = sizes_arr
-            self._points_layer.face_color = colors_arr
-            self._points_layer.features = {"name": display_names}
+            # Retry text/callback setup before replacing marker state. A
+            # transient failure during initial creation must not leave this
+            # layer permanently non-interactive.
+            configure_curated_points_layer(
+                self._points_layer,
+                callback=self._on_3d_click,
+                lock=self._make_curated_points_read_only,
+            )
+            try:
+                completed = replace_points_layer(
+                    self._points_layer,
+                    data=coords_arr,
+                    size=sizes_arr,
+                    face_color=colors_arr,
+                    features=point_features,
+                )
+                if not completed:
+                    raise RuntimeError(
+                        "Centroid marker redraw failed; the previous "
+                        "complete marker set was restored"
+                    )
+            finally:
+                self._make_curated_points_read_only(self._points_layer)
+
+        # ``Nuclei 3D`` is a projection of the curated record, not an editing
+        # surface.  Keep custom click/label callbacks, but prevent napari's
+        # native point add/move/delete modes from creating marker-only edits.
+        self._make_curated_points_read_only(self._points_layer)
 
         # Ghost trail in 3D
         self._update_3d_trail()
+
+    @staticmethod
+    def _make_curated_points_read_only(layer) -> None:
+        """Lock a curated 3D marker layer without removing click callbacks."""
+
+        try:
+            layer.editable = False
+        except Exception:
+            pass
+        try:
+            layer.selected_data = set()
+        except Exception:
+            pass
+        try:
+            layer.mode = "pan_zoom"
+        except Exception:
+            pass
 
     def _update_3d_trail(self) -> None:
         """Update 3D ghost trail points for the selected cell's past positions."""
@@ -1344,7 +2893,7 @@ class AceTreeApp:
                 self._trail_points_layer.data = np.empty((0, 3))
             return
 
-        cell = self.manager.get_cell(cell_name)
+        cell = self.get_selected_cell()
         if cell is None:
             if self._trail_points_layer is not None:
                 self._trail_points_layer.data = np.empty((0, 3))
@@ -1363,7 +2912,7 @@ class AceTreeApp:
                 continue
             age = self.current_time - t
             alpha = max(0.15, 0.6 * (1.0 - age / (trail_len + 1)))
-            coords.append([nuc.z, nuc.y, nuc.x])
+            coords.append([self.stack_z_from_plane(nuc.z), nuc.y, nuc.x])
             sizes.append(nuc.size * 0.6)  # slightly smaller than live nuclei
             colors.append([0.3, 0.8, 1.0, alpha])
 
@@ -1401,8 +2950,9 @@ class AceTreeApp:
 
         Also supports relink pick mode and placement (track) mode in 3D.
 
-        This is a generator callback (yields once) so that napari properly
-        finalises the drag/pan cycle after the click is handled.
+        Picking happens on press, but selection/redraw is queued only after
+        mouse release so a camera drag cannot toggle a label or strand
+        napari's active drag generator.
         """
         if event.type != "mouse_press":
             return
@@ -1419,58 +2969,126 @@ class AceTreeApp:
             dims_displayed=dims_displayed,
             world=True,
         )
-        nuc = None
+        anchor = None
         if idx is not None and isinstance(idx, (int, np.integer)):
-            nuclei = self.manager.alive_nuclei_at(self.current_time)
-            if 0 <= idx < len(nuclei):
-                nuc = nuclei[idx]
-
-        # --- Relink pick mode (any click selects relink target) ---
-        # Defer callback via QTimer so napari finalises the click event
-        # before the modal confirmation dialog opens.
-        if self._relink_pick_mode and self._relink_pick_callback is not None:
-            if nuc is not None:
-                cb = self._relink_pick_callback
-                t = self.current_time
-                self.exit_relink_pick_mode()
-                from qtpy.QtCore import QTimer
-                QTimer.singleShot(0, lambda: cb(t, nuc))
-            yield  # release drag cycle
-            return
+            anchor = point_anchor(layer, int(idx))
+            if anchor is None:
+                # Compatibility with a layer created before anchor features
+                # were introduced; the next redraw will publish them.
+                nuclei = self.manager.alive_nuclei_at(self.current_time)
+                if 0 <= idx < len(nuclei):
+                    anchor = (self.current_time, nuclei[int(idx)].index)
 
         button = event.button  # 1 = left, 2 = right
+        time = self.current_time
+        history = getattr(self, "edit_history", None)
+        change_counter = getattr(history, "change_counter", None)
+        relink_callback = self._relink_pick_callback
+        mode_context = (
+            self._relink_pick_mode,
+            self._add_mode,
+            self._placement_mode,
+        )
 
-        # --- Placement / track mode (right-click places a nucleus) ---
-        # In 3D we cannot reliably determine the (x, y, z) data position
-        # from the click ray, so placement is only supported in 2D.
-        if self._placement_mode and button == 2:
+        if self._relink_pick_mode:
+            intent = "relink"
+        elif self._placement_mode and button == 2:
+            # A ray does not define one unambiguous placement depth.
+            intent = None
+        elif button == 2:
+            intent = "select"
+        else:
+            intent = "label"
+
+        press_pointer = pointer_position(event)
+        dragged = False
+        yield
+        while event.type == "mouse_move":
+            dragged = dragged or passed_drag_threshold(event, press_pointer)
             yield
+        dragged = dragged or passed_drag_threshold(event, press_pointer)
+        if dragged or intent is None:
             return
 
-        if button == 2:
-            # --- Right-click: select cell and show its label ---
-            if nuc is not None:
-                name = nuc.effective_name
-                if name:
-                    self.current_cell_name = name
-                    if self._viewer_integration:
-                        self._viewer_integration._shown_labels.add(name)
-                    self._update_3d_points()
-                    for lw in self._lineage_widgets:
-                        lw.refresh_selection()
-                    if self._lineage_list:
-                        self._lineage_list.refresh_selection()
-        else:
-            # --- Left-click: toggle label for clicked cell ---
-            if nuc is not None and self._viewer_integration:
-                name = nuc.effective_name or f"Nuc{nuc.index}"
-                if name in self._viewer_integration._shown_labels:
-                    self._viewer_integration._shown_labels.discard(name)
-                else:
-                    self._viewer_integration._shown_labels.add(name)
-                self._update_3d_points()
+        from qtpy.QtCore import QTimer
 
-        yield  # release drag cycle
+        QTimer.singleShot(
+            0,
+            lambda: self._apply_deferred_3d_click(
+                layer=layer,
+                intent=intent,
+                anchor=anchor,
+                time=time,
+                change_counter=change_counter,
+                relink_callback=relink_callback,
+                mode_context=mode_context,
+            ),
+        )
+
+    def _apply_deferred_3d_click(
+        self,
+        *,
+        layer,
+        intent: str,
+        anchor: tuple[int, int] | None,
+        time: int,
+        change_counter: int | None,
+        relink_callback,
+        mode_context: tuple[bool, bool, bool],
+    ) -> None:
+        """Apply a stable 3D pick after napari has closed the drag cycle."""
+
+        history = getattr(self, "edit_history", None)
+        if (
+            self._points_layer is not layer
+            or self.current_time != time
+            or getattr(history, "change_counter", None) != change_counter
+            or anchor is None
+            or anchor[0] != time
+        ):
+            return
+        nuc = self._nucleus_at_anchor(anchor)
+        if nuc is None or not nuc.is_alive:
+            return
+
+        if intent == "relink":
+            if (
+                not self._relink_pick_mode
+                or self._relink_pick_callback is not relink_callback
+                or relink_callback is None
+            ):
+                return
+            self.exit_relink_pick_mode()
+            self._run_edit_action(relink_callback, time, nuc)
+            return
+
+        current_modes = (
+            self._relink_pick_mode,
+            self._add_mode,
+            self._placement_mode,
+        )
+        if current_modes != mode_context:
+            return
+
+        if intent == "select":
+            self._set_selection_from_nucleus(time, nuc)
+            if self._viewer_integration:
+                display_name = nuc.effective_name or f"Nuc{nuc.index}"
+                self._viewer_integration._shown_labels.add(display_name)
+            self._update_3d_points()
+            for lineage_widget in self._lineage_widgets:
+                lineage_widget.refresh_selection()
+            if self._lineage_list:
+                self._lineage_list.refresh_selection()
+            return
+
+        if intent == "label" and self._viewer_integration:
+            name = nuc.effective_name or f"Nuc{nuc.index}"
+            if name in self._viewer_integration._shown_labels:
+                self._viewer_integration._shown_labels.discard(name)
+            else:
+                self._viewer_integration._shown_labels.add(name)
+            self._update_3d_points()
 
     # ── Display ───────────────────────────────────────────────────
 
@@ -1478,8 +3096,11 @@ class AceTreeApp:
         """Refresh all visual components for the current state."""
         self._load_image()
 
-        if self._viewer_integration and not self._3d_mode:
-            self._viewer_integration.update_overlays()
+        if self._viewer_integration:
+            if self._3d_mode:
+                self._viewer_integration.refresh_tracking_preview()
+            else:
+                self._viewer_integration.update_overlays()
 
         if self._contrast_tools:
             self._contrast_tools.refresh()
@@ -1489,6 +3110,13 @@ class AceTreeApp:
 
         if self._edit_panel:
             self._edit_panel.refresh()
+
+        if self._global_tracking_dialog is not None:
+            try:
+                self._global_tracking_dialog.sync_document_revision()
+                self._global_tracking_dialog.sync_viewer_position(self.current_time)
+            except RuntimeError:
+                self._global_tracking_dialog = None
 
         for lw in self._lineage_widgets:
             lw.refresh_selection()
@@ -1501,8 +3129,18 @@ class AceTreeApp:
             try:
                 if win.isVisible():
                     win.refresh()
-            except RuntimeError:
-                pass  # window was deleted
+            except RuntimeError as error:
+                # Qt raises RuntimeError when its C++ widget was deleted.
+                # Other RuntimeErrors (including an atomic centroid redraw
+                # rollback) are real refresh failures and must reach the
+                # post-commit warning boundary instead of being hidden.
+                message = str(error).lower()
+                deleted_qt_object = (
+                    "deleted" in message
+                    and ("c/c++ object" in message or "c++ object" in message)
+                )
+                if not deleted_qt_object:
+                    raise
 
     def _update_display_plane_only(self) -> None:
         """Refresh only z-plane-sensitive components (skip lineage tree).
@@ -1529,7 +3167,7 @@ class AceTreeApp:
         if not self.current_cell_name:
             return "No cell selected"
 
-        cell = self.manager.get_cell(self.current_cell_name)
+        cell = self.get_selected_cell()
         if cell is None:
             return f"Cell '{self.current_cell_name}' not in lineage tree"
 
@@ -1590,12 +3228,20 @@ class AceTreeApp:
                 "selected_idx": -1,
             }
 
+        resolved_selection = self.get_selected_nucleus(self.current_time)
+        selected_nucleus = (
+            resolved_selection[0]
+            if resolved_selection is not None
+            and resolved_selection[1] == self.current_time
+            else None
+        )
+
         # Pre-compute visualization-mode colors for the whole frame
         # (batched for efficiency; skipped in editing mode).
         if self._viz_mode:
             viz_colors = self.color_engine.colors_for_frame(
                 nuclei, self.manager, self.current_time,
-                selected_name=self.current_cell_name,
+                selected_name="",
             )
 
         centers = []
@@ -1615,16 +3261,20 @@ class AceTreeApp:
             radii.append(diam / 2.0)
             ename = nuc.effective_name or f"Nuc{nuc.index}"
             names.append(ename)
+            is_selected = nuc is selected_nucleus
 
             if self._viz_mode:
                 # Visualization mode — rule-engine colors
-                r, g, b, a = viz_colors[viz_idx]
+                if is_selected:
+                    r, g, b, a = self.color_engine.selected_color
+                else:
+                    r, g, b, a = viz_colors[viz_idx]
                 colors.append([r, g, b, a])
-                if ename == self.current_cell_name and ename:
+                if is_selected:
                     selected_idx = len(centers) - 1
             else:
                 # Editing mode — status-based palette
-                if ename == self.current_cell_name and ename:
+                if is_selected:
                     selected_idx = len(centers) - 1
                     colors.append([1.0, 1.0, 1.0, 1.0])  # White — selected
                 elif ename.startswith("Nuc"):
@@ -1715,10 +3365,7 @@ class AceTreeApp:
         keeps the slice snapping to the right Z across time even for cells
         that aren't fully materialised in the lineage tree.
         """
-        if not self.current_cell_name:
-            return
-
-        cell = self.manager.get_cell(self.current_cell_name)
+        cell = self.get_selected_cell()
         if cell is None:
             return
 
@@ -1735,17 +3382,16 @@ class AceTreeApp:
                 (c for c in cell.children if c.nuclei), None
             )
             if real_child is not None:
-                self.current_cell_name = real_child.name
                 cell = real_child
         elif self.current_time < cell.start_time:
             if cell.parent is not None and cell.parent.nuclei:
-                self.current_cell_name = cell.parent.name
                 cell = cell.parent
 
         nuc = cell.get_nucleus_at(self.current_time)
         if nuc is None:
             nuc = self._find_nucleus_via_chain(cell, self.current_time)
         if nuc:
+            self._set_selection_from_nucleus(self.current_time, nuc)
             self.current_plane = max(1, round(nuc.z + NUCZINDEXOFFSET))
 
     def _find_nucleus_via_chain(self, cell, target_time: int):
@@ -1809,11 +3455,31 @@ class AceTreeApp:
     def _on_edit(self) -> None:
         """Callback after any edit command — rebuild tree and refresh display."""
         cmd = self.edit_history.last_command
+        self._last_post_commit_refresh_error = None
+        self._sync_tracking_provenance(cmd)
+        # Expression values are derived from nucleus geometry and topology.
+        # Every committed edit, including undo/redo, advances the concurrency
+        # token so plots cannot export values measured against an older state.
+        self.manager.mark_data_edited(
+            (id(self.edit_history), self.edit_history.change_counter)
+        )
         is_structural = cmd is None or cmd.structural
 
         if is_structural:
+            # A few programmatic callers still set ``current_cell_name``
+            # directly.  Capture its physical nucleus while the pre-edit tree
+            # is still available; after a rename/process that old lookup name
+            # may no longer exist.  Normal click/select paths are already
+            # anchored, so this cannot redirect them to the command target.
+            if self.selection_anchor is None and self.current_cell_name:
+                self.get_selected_nucleus()
             self.manager.set_all_successors()
             self.manager.process()
+
+            # Naming and topology edits can change every display name.  The
+            # physical selection anchor, rather than the command being undone,
+            # determines which cell remains selected.
+            self._resolve_selection_after_rebuild()
 
             # Structural edits (relink, kill, add) change the lineage tree,
             # so all lineage tree panels need a full rebuild.
@@ -1822,40 +3488,92 @@ class AceTreeApp:
             if self._lineage_list:
                 self._lineage_list.rebuild()
 
-        # After a rename or swap (or undo of either), the tracked cell's
-        # name in the tree may have changed.  Read the nucleus's current
-        # effective_name to get the correct post-rebuild name (works for
-        # both execute and undo paths).
-        from ..editing.commands import RenameCell, SwapCellNames
+        # Rendering is an observer of the curated data, not part of the edit
+        # transaction. At this point the command, revision, provenance, and
+        # undo entry have already committed. Do not let a napari/layer redraw
+        # failure masquerade as a rejected edit (which can leave a cyan draft
+        # drawn over the newly curated marker).
+        for window in tuple(self._expression_plot_windows):
+            try:
+                window.on_document_edited(structural=is_structural)
+            except RuntimeError as error:
+                if "deleted" in str(error).lower():
+                    try:
+                        self._expression_plot_windows.remove(window)
+                    except ValueError:
+                        pass
+                else:
+                    self._report_committed_refresh_failure(cmd, error)
+            except Exception as error:  # noqa: BLE001 - isolate optional observer
+                self._report_committed_refresh_failure(cmd, error)
+        try:
+            self.update_display()
+        except Exception as error:
+            self._report_committed_refresh_failure(cmd, error)
 
-        anchors: list[tuple[int, int]] = []
-        if isinstance(cmd, RenameCell):
-            anchors = [(cmd.time, cmd.index)]
-        elif isinstance(cmd, SwapCellNames):
-            anchors = [(cmd.time_a, cmd.index_a), (cmd.time_b, cmd.index_b)]
+    def _report_committed_refresh_failure(self, command, error: Exception) -> None:
+        """Surface an observer failure without changing committed edit state."""
 
-        if anchors and self.current_cell_name:
-            nr = self.manager.nuclei_record
-            old_name = self.current_cell_name
-            for t_1based, idx_1based in anchors:
-                t_idx = t_1based - 1
-                n_idx = idx_1based - 1
-                if 0 <= t_idx < len(nr) and 0 <= n_idx < len(nr[t_idx]):
-                    nuc = nr[t_idx][n_idx]
-                    new_name = nuc.effective_name
-                    if new_name and self.manager.get_cell(new_name) is not None:
-                        # For a swap, pick whichever anchor's new name is
-                        # actually in the tree.  If neither matches the
-                        # old tracked name, the first valid anchor wins.
-                        self.current_cell_name = new_name
-                        if self._viewer_integration is not None:
-                            self._viewer_integration._shown_labels.discard(old_name)
-                            self._viewer_integration._shown_labels.add(new_name)
-                        break
+        self._last_post_commit_refresh_error = error
+        description = command.description if command is not None else "Edit"
+        message = (
+            "The data change is committed and undoable, but the display "
+            "refresh failed. Refresh the view before continuing."
+        )
+        logger.warning(
+            "Post-commit refresh failed after %s",
+            description,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        self._say(message)
 
-        self.update_display()
+    def _run_edit_action(self, action, *args, **kwargs):
+        """Run a GUI edit action without replaying a committed command.
+
+        A PostCommitCallbackError means the data and undo entry already
+        exist. Retrying the action would create duplicate nuclei or links;
+        only rebuild/redraw observers are safe to retry.
+        """
+
+        try:
+            return action(*args, **kwargs)
+        except PostCommitCallbackError as error:
+            command = error.command
+            self._report_committed_refresh_failure(
+                command,
+                error.__cause__ or error,
+            )
+            try:
+                self.edit_history.retry_post_commit(error)
+            except Exception as retry_error:
+                self._report_committed_refresh_failure(command, retry_error)
+            # Undo/redo normally return the affected command. Preserve that
+            # contract so the UI reports the operation that already committed.
+            return command
 
     # ── Multi-panel lineage management ──────────────────────────
+
+    def _sync_tracking_provenance(self, command) -> None:
+        """Keep the saved proposal aligned with tracking-command undo/redo."""
+        if (
+            command is None
+            or command.__class__.__name__ != "ApplyTrackingProposal"
+            or not command.__class__.__module__.endswith(".tracking.integration")
+        ):
+            return
+        try:
+            command.detection_mapping
+            applied = True
+        except RuntimeError:
+            applied = False
+        present = any(item is command.result for item in self._tracking_results)
+        if applied and not present:
+            self._tracking_results.append(command.result)
+        elif not applied and present:
+            self._tracking_results = [
+                item for item in self._tracking_results
+                if item is not command.result
+            ]
 
     def add_lineage_panel(
         self,
@@ -1923,7 +3641,14 @@ class AceTreeApp:
                 window_menu = action.menu()
                 break
         if window_menu is None:
-            return
+            # Napari/app-model menu labels and construction order can vary by
+            # version or locale.  These are primary feature entry points, so
+            # never silently omit them merely because no discoverable Window
+            # menu existed yet.
+            logger.warning(
+                "No existing Window menu was discoverable; creating an AceTree one"
+            )
+            window_menu = menu_bar.addMenu("&Window")
 
         window_menu.addSeparator()
         # Add toggle actions for each of our dock widgets.
@@ -1938,12 +3663,40 @@ class AceTreeApp:
             toggle.setText(dock_widget.name)
             window_menu.addAction(toggle)
 
-        # Add "New Lineage Panel" action
+        # Add independent visualization-window actions.
         window_menu.addSeparator()
         from qtpy.QtWidgets import QAction
         add_panel_action = QAction("New Lineage Panel...", qt_window)
         add_panel_action.triggered.connect(self._on_new_lineage_panel)
         window_menu.addAction(add_panel_action)
+        expression_action = QAction("New Expression Plot…", qt_window)
+        expression_action.setStatusTip(
+            "Plot one or more cells from any measured image channel"
+        )
+        expression_action.triggered.connect(self.open_expression_plot_window)
+        window_menu.addAction(expression_action)
+        comparison_action = QAction("New Expression Comparison…", qt_window)
+        comparison_action.setStatusTip(
+            "Compare one cell across multiple AceTree XML datasets"
+        )
+        comparison_action.triggered.connect(self.open_expression_comparison_window)
+        window_menu.addAction(comparison_action)
+        open_comparison_result_action = QAction(
+            "Open Expression Measurement Set / Result…", qt_window
+        )
+        open_comparison_result_action.setStatusTip(
+            "Open an offline .aceexpr full measurement set or legacy fixed comparison"
+        )
+        open_comparison_result_action.triggered.connect(
+            lambda _checked=False: self.open_expression_comparison_result_window()
+        )
+        window_menu.addAction(open_comparison_result_action)
+        self._panel_menu_actions = {
+            "new_lineage": add_panel_action,
+            "new_expression_plot": expression_action,
+            "new_expression_comparison": comparison_action,
+            "open_expression_result": open_comparison_result_action,
+        }
 
     def _on_new_lineage_panel(self) -> None:
         """Show config dialog and create a new lineage panel."""
@@ -1970,6 +3723,106 @@ class AceTreeApp:
                 expr_max=config["expr_max"],
                 cmap_name=config["cmap_name"],
             )
+
+    def _add_tracking_menu_actions(self) -> None:
+        """Add stable, plain-language tracking entry points to the menu bar."""
+
+        if self.viewer is None or self._edit_panel is None:
+            return
+        try:
+            qt_window = self.viewer.window._qt_window
+            menu_bar = qt_window.menuBar()
+        except Exception:
+            return
+
+        tracking_menu = None
+        for action in menu_bar.actions():
+            if action.menu() and action.text().lower().replace("&", "") == "tracking":
+                tracking_menu = action.menu()
+                break
+        if tracking_menu is None:
+            tracking_menu = menu_bar.addMenu("&Tracking")
+
+        from qtpy.QtWidgets import QAction
+
+        manual_action = QAction("Manual Track / Place Nuclei", qt_window)
+        manual_action.setStatusTip(
+            "Toggle manual right-click placement from the selected cell"
+        )
+        manual_action.triggered.connect(
+            lambda _checked=False: self._edit_panel._btn_track.click()
+        )
+        selected_action = QAction("Track Selected Cell Forward…", qt_window)
+        selected_action.setStatusTip(
+            "Build and review a sparse forward draft; divisions are supported"
+        )
+        selected_action.triggered.connect(
+            lambda _checked=False: self._edit_panel._on_auto_track_forward()
+        )
+        whole_action = QAction("Track Whole Movie…", qt_window)
+        whole_action.setStatusTip(
+            "Open reviewed Modern StarryNite, LoG + LAP, DoG + LAP, or advanced "
+            "legacy exact whole-movie tracking"
+        )
+        whole_action.triggered.connect(
+            lambda _checked=False: self._edit_panel._on_global_track()
+        )
+        relink_action = QAction("Relink Selected Cells…", qt_window)
+        relink_action.setStatusTip(
+            "Choose a source and target nucleus and create an undoable link"
+        )
+        relink_action.triggered.connect(
+            lambda _checked=False: self._edit_panel._btn_relink.click()
+        )
+        show_panel_action = QAction("Show Edit & Tracking Tools", qt_window)
+        show_panel_action.setStatusTip(
+            "Reveal the scrollable dock containing all manual and automated tools"
+        )
+        show_panel_action.triggered.connect(
+            lambda _checked=False: self._show_edit_tracking_panel()
+        )
+
+        tracking_menu.addAction(manual_action)
+        tracking_menu.addAction(selected_action)
+        tracking_menu.addAction(whole_action)
+        tracking_menu.addSeparator()
+        tracking_menu.addAction(relink_action)
+        tracking_menu.addSeparator()
+        tracking_menu.addAction(show_panel_action)
+        self._tracking_menu = tracking_menu
+        self._tracking_menu_actions = {
+            "manual": manual_action,
+            "selected_forward": selected_action,
+            "whole_movie": whole_action,
+            "relink": relink_action,
+            "show_panel": show_panel_action,
+        }
+
+    def _show_edit_tracking_panel(self) -> None:
+        """Reveal the Edit & Tracking dock without relying on the Window menu."""
+
+        if self.viewer is None or self._edit_panel is None:
+            return
+        try:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                dock_wrappers = tuple(self.viewer.window._dock_widgets.values())
+            dock = next(
+                (
+                    candidate
+                    for candidate in dock_wrappers
+                    if candidate.widget() is self._edit_panel
+                ),
+                None,
+            )
+            if dock is not None:
+                dock.setVisible(True)
+                dock.raise_()
+            self._edit_panel.setVisible(True)
+        except (AttributeError, RuntimeError):
+            logger.debug("Could not reveal the Edit & Tracking Tools dock")
 
     def _add_file_menu_actions(self) -> None:
         """Add a 'Measure…' action under the File menu.
@@ -2035,6 +3888,7 @@ class AceTreeApp:
             return
         values = dlg.get_values()
         at_channel: int = values["at_channel"]
+        self.current_expression_channel = at_channel
         output_dir: Path = values["output_dir"]
         correction_method: str = values.get("correction_method", "global")
 
@@ -2050,12 +3904,16 @@ class AceTreeApp:
         progress.setMinimumDuration(0)
         progress.setValue(0)
 
+        completed_steps = 0
+
         def progress_cb(c_idx: int, n_ch: int, t_1based: int, n_tp: int) -> bool:
-            step = c_idx * n_tp + t_1based
-            progress.setValue(step)
+            nonlocal completed_steps
+            completed_steps += 1
+            progress.setValue(min(total_steps, completed_steps))
             progress.setLabelText(
-                f"Measuring channel {c_idx + 1}/{n_ch}, "
-                f"timepoint {t_1based}/{n_tp}…"
+                "Reading movie once for all channels "
+                f"(selected correction: {correction_method}; "
+                f"{completed_steps}/{total_steps})…"
             )
             QApplication.processEvents()
             return not progress.wasCanceled()
@@ -2095,6 +3953,20 @@ class AceTreeApp:
             except Exception:
                 logger.exception("Failed to rebuild lineage widget")
 
+        for window in tuple(self._expression_plot_windows):
+            try:
+                window.on_measurements_updated()
+            except RuntimeError as error:
+                if "deleted" in str(error).lower():
+                    try:
+                        self._expression_plot_windows.remove(window)
+                    except ValueError:
+                        pass
+                else:
+                    logger.exception("Failed to refresh expression plot window")
+            except Exception:  # noqa: BLE001 - completed Measure remains successful
+                logger.exception("Failed to refresh expression plot window")
+
         msg = (
             f"Measured {len(written)} channel(s); "
             f"wrote CSV(s) to {output_dir}"
@@ -2121,29 +3993,11 @@ class AceTreeApp:
         """
         _say = self._say
 
-        if not self.current_cell_name:
-            _say("No nucleus selected to delete")
-            return
-
-        index: int | None = None
-
-        # Path 1: real named cell in the lineage tree
-        cell = self.manager.get_cell(self.current_cell_name)
-        if cell is not None:
-            nuc = cell.get_nucleus_at(self.current_time)
-            if nuc is not None:
-                index = nuc.index
-
-        # Path 2: raw idx= fallback (unnamed manually-added nucleus)
-        if index is None and self.current_cell_name.startswith("idx="):
-            try:
-                index = int(self.current_cell_name[4:])
-            except ValueError:
-                index = None
-
-        if index is None:
+        selected = self.get_selected_nucleus()
+        if selected is None:
             _say(f"Cannot locate '{self.current_cell_name}' at t={self.current_time}")
             return
+        nuc, _, index = selected
 
         from ..editing.validators import validate_remove_nucleus
 
@@ -2160,7 +4014,7 @@ class AceTreeApp:
         deleted_at_time = self.current_time
 
         cmd = RemoveNucleus(time=deleted_at_time, index=index)
-        self.edit_history.do(cmd)
+        self._run_edit_action(self.edit_history.do, cmd)
         _say(f"Removed nucleus at t={deleted_at_time} idx={index}")
 
         # Chain-delete UX: step the view back one timepoint and re-anchor
@@ -2208,10 +4062,18 @@ class AceTreeApp:
             self.exit_placement_mode()
             changed = True
         if self._relink_pick_mode:
-            self.exit_relink_pick_mode()
+            self.cancel_relink_pick_mode()
             changed = True
 
         if self._edit_panel:
+            dialog = getattr(self._edit_panel, "_auto_track_dialog", None)
+            if dialog is not None:
+                try:
+                    if dialog.isVisible():
+                        dialog.reject()
+                        changed = True
+                except RuntimeError:
+                    self._edit_panel._auto_track_dialog = None
             try:
                 self._edit_panel._btn_add.setChecked(False)
             except Exception:
@@ -2222,6 +4084,15 @@ class AceTreeApp:
                 pass
             if changed:
                 self._edit_panel._status_label.setText("Exited mode")
+
+        dialog = self._global_tracking_dialog
+        if dialog is not None:
+            try:
+                if dialog.isVisible():
+                    dialog.reject()
+                    changed = True
+            except RuntimeError:
+                self._global_tracking_dialog = None
 
     def _bind_keys(self) -> None:
         """Bind keyboard shortcuts to the napari viewer."""
@@ -2254,11 +4125,11 @@ class AceTreeApp:
 
         @self.viewer.bind_key("Control-z")
         def _undo(viewer):
-            self.edit_history.undo()
+            self._run_edit_action(self.edit_history.undo)
 
         @self.viewer.bind_key("Control-y")
         def _redo(viewer):
-            self.edit_history.redo()
+            self._run_edit_action(self.edit_history.redo)
 
         @self.viewer.bind_key("3")
         def _toggle_3d(viewer):

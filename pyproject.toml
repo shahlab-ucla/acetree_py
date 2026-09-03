@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "acetree-py"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python reimplementation of AceTree for C. elegans embryogenesis visualization"
 readme = {text = "Python reimplementation of AceTree for C. elegans embryogenesis visualization.", content-type = "text/plain"}
 requires-python = ">=3.10"
@@ -31,9 +31,13 @@ all = ["acetree-py[gui,dev]"]
 
 [project.scripts]
 acetree-py = "acetree_py.__main__:app"
+acetree-starrynite-export-model = "acetree_py.tracking.starrynite.oracle.model_export:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "matlab_oracle: requires a local MATLAB installation and StarryNite checkout",
+]
 
 [tool.ruff]
 line-length = 100

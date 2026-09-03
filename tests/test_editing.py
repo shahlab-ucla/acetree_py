@@ -12,23 +12,29 @@ import pytest
 from acetree_py.core.nucleus import NILLI, Nucleus
 from acetree_py.editing.commands import (
     AddNucleus,
+    ClearNameOverride,
+    CompositeCommand,
     KillCell,
+    LockCellName,
     MoveNucleus,
     RelinkNucleus,
     RelinkWithInterpolation,
     RemoveNucleus,
     RenameCell,
     ResurrectCell,
+    SetBodyAxes,
+    SetCellNameState,
     SwapCellNames,
     _add_successor,
     _get_nucleus,
     _remove_successor,
     _walk_continuation_chain,
 )
-from acetree_py.editing.history import EditHistory
+from acetree_py.editing.history import EditHistory, PostCommitCallbackError
 from acetree_py.editing.validators import (
     validate_add_nucleus,
     validate_kill_cell,
+    validate_lock_cell_name,
     validate_relink,
     validate_relink_interpolation,
     validate_remove_nucleus,
@@ -139,6 +145,61 @@ class TestHelpers:
         assert nuc.successor2 == 3
 
 
+class TestCompositeCommand:
+    def test_execute_and_undo_use_opposite_order(self):
+        record = _simple_record()
+        command = CompositeCommand([
+            MoveNucleus(time=1, index=1, new_x=10),
+            MoveNucleus(time=1, index=1, new_x=20),
+        ], label="Two moves")
+
+        command.execute(record)
+        assert record[0][0].x == 20
+        assert command.structural
+        assert command.description == "Two moves"
+
+        command.undo(record)
+        assert record[0][0].x == 100
+
+    def test_failure_rolls_back_partial_child_and_completed_children(self):
+        class FailingMove(MoveNucleus):
+            def execute(self, nuclei_record):
+                super().execute(nuclei_record)
+                raise RuntimeError("simulated child failure")
+
+        record = _simple_record()
+        command = CompositeCommand([
+            MoveNucleus(time=1, index=1, new_x=10),
+            FailingMove(time=1, index=1, new_x=20),
+        ])
+
+        with pytest.raises(RuntimeError, match="simulated"):
+            command.execute(record)
+
+        assert record[0][0].x == 100
+
+    def test_failure_before_mutation_does_not_undo_uninitialised_child(self):
+        record = _simple_record()
+        original_names = [nuc.identity for nuc in record[0]]
+        command = CompositeCommand([
+            MoveNucleus(time=1, index=1, new_x=10),
+            AddNucleus(
+                time=1,
+                x=50,
+                y=50,
+                z=3.0,
+                identity="invalid,name",
+            ),
+        ])
+
+        with pytest.raises(ValueError, match="commas"):
+            command.execute(record)
+
+        assert record[0][0].x == 100
+        assert len(record[0]) == 2
+        assert [nuc.identity for nuc in record[0]] == original_names
+
+
 # ── AddNucleus tests ────────────────────────────────────────────
 
 
@@ -176,6 +237,22 @@ class TestAddNucleus:
         cmd = AddNucleus(time=2, x=50, y=50, z=3.0, predecessor=1)
         cmd.execute(record)
         assert record[1][2].predecessor == 1
+
+    def test_add_maintains_and_undo_restores_parent_successors(self):
+        parent = _make_nucleus(1, identity="A")
+        record = [[parent], []]
+
+        cmd = AddNucleus(time=2, x=50, y=50, z=3.0, predecessor=1)
+        cmd.execute(record)
+
+        assert parent.successor1 == 1
+        assert parent.successor2 == NILLI
+        assert record[1][0].predecessor == 1
+
+        cmd.undo(record)
+        assert parent.successor1 == NILLI
+        assert parent.successor2 == NILLI
+        assert record[1] == []
 
     def test_description(self):
         cmd = AddNucleus(time=3, x=100, y=200, z=5.0, identity="ABa")
@@ -303,6 +380,9 @@ class TestMoveNucleus:
         assert nuc.z == old_z
         assert nuc.size == old_size
 
+    def test_move_requires_naming_rebuild(self):
+        assert MoveNucleus(time=1, index=1, new_x=50).structural
+
 
 # ── RenameCell tests ─────────────────────────────────────────────
 
@@ -400,6 +480,150 @@ class TestRenameCell:
         assert record[1][0].effective_name == "AB"
         assert record[1][1].effective_name == "P1"
 
+    def test_rename_trims_name(self):
+        record = _simple_record()
+        RenameCell(time=2, index=1, new_name="  MyCell  ").execute(record)
+
+        assert [record[t][0].effective_name for t in range(3)] == [
+            "MyCell", "MyCell", "MyCell",
+        ]
+
+    @pytest.mark.parametrize("unsafe", ["bad,name", "bad\n", "bad\tname"])
+    def test_command_rejects_unsafe_name_before_mutation(self, unsafe):
+        record = _simple_record()
+
+        with pytest.raises(ValueError):
+            RenameCell(time=2, index=1, new_name=unsafe).execute(record)
+
+        assert all(record[t][0].assigned_id == "" for t in range(3))
+
+    def test_same_effective_name_is_true_history_noop(self):
+        record = _simple_record()
+        callbacks = []
+        history = EditHistory(record, on_edit=lambda: callbacks.append(True))
+
+        history.do(RenameCell(time=2, index=1, new_name="  A  "))
+
+        assert history.num_undoable == 0
+        assert not history.modified
+        assert callbacks == []
+        assert all(record[t][0].assigned_id == "" for t in range(3))
+
+
+class TestLockCellName:
+    def test_locks_current_automatic_name_and_undoes_exactly(self):
+        record = _simple_record()
+        record[0][0].identity = "early-auto"
+        record[1][0].identity = "A"
+        record[2][0].identity = "late-auto"
+        old_states = [
+            (record[t][0].identity, record[t][0].assigned_id)
+            for t in range(3)
+        ]
+
+        command = LockCellName(time=2, index=1)
+        command.execute(record)
+
+        assert all(record[t][0].identity == "A" for t in range(3))
+        assert all(record[t][0].assigned_id == "A" for t in range(3))
+        assert not command.is_noop
+
+        command.undo(record)
+        assert [
+            (record[t][0].identity, record[t][0].assigned_id)
+            for t in range(3)
+        ] == old_states
+
+    def test_normalizes_partially_locked_continuation(self):
+        record = _simple_record()
+        record[1][0].assigned_id = "A"
+
+        command = LockCellName(time=2, index=1)
+        command.execute(record)
+
+        assert all(record[t][0].assigned_id == "A" for t in range(3))
+        assert not command.is_noop
+
+    def test_fully_locked_continuation_is_history_noop(self):
+        record = _simple_record()
+        for t in range(3):
+            record[t][0].assigned_id = "A"
+        history = EditHistory(record)
+
+        history.do(LockCellName(time=2, index=1))
+
+        assert history.num_undoable == 0
+        assert not history.modified
+
+    def test_lock_stops_at_division(self):
+        record = _dividing_record()
+
+        LockCellName(time=1, index=1).execute(record)
+
+        assert record[0][0].assigned_id == "P0"
+        assert record[1][0].assigned_id == ""
+        assert record[1][1].assigned_id == ""
+
+    def test_rejects_empty_current_name(self):
+        record = _simple_record()
+        record[1][0].identity = ""
+
+        with pytest.raises(ValueError, match="empty"):
+            LockCellName(time=2, index=1).execute(record)
+
+        assert all(record[t][0].assigned_id == "" for t in range(3))
+
+
+class TestCellNameStateCommands:
+    def test_clear_override_is_cell_scoped_and_undoable(self):
+        record = _simple_record()
+        old_states = []
+        for t in range(3):
+            record[t][0].identity = f"auto-{t}"
+            record[t][0].assigned_id = "ForcedA"
+            record[t][1].assigned_id = "ForcedB"
+            old_states.append((record[t][0].identity, record[t][0].assigned_id))
+
+        command = ClearNameOverride(time=2, index=1)
+        command.execute(record)
+
+        assert [record[t][0].identity for t in range(3)] == [
+            "auto-0", "auto-1", "auto-2",
+        ]
+        assert all(record[t][0].assigned_id == "" for t in range(3))
+        assert all(record[t][1].assigned_id == "ForcedB" for t in range(3))
+
+        command.undo(record)
+        assert [
+            (record[t][0].identity, record[t][0].assigned_id)
+            for t in range(3)
+        ] == old_states
+
+    def test_set_name_state_snapshots_full_chain(self):
+        record = _simple_record()
+        old_states = []
+        for t in range(3):
+            record[t][0].identity = f"old-{t}"
+            record[t][0].assigned_id = "old-forced" if t == 1 else ""
+            old_states.append((record[t][0].identity, record[t][0].assigned_id))
+
+        command = SetCellNameState(
+            time=2,
+            index=1,
+            identity="ABa",
+            assigned_id="ManualABa",
+        )
+        command.execute(record)
+
+        assert all(record[t][0].identity == "ABa" for t in range(3))
+        assert all(record[t][0].assigned_id == "ManualABa" for t in range(3))
+
+        command.undo(record)
+        assert [
+            (record[t][0].identity, record[t][0].assigned_id)
+            for t in range(3)
+        ] == old_states
+
 
 class TestWalkContinuationChain:
     def test_simple_chain(self):
@@ -423,6 +647,20 @@ class TestWalkContinuationChain:
         c1 = _walk_continuation_chain(record, 1, 0)
         c2 = _walk_continuation_chain(record, 2, 0)
         assert c0 == c1 == c2
+
+    def test_chain_stops_at_nonreciprocal_link(self):
+        record = _simple_record()
+        record[1][0].predecessor = NILLI
+
+        assert _walk_continuation_chain(record, 0, 0) == [(0, 0)]
+        assert _walk_continuation_chain(record, 1, 0) == [(1, 0), (2, 0)]
+
+    def test_chain_never_crosses_dead_nucleus(self):
+        record = _simple_record()
+        record[1][0].status = -1
+
+        assert _walk_continuation_chain(record, 0, 0) == [(0, 0)]
+        assert _walk_continuation_chain(record, 1, 0) == []
 
 
 class TestSwapCellNames:
@@ -484,6 +722,15 @@ class TestValidateRenameCell:
         assert errors
         assert "empty" in errors[0].lower()
 
+    @pytest.mark.parametrize("name", ["AB,a", "AB\nline", "AB\rline", "AB\tcell"])
+    def test_persistence_unsafe_name_characters_rejected(self, name):
+        record = _simple_record()
+
+        errors, collision = validate_rename_cell(record, 1, 1, name)
+
+        assert errors
+        assert collision is None
+
     def test_collision_detected(self):
         """Renaming A -> B (already used by another cell) returns collision anchor."""
         record = _simple_record()
@@ -507,6 +754,39 @@ class TestValidateRenameCell:
 
 
 # ── RelinkNucleus tests ─────────────────────────────────────────
+
+
+class TestValidateLockCellName:
+    def test_valid_current_automatic_name(self):
+        record = _simple_record()
+
+        assert validate_lock_cell_name(record, 2, 1) == []
+
+    def test_duplicate_on_disconnected_cell_is_rejected(self):
+        record = _simple_record()
+        for timepoint in record:
+            timepoint[1].identity = "A"
+
+        errors = validate_lock_cell_name(record, 2, 1)
+
+        assert errors
+        assert "another cell" in errors[0]
+        assert "before locking" in errors[0]
+
+    def test_same_name_within_continuation_is_allowed(self):
+        record = _simple_record()
+        record[0][0].assigned_id = "A"
+
+        assert validate_lock_cell_name(record, 2, 1) == []
+
+    def test_empty_current_name_is_rejected(self):
+        record = _simple_record()
+        record[1][0].identity = ""
+
+        errors = validate_lock_cell_name(record, 2, 1)
+
+        assert errors
+        assert "empty" in errors[0].lower()
 
 
 class TestRelinkNucleus:
@@ -604,6 +884,36 @@ class TestKillCell:
             assert record[t_idx][1].identity == "B"
             assert record[t_idx][1].is_alive
 
+    def test_kill_uses_effective_name_and_one_anchored_component(self):
+        record = _simple_record()
+        for timepoint in record:
+            timepoint[0].assigned_id = "Duplicate"
+            timepoint[1].assigned_id = "Duplicate"
+
+        command = KillCell(cell_name="Duplicate", start_time=1)
+        command.execute(record)
+
+        assert all(not record[t][0].is_alive for t in range(3))
+        assert all(record[t][1].is_alive for t in range(3))
+
+        command.undo(record)
+        assert all(record[t][0].assigned_id == "Duplicate" for t in range(3))
+
+    def test_explicit_kill_anchor_disambiguates_duplicate_names(self):
+        record = _simple_record()
+        for timepoint in record:
+            timepoint[0].assigned_id = "Duplicate"
+            timepoint[1].assigned_id = "Duplicate"
+
+        KillCell(
+            cell_name="Duplicate",
+            start_time=1,
+            anchor_index=2,
+        ).execute(record)
+
+        assert all(record[t][0].is_alive for t in range(3))
+        assert all(not record[t][1].is_alive for t in range(3))
+
 
 # ── ResurrectCell tests ──────────────────────────────────────────
 
@@ -622,6 +932,7 @@ class TestResurrectCell:
 
         assert nuc.is_alive
         assert nuc.identity == "A_resurrected"
+        assert nuc.assigned_id == "A_resurrected"
 
         cmd.undo(record)
         assert not nuc.is_alive
@@ -637,6 +948,42 @@ class TestResurrectCell:
         cmd.execute(record)
         assert nuc.is_alive
         assert nuc.identity == "old_name"  # Unchanged when no identity given
+
+    def test_resurrect_rejects_unsafe_name_before_mutation(self):
+        record = [[_make_nucleus(1, status=-1)]]
+
+        with pytest.raises(ValueError):
+            ResurrectCell(time=1, index=1, identity="bad,name").execute(record)
+
+        assert not record[0][0].is_alive
+
+
+class TestSetBodyAxes:
+    def test_execute_and_undo_restore_auxinfo_and_invalidate_naming(self):
+        old_auxinfo = object()
+        old_assigner = object()
+        new_auxinfo = object()
+
+        class Manager:
+            auxinfo = old_auxinfo
+            identity_assigner = old_assigner
+
+            def set_manual_body_axes(self, frame):
+                assert frame == "validated-frame"
+                self.auxinfo = new_auxinfo
+                self.identity_assigner = None
+
+        manager = Manager()
+        command = SetBodyAxes(manager, "validated-frame")
+
+        command.execute([])
+        assert manager.auxinfo is new_auxinfo
+        assert manager.identity_assigner is None
+
+        manager.identity_assigner = object()  # Simulate naming after execute.
+        command.undo([])
+        assert manager.auxinfo is old_auxinfo
+        assert manager.identity_assigner is old_assigner
 
 
 # ── RelinkWithInterpolation tests ────────────────────────────────
@@ -720,6 +1067,32 @@ class TestRelinkWithInterpolation:
 
 
 class TestEditHistory:
+    def test_revision_identifies_do_undo_redo_states(self):
+        record = _simple_record()
+        history = EditHistory(record)
+        initial = history.revision
+
+        history.do(MoveNucleus(time=1, index=1, new_x=10))
+        edited = history.revision
+        assert edited != initial
+
+        history.undo()
+        assert history.revision == initial
+        history.redo()
+        assert history.revision == edited
+
+    def test_change_counter_never_rewinds(self):
+        record = _simple_record()
+        history = EditHistory(record)
+
+        assert history.change_counter == 0
+        history.do(MoveNucleus(time=1, index=1, new_x=10))
+        assert history.change_counter == 1
+        history.undo()
+        assert history.change_counter == 2
+        history.redo()
+        assert history.change_counter == 3
+
     def test_do_and_undo(self):
         record = _simple_record()
         history = EditHistory(record)
@@ -799,6 +1172,165 @@ class TestEditHistory:
         history.redo()
         assert callback_count[0] == 3
 
+    def test_do_callback_failure_reports_committed_state(self):
+        record = _simple_record()
+        command = MoveNucleus(time=1, index=1, new_x=10)
+
+        def fail_after_commit():
+            raise ValueError("display refresh failed")
+
+        history = EditHistory(record, on_edit=fail_after_commit)
+        initial_revision = history.revision
+
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.do(command)
+
+        assert caught.value.operation == "do"
+        assert caught.value.command is command
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert "committed" in str(caught.value).lower()
+        assert record[0][0].x == 10
+        assert history.revision != initial_revision
+        assert history.change_counter == 1
+        assert history.can_undo
+        assert not history.can_redo
+        assert history.modified
+        assert history.last_command is command
+
+    def test_non_structural_callback_can_retry_without_replaying_command(self):
+        record = _simple_record()
+        command = MoveNucleus(time=1, index=1, new_x=10)
+        callback_calls = 0
+
+        def fail_once():
+            nonlocal callback_calls
+            callback_calls += 1
+            if callback_calls == 1:
+                raise RuntimeError("temporary redraw failure")
+
+        history = EditHistory(record, on_edit=fail_once)
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.do(command)
+
+        history.retry_post_commit(caught.value)
+
+        assert callback_calls == 2
+        assert record[0][0].x == 10
+        assert history.num_undoable == 1
+
+    def test_undo_callback_failure_reports_committed_state(self):
+        record = _simple_record()
+        command = MoveNucleus(time=1, index=1, new_x=10)
+        history = EditHistory(record)
+        initial_revision = history.revision
+        history.do(command)
+
+        def fail_after_commit():
+            raise ValueError("display refresh failed")
+
+        history.on_edit = fail_after_commit
+
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.undo()
+
+        assert caught.value.operation == "undo"
+        assert caught.value.command is command
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert record[0][0].x == 100
+        assert history.revision == initial_revision
+        assert history.change_counter == 2
+        assert not history.can_undo
+        assert history.can_redo
+        assert not history.modified
+        assert history.last_command is command
+
+    def test_redo_callback_failure_reports_committed_state(self):
+        record = _simple_record()
+        command = MoveNucleus(time=1, index=1, new_x=10)
+        history = EditHistory(record)
+        history.do(command)
+        edited_revision = history.revision
+        history.undo()
+
+        def fail_after_commit():
+            raise ValueError("display refresh failed")
+
+        history.on_edit = fail_after_commit
+
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.redo()
+
+        assert caught.value.operation == "redo"
+        assert caught.value.command is command
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert record[0][0].x == 10
+        assert history.revision == edited_revision
+        assert history.change_counter == 3
+        assert history.can_undo
+        assert not history.can_redo
+        assert history.modified
+        assert history.last_command is command
+
+    def test_added_row_automatic_name_survives_failed_redo_callback(self):
+        """After-only rows are part of the saved automatic-name boundary."""
+        record = _simple_record()
+
+        def assign_added_name():
+            if len(record[0]) == 3:
+                record[0][2].identity = "AUTO"
+
+        history = EditHistory(record, on_edit=assign_added_name)
+        command = AddNucleus(time=1, x=50, y=50, z=3.0)
+        history.do(command)
+        assert record[0][2].identity == "AUTO"
+        history.undo()
+
+        def fail_before_naming():
+            raise RuntimeError("naming unavailable")
+
+        history.on_edit = fail_before_naming
+        with pytest.raises(PostCommitCallbackError):
+            history.redo()
+
+        assert len(record[0]) == 3
+        assert record[0][2].identity == "AUTO"
+
+    def test_retry_refreshes_full_automatic_name_boundary(self):
+        """A clean retry replaces partial first-pass names transactionally."""
+        record = _simple_record()
+        callback_calls = 0
+
+        def fail_once_then_name():
+            nonlocal callback_calls
+            callback_calls += 1
+            record[0][0].identity = "PARTIAL" if callback_calls == 1 else "A1"
+            if callback_calls == 1:
+                raise RuntimeError("temporary naming failure")
+            record[0][1].identity = "B1"
+            record[0][2].identity = "AUTO"
+
+        history = EditHistory(record, on_edit=fail_once_then_name)
+        command = AddNucleus(time=1, x=50, y=50, z=3.0)
+        with pytest.raises(PostCommitCallbackError) as caught:
+            history.do(command)
+
+        # The failed pass is rolled back before the safe callback retry.
+        assert record[0][0].identity == "A"
+        history.retry_post_commit(caught.value)
+        assert [nucleus.identity for nucleus in record[0]] == ["A1", "B1", "AUTO"]
+
+        history.on_edit = lambda: None
+        history.undo()
+        assert [nucleus.identity for nucleus in record[0]] == ["A", "B"]
+
+        def fail_redo_naming():
+            raise RuntimeError("redo naming unavailable")
+
+        history.on_edit = fail_redo_naming
+        with pytest.raises(PostCommitCallbackError):
+            history.redo()
+        assert [nucleus.identity for nucleus in record[0]] == ["A1", "B1", "AUTO"]
+
     def test_max_history(self):
         record = _simple_record()
         history = EditHistory(record, max_history=3)
@@ -855,6 +1387,42 @@ class TestEditHistory:
 
         history.mark_saved()
         assert not history.modified
+
+    def test_dirty_state_tracks_saved_state_through_undo_redo(self):
+        record = _simple_record()
+        history = EditHistory(record)
+
+        history.do(MoveNucleus(time=1, index=1, new_x=10))
+        history.mark_saved()
+        assert not history.modified
+
+        history.do(MoveNucleus(time=1, index=1, new_x=20))
+        assert history.modified
+        history.undo()
+        assert not history.modified
+        history.redo()
+        assert history.modified
+
+        history.undo()
+        history.undo()
+        assert history.modified
+        history.redo()
+        assert not history.modified
+
+    def test_branch_at_same_depth_as_savepoint_remains_dirty(self):
+        record = _simple_record()
+        history = EditHistory(record)
+
+        history.do(MoveNucleus(time=1, index=1, new_x=10))
+        history.mark_saved()
+        history.undo()
+        assert history.modified
+
+        history.do(MoveNucleus(time=1, index=1, new_x=20))
+
+        assert history.modified
+        assert not history.can_redo
+        assert record[0][0].x == 20
 
     def test_history_log(self):
         record = _simple_record()
@@ -979,10 +1547,39 @@ class TestValidators:
         errors = validate_relink(record, time=2, index=1, new_predecessor=1)
         assert errors == []  # AB is already a child of P0
 
+    def test_validate_relink_blocks_conflicting_forced_continuation(self):
+        parent = _make_nucleus(1, identity="parent")
+        child = _make_nucleus(1, identity="child")
+        parent.assigned_id = "ForcedParent"
+        child.assigned_id = "ForcedChild"
+        record = [[parent], [child]]
+
+        errors = validate_relink(record, time=2, index=1, new_predecessor=1)
+
+        assert any("different forced" in error for error in errors)
+
+    def test_validate_relink_allows_distinct_forced_daughters(self):
+        parent = _make_nucleus(1, identity="parent", successor1=1)
+        first_child = _make_nucleus(1, identity="first", predecessor=1)
+        second_child = _make_nucleus(2, identity="second")
+        parent.assigned_id = "ForcedParent"
+        second_child.assigned_id = "ForcedDaughter"
+        record = [[parent], [first_child, second_child]]
+
+        errors = validate_relink(record, time=2, index=2, new_predecessor=1)
+
+        assert errors == []
+
     def test_validate_kill_valid(self):
         record = _simple_record()
         errors = validate_kill_cell(record, cell_name="A", start_time=1)
         assert errors == []
+
+    def test_validate_kill_uses_effective_name(self):
+        record = _simple_record()
+        record[0][0].assigned_id = "ForcedA"
+
+        assert validate_kill_cell(record, "ForcedA", 1) == []
 
     def test_validate_kill_empty_name(self):
         record = _simple_record()
@@ -1018,3 +1615,14 @@ class TestValidators:
         # P0 at T1 already has 2 successors
         errors = validate_relink_interpolation(record, 1, 1, 2, 1)
         assert any("2 successors" in e for e in errors)
+
+    def test_validate_interpolation_blocks_conflicting_forced_continuation(self):
+        start = _make_nucleus(1, identity="start")
+        end = _make_nucleus(1, identity="end")
+        start.assigned_id = "ForcedStart"
+        end.assigned_id = "ForcedEnd"
+        record = [[start], [], [end]]
+
+        errors = validate_relink_interpolation(record, 1, 1, 3, 1)
+
+        assert any("different forced" in error for error in errors)

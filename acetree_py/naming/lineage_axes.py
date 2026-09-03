@@ -1,8 +1,8 @@
 """Per-timepoint body axis estimation from lineage-based cell centroids.
 
-Computes AP, LR, and DV axes at each timepoint using the spatial
-distribution of cells grouped by their lineage membership (ABa-lineage,
-ABp-lineage, P1-lineage).  Because the axes are re-derived at every
+Computes AP, DV, and LR axes at each timepoint using the spatial
+distribution of cells grouped by their four-cell lineage membership.
+Because the axes are re-derived at every
 timepoint from the *current* cell positions, this approach is inherently
 robust to global embryo rotations around the AP axis that can occur
 during imaging of compressed embryos.
@@ -10,9 +10,8 @@ during imaging of compressed embryos.
 Algorithm:
     1. build_lineage_map() — forward-propagate founder identity through
        successor chains so every nucleus is labelled ABa/ABp/EMS/P2.
-    2. compute_local_axes() — at a given timepoint, collect centroids of
-       ABa-lineage and ABp-lineage cells to derive LR, and centroids of
-       AB-lineage vs P1-lineage cells to derive AP.
+    2. compute_local_axes() — at a given timepoint, use P2→ABa for AP and
+       EMS→ABp for DV, then complete a right-handed frame for LR.
     3. The DivisionCaller uses compute_local_axes() at each division
        event instead of a single fixed rotation.
 """
@@ -32,6 +31,57 @@ LINEAGE_ABa = "ABa"
 LINEAGE_ABp = "ABp"
 LINEAGE_EMS = "EMS"
 LINEAGE_P2 = "P2"
+
+
+def _validated_outgoing_children(
+    current: list[Nucleus],
+    following: list[Nucleus],
+) -> list[tuple[int, ...] | None]:
+    """Return exact reciprocal child indices, or ``None`` for malformed links.
+
+    Lineage centroids are anatomical evidence, so they must not be populated
+    from a partially valid edge set.  Duplicate successor slots and undeclared
+    live reverse claimers invalidate the whole parent's outgoing relationship.
+    """
+    declared_claimers: dict[int, set[int]] = {}
+    for parent_index, parent in enumerate(current):
+        if not parent.is_alive:
+            continue
+        for successor in (parent.successor1, parent.successor2):
+            child_index = successor - 1
+            if successor > 0 and 0 <= child_index < len(following):
+                declared_claimers.setdefault(child_index, set()).add(parent_index)
+
+    result: list[tuple[int, ...] | None] = []
+    for parent_index, parent in enumerate(current):
+        if not parent.is_alive:
+            result.append(None)
+            continue
+
+        raw_successors = (parent.successor1, parent.successor2)
+        positive = tuple(successor for successor in raw_successors if successor > 0)
+        child_indices = tuple(successor - 1 for successor in positive)
+        reverse_live = {
+            child_index
+            for child_index, child in enumerate(following)
+            if child.is_alive and child.predecessor == parent_index + 1
+        }
+
+        malformed = (
+            (parent.successor1 <= 0 < parent.successor2)
+            or len(set(positive)) != len(positive)
+            or any(not (0 <= child_index < len(following)) for child_index in child_indices)
+            or set(child_indices) != reverse_live
+        )
+        if not malformed:
+            malformed = any(
+                not following[child_index].is_alive
+                or following[child_index].predecessor != parent_index + 1
+                or declared_claimers.get(child_index) != {parent_index}
+                for child_index in child_indices
+            )
+        result.append(None if malformed else child_indices)
+    return result
 
 
 def build_lineage_map(
@@ -67,46 +117,60 @@ def build_lineage_map(
     # Seed the founders
     if four_cell_time < n_timepoints:
         nucs = nuclei_record[four_cell_time]
-        if aba_idx < len(nucs):
+        if 0 <= aba_idx < len(nucs) and nucs[aba_idx].is_alive:
             lineage_map[four_cell_time][aba_idx] = LINEAGE_ABa
-        if abp_idx < len(nucs):
+        if 0 <= abp_idx < len(nucs) and nucs[abp_idx].is_alive:
             lineage_map[four_cell_time][abp_idx] = LINEAGE_ABp
-        if ems_idx < len(nucs):
+        if 0 <= ems_idx < len(nucs) and nucs[ems_idx].is_alive:
             lineage_map[four_cell_time][ems_idx] = LINEAGE_EMS
-        if p2_idx < len(nucs):
+        if 0 <= p2_idx < len(nucs) and nucs[p2_idx].is_alive:
             lineage_map[four_cell_time][p2_idx] = LINEAGE_P2
 
     # Back-propagate: from four_cell_time backwards to t=0
     for t in range(four_cell_time, 0, -1):
+        validated_children = _validated_outgoing_children(
+            nuclei_record[t - 1], nuclei_record[t],
+        )
         for j, nuc in enumerate(nuclei_record[t]):
             label = lineage_map[t][j]
-            if not label:
+            if not label or not nuc.is_alive:
                 continue
             pred = nuc.predecessor
             if pred == NILLI:
                 continue
             pred_idx = pred - 1  # 1-based to 0-based
             if 0 <= pred_idx < len(nuclei_record[t - 1]):
+                predecessor = nuclei_record[t - 1][pred_idx]
+                if (
+                    not predecessor.is_alive
+                    or validated_children[pred_idx] is None
+                    or j not in validated_children[pred_idx]
+                ):
+                    continue
                 prev_label = lineage_map[t - 1][pred_idx]
                 if not prev_label:
                     lineage_map[t - 1][pred_idx] = label
 
     # Forward-propagate: from four_cell_time to end via successor chains
     for t in range(four_cell_time, n_timepoints - 1):
+        current = nuclei_record[t]
+        following = nuclei_record[t + 1]
+        validated_children = _validated_outgoing_children(current, following)
         for j, nuc in enumerate(nuclei_record[t]):
             label = lineage_map[t][j]
-            if not label:
+            if not label or not nuc.is_alive:
                 continue
-            # Propagate to successor1
-            if nuc.successor1 > 0:
-                s_idx = nuc.successor1 - 1
-                if 0 <= s_idx < len(nuclei_record[t + 1]):
-                    lineage_map[t + 1][s_idx] = label
-            # Propagate to successor2 (division — both daughters inherit)
-            if nuc.successor2 > 0:
-                s_idx = nuc.successor2 - 1
-                if 0 <= s_idx < len(nuclei_record[t + 1]):
-                    lineage_map[t + 1][s_idx] = label
+            child_indices = validated_children[j]
+            if child_indices is None:
+                continue
+            for child_index in child_indices:
+                existing = lineage_map[t + 1][child_index]
+                if not existing or existing == label:
+                    lineage_map[t + 1][child_index] = label
+                else:
+                    # A conflicting lineage claim is malformed input; keep the
+                    # row out of anatomical centroid inference.
+                    lineage_map[t + 1][child_index] = ""
 
     return lineage_map
 
@@ -126,14 +190,13 @@ def compute_local_axes(
         z_pix_res: Z pixel resolution (z_res / xy_res).
 
     Returns:
-        (ap_vec, lr_vec, dv_vec, lr_quality) as unit vectors in the lab
-        frame plus a quality metric for the LR axis (0-1).  Returns
+        (ap_vec, lr_vec, dv_vec, secondary_quality) as unit vectors in the lab
+        frame plus a quality metric for the DV landmark geometry (0-1).  Returns
         (None, None, None, 0.0) if there aren't enough labelled cells.
 
-        *lr_quality* is the fraction of the ABa-ABp separation that is
-        perpendicular to AP.  When ABa and ABp centroids are nearly
-        collinear with AP this ratio approaches 0 and the LR axis is
-        unreliable.
+        *secondary_quality* is the fraction of the EMS-ABp separation that is
+        perpendicular to AP.  When those centroids are nearly collinear with
+        AP, both the DV estimate and the derived LR axis are unreliable.
     """
     if t >= len(nuclei_record) or t >= len(lineage_map):
         return None, None, None, 0.0
@@ -141,11 +204,12 @@ def compute_local_axes(
     nucs = nuclei_record[t]
     labels = lineage_map[t]
 
-    # Collect positions grouped by lineage
-    ab_positions: list[np.ndarray] = []   # ABa + ABp descendants
-    p1_positions: list[np.ndarray] = []   # EMS + P2 descendants
+    # Collect positions grouped by four-cell lineage.  Keeping the four
+    # landmarks separate matters: ABa/ABp do not form the LR axis.
     aba_positions: list[np.ndarray] = []
     abp_positions: list[np.ndarray] = []
+    ems_positions: list[np.ndarray] = []
+    p2_positions: list[np.ndarray] = []
 
     for j, nuc in enumerate(nucs):
         if nuc.status < 1:
@@ -156,52 +220,50 @@ def compute_local_axes(
         label = labels[j]
         if label == LINEAGE_ABa:
             aba_positions.append(pos)
-            ab_positions.append(pos)
         elif label == LINEAGE_ABp:
             abp_positions.append(pos)
-            ab_positions.append(pos)
-        elif label in (LINEAGE_EMS, LINEAGE_P2):
-            p1_positions.append(pos)
+        elif label == LINEAGE_EMS:
+            ems_positions.append(pos)
+        elif label == LINEAGE_P2:
+            p2_positions.append(pos)
 
-    # Need at least 1 cell in each group.
-    if not ab_positions or not p1_positions:
-        return None, None, None, 0.0
-    if not aba_positions or not abp_positions:
+    # Need at least one descendant in every landmark lineage.
+    if not aba_positions or not abp_positions or not ems_positions or not p2_positions:
         return None, None, None, 0.0
 
-    ab_centroid = np.mean(ab_positions, axis=0)
-    p1_centroid = np.mean(p1_positions, axis=0)
     aba_centroid = np.mean(aba_positions, axis=0)
     abp_centroid = np.mean(abp_positions, axis=0)
+    ems_centroid = np.mean(ems_positions, axis=0)
+    p2_centroid = np.mean(p2_positions, axis=0)
 
-    # AP: posterior (P1) -> anterior (AB)
-    ap_raw = ab_centroid - p1_centroid
+    # AP: posterior (P2 lineage) -> anterior (ABa lineage)
+    ap_raw = aba_centroid - p2_centroid
     ap_norm = np.linalg.norm(ap_raw)
     if ap_norm < 1e-6:
         return None, None, None, 0.0
     ap_vec = ap_raw / ap_norm
 
-    # LR: ABp-centroid -> ABa-centroid, projected perpendicular to AP
-    lr_raw = aba_centroid - abp_centroid
-    lr_total = np.linalg.norm(lr_raw)
-    lr_perp = lr_raw - np.dot(lr_raw, ap_vec) * ap_vec
-    lr_norm = np.linalg.norm(lr_perp)
+    # DV: ventral (EMS lineage) -> dorsal (ABp lineage), projected
+    # perpendicular to AP.  The quality is the usable perpendicular fraction.
+    dv_raw = abp_centroid - ems_centroid
+    dv_total = np.linalg.norm(dv_raw)
+    dv_perp = dv_raw - np.dot(dv_raw, ap_vec) * ap_vec
+    dv_norm = np.linalg.norm(dv_perp)
+    secondary_quality = dv_norm / dv_total if dv_total > 1e-6 else 0.0
 
-    # LR quality: fraction of ABa-ABp separation that is perpendicular to AP
-    lr_quality = lr_norm / lr_total if lr_total > 1e-6 else 0.0
-
-    if lr_norm < 1e-6:
-        return ap_vec, None, None, 0.0
-    lr_vec = lr_perp / lr_norm
-
-    # DV: completes right-handed frame
-    dv_vec = np.cross(ap_vec, lr_vec)
-    dv_norm = np.linalg.norm(dv_vec)
     if dv_norm < 1e-6:
         return ap_vec, None, None, 0.0
-    dv_vec = dv_vec / dv_norm
+    dv_vec = dv_perp / dv_norm
 
-    return ap_vec, lr_vec, dv_vec, lr_quality
+    # LR completes the right-handed anatomical frame.  With the canonical
+    # convention AP=-X and DV=+Y, cross(DV, AP)=+Z (left).
+    lr_vec = np.cross(dv_vec, ap_vec)
+    lr_norm = np.linalg.norm(lr_vec)
+    if lr_norm < 1e-6:
+        return ap_vec, None, None, 0.0
+    lr_vec = lr_vec / lr_norm
+
+    return ap_vec, lr_vec, dv_vec, secondary_quality
 
 
 def check_axis_continuity(

@@ -241,9 +241,12 @@ class ColorRuleEngine:
         self.selected_color: tuple[float, float, float, float] = (
             1.0, 1.0, 1.0, 1.0
         )
-        # Cache: cell name → Cell object (refreshed per frame)
+        # Cache: physical hash/name lookup key → Cell object. A structural
+        # edit can replace the lineage tree without changing the timepoint,
+        # so both frame and tree identity participate in invalidation.
         self._cell_cache: dict[str, Cell | None] = {}
         self._cell_cache_time: int = -1
+        self._cell_cache_tree_id: int | None = None
 
     def set_rules(self, rules: list[ColorRule]) -> None:
         """Replace the active rule list."""
@@ -303,10 +306,7 @@ class ColorRuleEngine:
         Returns:
             List of RGBA tuples, one per nucleus in *nuclei*.
         """
-        # Refresh cell cache if timepoint changed
-        if time != self._cell_cache_time:
-            self._cell_cache.clear()
-            self._cell_cache_time = time
+        self._ensure_cell_cache_context(manager, time)
 
         colors = []
         for nuc in nuclei:
@@ -324,14 +324,40 @@ class ColorRuleEngine:
         time: int,
     ) -> Cell | None:
         """Look up the Cell for a nucleus, with per-frame caching."""
+        self._ensure_cell_cache_context(manager, time)
+        tree = getattr(manager, "lineage_tree", None)
+        hash_key = getattr(nuc, "hash_key", None)
+        if tree is not None and hash_key:
+            cache_key = f"hash:{hash_key}"
+            if cache_key in self._cell_cache:
+                return self._cell_cache[cache_key]
+            cell = tree.cells_by_hash.get(hash_key)
+            if cell is not None:
+                self._cell_cache[cache_key] = cell
+                return cell
+
         ename = nuc.effective_name or ""
         if not ename:
             return None
-        if ename in self._cell_cache:
-            return self._cell_cache[ename]
+        cache_key = f"name:{ename}"
+        if cache_key in self._cell_cache:
+            return self._cell_cache[cache_key]
         cell = manager.get_cell(ename)
-        self._cell_cache[ename] = cell
+        self._cell_cache[cache_key] = cell
         return cell
+
+    def _ensure_cell_cache_context(
+        self,
+        manager: NucleiManager,
+        time: int,
+    ) -> None:
+        """Invalidate cached Cells after time navigation or tree rebuild."""
+
+        tree_id = id(getattr(manager, "lineage_tree", None))
+        if time != self._cell_cache_time or tree_id != self._cell_cache_tree_id:
+            self._cell_cache.clear()
+            self._cell_cache_time = time
+            self._cell_cache_tree_id = tree_id
 
 
 # ── Helpers ──────────────────────────────────────────────────────

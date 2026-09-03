@@ -19,11 +19,11 @@ shared state with no rollback capability.
 from __future__ import annotations
 
 import logging
-import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
-from ..core.nucleus import NILLI, Nucleus
+from ..core.nucleus import NILLI, Nucleus, validate_storable_name
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,136 @@ class EditCommand(ABC):
         """
         return True
 
+    @property
+    def is_noop(self) -> bool:
+        """Whether the most recent execution made no change.
+
+        EditHistory uses this after ``execute`` so an accepted UI action that
+        does not change data does not consume an undo slot, clear redo, mark
+        the document dirty, or trigger an expensive rebuild.
+        """
+        return False
+
+    def _prepare_execute(self) -> None:
+        """Reset failed-execution rollback state before a composite runs us."""
+        self._failed_execute_rollback_ready = False
+
+    def _mark_rollback_ready(self) -> None:
+        """Declare that ``undo`` has enough state to reverse partial work.
+
+        Commands call this after capturing their undo snapshot and immediately
+        before their first mutation.  This distinction matters when validation
+        or lookup fails before mutation: calling the ordinary ``undo`` method
+        in that case can apply uninitialised defaults to unrelated data.
+        """
+        self._failed_execute_rollback_ready = True
+
+    def rollback_failed_execute(self, nuclei_record: NucleiRecord) -> None:
+        """Undo partial work, if execution reached its first mutation."""
+        if not getattr(self, "_failed_execute_rollback_ready", False):
+            return
+        try:
+            self.undo(nuclei_record)
+        finally:
+            self._failed_execute_rollback_ready = False
+
+
+@dataclass
+class CompositeCommand(EditCommand):
+    """Execute several edit commands as one atomic history operation.
+
+    Children execute in the supplied order.  If a child fails, that child is
+    given a chance to roll back any partial work and all previously completed
+    children are undone in reverse order before the original exception is
+    re-raised.  A normal undo also runs in reverse order.
+    """
+
+    commands: list[EditCommand]
+    label: str = ""
+
+    _executed: list[EditCommand] = field(default_factory=list, init=False)
+
+    def execute(self, nuclei_record: NucleiRecord) -> None:
+        self._executed = []
+        self._mark_rollback_ready()
+        for command in self.commands:
+            command._prepare_execute()
+            try:
+                command.execute(nuclei_record)
+            except Exception:
+                # A command may have captured state and mutated data before
+                # failing.  Its undo is therefore part of best-effort atomic
+                # rollback, but rollback failures must not hide the cause.
+                try:
+                    command.rollback_failed_execute(nuclei_record)
+                except Exception:
+                    logger.exception(
+                        "Failed to roll back partially executed command: %s",
+                        command.description,
+                    )
+                for completed in reversed(self._executed):
+                    try:
+                        completed.undo(nuclei_record)
+                    except Exception:
+                        logger.exception(
+                            "Failed to roll back completed command: %s",
+                            completed.description,
+                        )
+                self._executed = []
+                raise
+            self._executed.append(command)
+
+    def undo(self, nuclei_record: NucleiRecord) -> None:
+        for command in reversed(self._executed):
+            command.undo(nuclei_record)
+        self._executed = []
+
+    @property
+    def description(self) -> str:
+        if self.label:
+            return self.label
+        return "; ".join(command.description for command in self.commands)
+
+    @property
+    def structural(self) -> bool:
+        return any(command.structural for command in self.commands)
+
+    @property
+    def is_noop(self) -> bool:
+        return all(command.is_noop for command in self.commands)
+
+
+@dataclass
+class SetBodyAxes(EditCommand):
+    """Install a validated manual body frame as one undoable edit."""
+
+    manager: Any
+    frame: Any
+
+    _old_auxinfo: Any = field(default=None, init=False)
+    _old_identity_assigner: Any = field(default=None, init=False)
+
+    def execute(self, nuclei_record: NucleiRecord) -> None:
+        self._old_auxinfo = self.manager.auxinfo
+        self._old_identity_assigner = self.manager.identity_assigner
+        self._mark_rollback_ready()
+        try:
+            self.manager.set_manual_body_axes(self.frame)
+        except Exception:
+            self.manager.auxinfo = self._old_auxinfo
+            self.manager.identity_assigner = self._old_identity_assigner
+            raise
+
+    def undo(self, nuclei_record: NucleiRecord) -> None:
+        self.manager.auxinfo = self._old_auxinfo
+        self.manager.identity_assigner = self._old_identity_assigner
+
+    @property
+    def description(self) -> str:
+        reference_time = getattr(self.frame, "reference_time", None)
+        suffix = f" at t={reference_time}" if reference_time is not None else ""
+        return f"Set manual body axes{suffix}"
+
 
 @dataclass
 class AddNucleus(EditCommand):
@@ -98,9 +228,24 @@ class AddNucleus(EditCommand):
 
     # Set after execute
     _added_index: int = 0
+    _original_record_len: int = 0
+    _parent_time: int = 0
+    _parent_index: int = 0
+    _old_parent_succ1: int = NILLI
+    _old_parent_succ2: int = NILLI
+    _did_add: bool = field(default=False, init=False)
 
     def execute(self, nuclei_record: NucleiRecord) -> None:
+        for value in (self.identity, self.assigned_id):
+            error = validate_storable_name(value)
+            if error:
+                raise ValueError(error)
         t_idx = self.time - 1
+        self._original_record_len = len(nuclei_record)
+        self._parent_time = 0
+        self._parent_index = 0
+        self._did_add = False
+        self._mark_rollback_ready()
         # Extend record if needed
         while t_idx >= len(nuclei_record):
             nuclei_record.append([])
@@ -120,15 +265,43 @@ class AddNucleus(EditCommand):
             predecessor=self.predecessor,
         )
         nuclei_list.append(nuc)
+        self._did_add = True
+
+        # Maintain the reciprocal link immediately.  Waiting for a global
+        # successor rebuild leaves composite gestures and validation looking
+        # at a transient one-way lineage.
+        if self.predecessor != NILLI and self.time >= 2:
+            parent = _get_nucleus_safe(
+                nuclei_record, self.time - 1, self.predecessor
+            )
+            if parent is not None:
+                self._parent_time = self.time - 1
+                self._parent_index = self.predecessor
+                self._old_parent_succ1 = parent.successor1
+                self._old_parent_succ2 = parent.successor2
+                _add_successor(parent, self._added_index)
         logger.info("Added nucleus at t=%d idx=%d pos=(%d,%d,%.1f) assigned_id=%r",
                      self.time, self._added_index, self.x, self.y, self.z,
                      self.assigned_id)
 
     def undo(self, nuclei_record: NucleiRecord) -> None:
         t_idx = self.time - 1
-        if t_idx < len(nuclei_record) and nuclei_record[t_idx]:
+        if self._parent_index:
+            parent = _get_nucleus_safe(
+                nuclei_record, self._parent_time, self._parent_index
+            )
+            if parent is not None:
+                parent.successor1 = self._old_parent_succ1
+                parent.successor2 = self._old_parent_succ2
+        if self._did_add and t_idx < len(nuclei_record) and nuclei_record[t_idx]:
             nuclei_record[t_idx].pop()
             logger.info("Undid add nucleus at t=%d", self.time)
+        while (
+            len(nuclei_record) > self._original_record_len
+            and not nuclei_record[-1]
+        ):
+            nuclei_record.pop()
+        self._did_add = False
 
     @property
     def description(self) -> str:
@@ -161,6 +334,7 @@ class RemoveNucleus(EditCommand):
         self._old_identity = nuc.identity
         self._old_assigned_id = nuc.assigned_id
 
+        self._mark_rollback_ready()
         nuc.status = -1
         nuc.identity = ""
         nuc.assigned_id = ""
@@ -206,6 +380,7 @@ class MoveNucleus(EditCommand):
         self._old_z = nuc.z
         self._old_size = nuc.size
 
+        self._mark_rollback_ready()
         if self.new_x is not None:
             nuc.x = self.new_x
         if self.new_y is not None:
@@ -238,9 +413,189 @@ class MoveNucleus(EditCommand):
             parts.append(f"size={self.new_size}")
         return f"Move nucleus at t={self.time} idx={self.index}: {', '.join(parts)}"
 
+
+@dataclass
+class SetCellNameState(EditCommand):
+    """Set both naming fields across one continuation component.
+
+    This lower-level operation is useful when a structural edit changes a
+    historical continuation into a division and both the automatic identity
+    and manual override state need to be corrected together.  It snapshots
+    every nucleus so undo restores the exact heterogeneous pre-edit state.
+    """
+
+    time: int
+    index: int
+    identity: str
+    assigned_id: str
+
+    _touched: list[tuple[int, int, str, str]] = field(default_factory=list)
+    _noop: bool = field(default=False, init=False)
+
+    def execute(self, nuclei_record: NucleiRecord) -> None:
+        for value in (self.identity, self.assigned_id):
+            error = validate_storable_name(value)
+            if error:
+                raise ValueError(error)
+        chain = _walk_continuation_chain(
+            nuclei_record, self.time - 1, self.index - 1
+        )
+        self._touched = []
+        self._noop = True
+        self._mark_rollback_ready()
+        for t0, j0 in chain:
+            nuc = nuclei_record[t0][j0]
+            self._touched.append(
+                (t0 + 1, j0 + 1, nuc.identity, nuc.assigned_id)
+            )
+            if (
+                nuc.identity != self.identity
+                or nuc.assigned_id != self.assigned_id
+            ):
+                self._noop = False
+            nuc.identity = self.identity
+            nuc.assigned_id = self.assigned_id
+
+    def undo(self, nuclei_record: NucleiRecord) -> None:
+        _restore_name_state(nuclei_record, self._touched)
+        self._touched = []
+
     @property
-    def structural(self) -> bool:
-        return False
+    def description(self) -> str:
+        return (
+            f"Set cell name state at t={self.time} idx={self.index}: "
+            f"identity='{self.identity}', assigned_id='{self.assigned_id}'"
+        )
+
+    @property
+    def is_noop(self) -> bool:
+        return self._noop
+
+
+@dataclass
+class ClearNameOverride(EditCommand):
+    """Clear the manual name override across one continuation component."""
+
+    time: int
+    index: int
+
+    _touched: list[tuple[int, int, str, str]] = field(default_factory=list)
+    _noop: bool = field(default=False, init=False)
+
+    def execute(self, nuclei_record: NucleiRecord) -> None:
+        chain = _walk_continuation_chain(
+            nuclei_record, self.time - 1, self.index - 1
+        )
+        self._touched = []
+        self._noop = True
+        self._mark_rollback_ready()
+        for t0, j0 in chain:
+            nuc = nuclei_record[t0][j0]
+            self._touched.append(
+                (t0 + 1, j0 + 1, nuc.identity, nuc.assigned_id)
+            )
+            if nuc.assigned_id:
+                self._noop = False
+            nuc.assigned_id = ""
+
+    def undo(self, nuclei_record: NucleiRecord) -> None:
+        _restore_name_state(nuclei_record, self._touched)
+        self._touched = []
+
+    @property
+    def description(self) -> str:
+        return f"Use automatic name for cell at t={self.time} idx={self.index}"
+
+    @property
+    def is_noop(self) -> bool:
+        return self._noop
+
+
+@dataclass
+class LockCellName(EditCommand):
+    """Lock the selected cell's current effective name as a manual override.
+
+    This command is deliberately separate from :class:`RenameCell`.  Accepting
+    an unchanged, pre-filled Rename dialog remains a true no-op, while the
+    explicit *Lock Current Name* UI action records the current automatic name
+    in ``assigned_id`` across the cell's reciprocal continuation chain.
+
+    Both naming fields are normalized to the locked name, matching the manual
+    ownership state produced by Rename.  Undo restores the exact per-nucleus
+    automatic and forced values that existed before the lock.
+    """
+
+    time: int
+    index: int
+
+    _locked_name: str = field(default="", init=False)
+    _touched: list[tuple[int, int, str, str]] = field(default_factory=list)
+    _noop: bool = field(default=False, init=False)
+
+    def execute(self, nuclei_record: NucleiRecord) -> None:
+        anchor = _get_nucleus(nuclei_record, self.time, self.index)
+        if not anchor.is_alive:
+            raise ValueError("Cannot lock the name of a dead nucleus")
+
+        # Keep the name captured by the first execution stable across Redo.
+        if not self._locked_name:
+            error = validate_storable_name(anchor.effective_name, allow_empty=False)
+            if error:
+                raise ValueError(error)
+            self._locked_name = anchor.effective_name.strip()
+
+        chain = _walk_continuation_chain(
+            nuclei_record, self.time - 1, self.index - 1
+        )
+        if not chain:
+            raise ValueError("Selected nucleus has no valid continuation to lock")
+
+        self._touched = []
+        self._noop = True
+        self._mark_rollback_ready()
+        for t0, j0 in chain:
+            nuc = nuclei_record[t0][j0]
+            self._touched.append(
+                (t0 + 1, j0 + 1, nuc.identity, nuc.assigned_id)
+            )
+            if (
+                nuc.identity != self._locked_name
+                or nuc.assigned_id != self._locked_name
+            ):
+                self._noop = False
+            nuc.identity = self._locked_name
+            nuc.assigned_id = self._locked_name
+
+        logger.info(
+            "Locked cell name '%s': %d nuclei in continuation chain "
+            "(t=%d idx=%d clicked)",
+            self._locked_name,
+            len(self._touched),
+            self.time,
+            self.index,
+        )
+
+    def undo(self, nuclei_record: NucleiRecord) -> None:
+        _restore_name_state(nuclei_record, self._touched)
+        logger.info(
+            "Undid name lock on %d nuclei (clicked at t=%d idx=%d)",
+            len(self._touched),
+            self.time,
+            self.index,
+        )
+        self._touched = []
+
+    @property
+    def description(self) -> str:
+        name = self._locked_name or "current name"
+        return (
+            f"Lock cell name at t={self.time} idx={self.index} "
+            f"as '{name}'"
+        )
+
+    @property
+    def is_noop(self) -> bool:
+        return self._noop
 
 
 @dataclass
@@ -265,10 +620,27 @@ class RenameCell(EditCommand):
 
     # Saved state for undo: (t_1based, index_1based, old_identity, old_assigned_id)
     _touched: list[tuple[int, int, str, str]] = field(default_factory=list)
+    _noop: bool = field(default=False, init=False)
 
     def execute(self, nuclei_record: NucleiRecord) -> None:
-        chain = _walk_continuation_chain(nuclei_record, self.time - 1, self.index - 1)
+        error = validate_storable_name(self.new_name, allow_empty=False)
+        if error:
+            raise ValueError(error)
+        self.new_name = self.new_name.strip()
+
+        anchor = _get_nucleus(nuclei_record, self.time, self.index)
         self._touched = []
+        if anchor.effective_name == self.new_name:
+            self._noop = True
+            logger.info(
+                "Rename cell is a no-op at t=%d idx=%d: already '%s'",
+                self.time, self.index, self.new_name,
+            )
+            return
+
+        self._noop = False
+        chain = _walk_continuation_chain(nuclei_record, self.time - 1, self.index - 1)
+        self._mark_rollback_ready()
         for t0, j0 in chain:
             nuc = nuclei_record[t0][j0]
             self._touched.append((t0 + 1, j0 + 1, nuc.identity, nuc.assigned_id))
@@ -289,6 +661,10 @@ class RenameCell(EditCommand):
     @property
     def description(self) -> str:
         return f"Rename cell at t={self.time} idx={self.index} to '{self.new_name}'"
+
+    @property
+    def is_noop(self) -> bool:
+        return self._noop
 
 
 @dataclass
@@ -328,6 +704,7 @@ class SwapCellNames(EditCommand):
         self._touched_a = []
         self._touched_b = []
 
+        self._mark_rollback_ready()
         for t0, j0 in chain_a:
             nuc = nuclei_record[t0][j0]
             self._touched_a.append((t0 + 1, j0 + 1, nuc.identity, nuc.assigned_id))
@@ -399,9 +776,11 @@ class RelinkNucleus(EditCommand):
                 self._old_parent_index = nuc.predecessor
                 self._old_parent_succ1 = old_parent.successor1
                 self._old_parent_succ2 = old_parent.successor2
+                self._mark_rollback_ready()
                 _remove_successor(old_parent, self.index)
 
         # Set new predecessor
+        self._mark_rollback_ready()
         nuc.predecessor = self.new_predecessor
 
         # Connect to new parent's successor list
@@ -444,17 +823,19 @@ class RelinkNucleus(EditCommand):
 
 @dataclass
 class KillCell(EditCommand):
-    """Kill a named cell across a range of timepoints.
+    """Kill one anchored cell continuation across a time range.
 
-    Walks through timepoints from start_time to end_time (inclusive),
-    finds nuclei with matching identity, and sets their status to dead.
-
-    Matches Java KillCellsDialog behavior.
+    The legacy constructor (name, start time, optional end time) remains
+    valid.  The anchor is the first live nucleus with that *effective* name
+    at ``start_time``; callers that know the selected nucleus can provide
+    ``anchor_index`` to make the choice explicit.  Only that reciprocal
+    continuation component is affected, even if duplicate names exist.
     """
 
     cell_name: str
     start_time: int  # 1-based
     end_time: int | None = None  # 1-based, None = all remaining
+    anchor_index: int | None = None  # Optional exact index at start_time
 
     # Saved state for undo (list of (time, index, old_status, old_identity, old_assigned_id))
     _killed: list = None  # type: ignore[assignment]
@@ -468,19 +849,49 @@ class KillCell(EditCommand):
         end = self.end_time if self.end_time is not None else len(nuclei_record)
         end = min(end, len(nuclei_record))
 
-        for t_1based in range(self.start_time, end + 1):
-            t_idx = t_1based - 1
-            if t_idx < 0 or t_idx >= len(nuclei_record):
+        t0 = self.start_time - 1
+        if t0 < 0 or t0 >= len(nuclei_record):
+            return
+
+        requested_name = self.cell_name.strip()
+        anchor_j0: int | None = None
+        if self.anchor_index is not None:
+            candidate = _get_nucleus_safe(
+                nuclei_record, self.start_time, self.anchor_index
+            )
+            if (
+                candidate is not None
+                and candidate.is_alive
+                and candidate.effective_name == requested_name
+            ):
+                anchor_j0 = self.anchor_index - 1
+        else:
+            for j0, candidate in enumerate(nuclei_record[t0]):
+                if candidate.is_alive and candidate.effective_name == requested_name:
+                    anchor_j0 = j0
+                    break
+
+        if anchor_j0 is None:
+            logger.info(
+                "No live anchor for cell '%s' at t=%d",
+                requested_name, self.start_time,
+            )
+            return
+
+        chain = _walk_continuation_chain(nuclei_record, t0, anchor_j0)
+        self._mark_rollback_ready()
+        for chain_t0, chain_j0 in chain:
+            t_1based = chain_t0 + 1
+            if t_1based < self.start_time or t_1based > end:
                 continue
-            for nuc in nuclei_record[t_idx]:
-                if nuc.identity == self.cell_name and nuc.is_alive:
-                    self._killed.append((
-                        t_1based, nuc.index,
-                        nuc.status, nuc.identity, nuc.assigned_id,
-                    ))
-                    nuc.status = -1
-                    nuc.identity = ""
-                    nuc.assigned_id = ""
+            nuc = nuclei_record[chain_t0][chain_j0]
+            self._killed.append((
+                t_1based, chain_j0 + 1,
+                nuc.status, nuc.identity, nuc.assigned_id,
+            ))
+            nuc.status = -1
+            nuc.identity = ""
+            nuc.assigned_id = ""
 
         logger.info("Killed cell '%s': %d nuclei across t=%d-%d",
                      self.cell_name, len(self._killed), self.start_time, end)
@@ -522,9 +933,16 @@ class ResurrectCell(EditCommand):
         self._old_identity = nuc.identity
         self._old_assigned_id = nuc.assigned_id
 
+        error = validate_storable_name(self.identity)
+        if error:
+            raise ValueError(error)
+        self.identity = self.identity.strip()
+
+        self._mark_rollback_ready()
         nuc.status = 1
         if self.identity:
             nuc.identity = self.identity
+            nuc.assigned_id = self.identity
         logger.info("Resurrected nucleus at t=%d idx=%d as '%s'",
                      self.time, self.index, nuc.identity)
 
@@ -577,6 +995,7 @@ class RelinkWithInterpolation(EditCommand):
         self._old_start_succ1 = start_nuc.successor1
         self._old_start_succ2 = start_nuc.successor2
 
+        self._mark_rollback_ready()
         num_steps = self.end_time - self.start_time
         if num_steps <= 1:
             # Adjacent timepoints, just link directly
@@ -692,6 +1111,8 @@ def _remove_successor(parent: Nucleus, child_index: int) -> None:
 
 def _add_successor(parent: Nucleus, child_index: int) -> None:
     """Add a child index to a parent's successor fields."""
+    if child_index in (parent.successor1, parent.successor2):
+        return
     if parent.successor1 == NILLI:
         parent.successor1 = child_index
     elif parent.successor2 == NILLI:
@@ -699,6 +1120,17 @@ def _add_successor(parent: Nucleus, child_index: int) -> None:
     else:
         logger.warning("Nucleus at idx=%d already has 2 successors; cannot add %d",
                         parent.index, child_index)
+
+
+def _restore_name_state(
+    nuclei_record: NucleiRecord,
+    touched: list[tuple[int, int, str, str]],
+) -> None:
+    """Restore identity and assigned_id snapshots captured by name commands."""
+    for time, index, identity, assigned_id in touched:
+        nuc = _get_nucleus(nuclei_record, time, index)
+        nuc.identity = identity
+        nuc.assigned_id = assigned_id
 
 
 def _walk_continuation_chain(
@@ -720,13 +1152,15 @@ def _walk_continuation_chain(
         out of a division).  Stop when the predecessor has two successors
         — that predecessor is the parent cell, not part of our chain.
 
-    The returned list is sorted by timepoint.  Returns [(t0, j0)] alone
-    if the anchor nucleus is invalid.
+    The returned list is sorted by timepoint.  Invalid or dead anchors return
+    an empty list.  Every followed edge must be reciprocal.
     """
     if t0 < 0 or t0 >= len(nuclei_record):
-        return [(t0, j0)]
+        return []
     if j0 < 0 or j0 >= len(nuclei_record[t0]):
-        return [(t0, j0)]
+        return []
+    if not nuclei_record[t0][j0].is_alive:
+        return []
 
     chain: list[tuple[int, int]] = [(t0, j0)]
 
@@ -743,6 +1177,9 @@ def _walk_continuation_chain(
             break
         next_j = next_j_1based - 1
         if next_j < 0 or next_j >= len(nuclei_record[next_t]):
+            break
+        next_nuc = nuclei_record[next_t][next_j]
+        if not next_nuc.is_alive or next_nuc.predecessor != j + 1:
             break
         chain.append((next_t, next_j))
         t, j = next_t, next_j
@@ -762,7 +1199,11 @@ def _walk_continuation_chain(
         prev_nuc = nuclei_record[prev_t][prev_j]
         # Stop if the predecessor is a dividing cell — it's the parent,
         # not part of this cell's chain.
-        if prev_nuc.successor2 != NILLI:
+        if (
+            not prev_nuc.is_alive
+            or prev_nuc.successor2 != NILLI
+            or prev_nuc.successor1 != j + 1
+        ):
             break
         chain.append((prev_t, prev_j))
         t, j = prev_t, prev_j

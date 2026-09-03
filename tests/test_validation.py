@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 
 from acetree_py.core.cell import Cell, CellFate
 from acetree_py.core.lineage import LineageTree
-from acetree_py.core.nucleus import NILLI, Nucleus
 from acetree_py.naming.validation import (
     _check_cell_lifetimes,
     _check_duplicate_names,
@@ -65,9 +63,9 @@ class TestSisterSuffixes:
         assert len(warnings) == 0
 
     def test_dv_complements(self):
-        parent = _make_cell("ABal", fate=CellFate.DIVIDED, end=5)
-        d1 = _make_cell("ABald", start=6)
-        d2 = _make_cell("ABalv", start=6)
+        parent = _make_cell("Caapp", fate=CellFate.DIVIDED, end=5)
+        d1 = _make_cell("Caappd", start=6)
+        d2 = _make_cell("Caappv", start=6)
         parent.add_child(d1)
         parent.add_child(d2)
 
@@ -75,7 +73,7 @@ class TestSisterSuffixes:
         warnings = _check_sister_suffixes(tree)
         assert len(warnings) == 0
 
-    def test_skips_auto_generated_names(self):
+    def test_flags_auto_generated_daughter_that_breaks_named_parent_family(self):
         parent = _make_cell("AB", fate=CellFate.DIVIDED, end=5)
         d1 = _make_cell("Nuc0001_5_100_200", start=6)
         d2 = _make_cell("ABp", start=6)
@@ -84,7 +82,22 @@ class TestSisterSuffixes:
 
         tree = _make_tree_with_cells([parent, d1, d2])
         warnings = _check_sister_suffixes(tree)
-        assert len(warnings) == 0
+        assert len(warnings) == 1
+        assert warnings[0].category == "sister_mismatch"
+
+    def test_flags_wrong_special_founder_family(self):
+        parent = _make_cell("P1", fate=CellFate.DIVIDED, end=5)
+        d1 = _make_cell("P1a", start=6)
+        d2 = _make_cell("P1p", start=6)
+        parent.add_child(d1)
+        parent.add_child(d2)
+
+        warnings = _check_sister_suffixes(
+            _make_tree_with_cells([parent, d1, d2]),
+        )
+
+        assert len(warnings) == 1
+        assert "EMS, P2" in warnings[0].message
 
 
 class TestDuplicateNames:
@@ -96,26 +109,16 @@ class TestDuplicateNames:
 
     def test_detects_duplicates(self):
         cells = [_make_cell("AB"), _make_cell("AB")]
-        tree = _make_tree_with_cells(cells)
-        # cells_by_name will only have one entry, but we can
-        # explicitly add both
-        tree.cells_by_name = {"AB": cells[0], "AB_dup": cells[1]}
-        cells[1].name = "AB"  # Force duplicate name
-        # Manually override to get both
-        tree.cells_by_name = {}
-        for c in cells:
-            # This would normally overwrite, but let's test the check function
-            pass
-        # _check_duplicate_names looks at all_cells() names
-        # Since cells_by_name uses name as key, it deduplicates.
-        # Instead, test with actual tree structure
-        tree2 = LineageTree()
-        tree2.cells_by_name = {"AB": cells[0]}
-        tree2.cells_by_hash = {"1": cells[0], "2": cells[1]}
-        # The check uses all_cells which returns cells_by_name values
-        # Duplicate detection counts names across all_cells
-        # Let's fix this test to be more realistic:
-        pass
+        tree = LineageTree(
+            cells_by_name={"AB": cells[0]},
+            cells_by_hash={"1": cells[0], "2": cells[1]},
+        )
+
+        warnings = _check_duplicate_names(tree)
+
+        assert len(warnings) == 1
+        assert warnings[0].category == "duplicate_name"
+        assert warnings[0].severity == "error"
 
     def test_ignores_nuc_names(self):
         cells = [_make_cell("Nuc0001_5_100_200"), _make_cell("Nuc0002_6_110_210")]

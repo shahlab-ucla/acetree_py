@@ -1,0 +1,5449 @@
+{
+  "baseline": {
+    "boundary_percent": 0.35,
+    "cell_count": 4,
+    "intensity_threshold": 18.0,
+    "parameter_file": "SD_red_40x.txt",
+    "parameter_sha256": "f64453361ca7c3cf5d02033648c5ba51d6a4c96a27d0f78b735dc0aab949b228",
+    "radius_um": 2.0,
+    "sigma_factor": 1.0
+  },
+  "compatibility_gates": {
+    "candidate_geometry": {
+      "centroid_p95_um": 0.0,
+      "diameter_median_relative_error": 0.0,
+      "diameter_p95_relative_error": 0.0,
+      "diameter_signed_bias_px": 0.0,
+      "matched_coverage": 1.0,
+      "status": "pass"
+    },
+    "final_detections": {
+      "mean_f1": 1.0,
+      "minimum_f1": 1.0,
+      "required_mean_f1": 0.95,
+      "required_minimum_f1": 0.8,
+      "status": "pass"
+    },
+    "final_quality": {
+      "matched_coverage": 1.0,
+      "maximum_p95_relative_error": 1e-05,
+      "p95_relative_error": 7.250004144618749e-07,
+      "status": "pass"
+    },
+    "parameter_sensitivity": {
+      "area_between_curves": 0.0,
+      "maximum_area_between_curves": 0.1,
+      "required_slope_sign_agreement": 0.9,
+      "slope_sign_agreement": 1.0,
+      "status": "pass"
+    },
+    "separable_dog": {
+      "absolute_error": 6.103515625e-05,
+      "correlation": 0.9999999999883668,
+      "maximum": 1.1e-05,
+      "maximum_absolute_error": 0.0001,
+      "maximum_peak_displacement_px": 0.0,
+      "metric": "relative_l2_or_correlation_with_absolute_bound",
+      "minimum_correlation": 0.999999999,
+      "peak_displacement_px": 0.0,
+      "status": "pass",
+      "value": 4.8260781801590324e-06
+    },
+    "tracking_classifier": {
+      "reason": "The unchanged MATLAB 2019 model has a live smoke gate; native classifier-score parity is not yet claimed.",
+      "status": "diagnostic"
+    }
+  },
+  "configuration": {
+    "matching_tolerance_um": 2.0,
+    "scenario_frames": [
+      [
+        "isolated",
+        1
+      ],
+      [
+        "close_pair",
+        1
+      ],
+      [
+        "division",
+        4
+      ]
+    ],
+    "seed": 1731,
+    "sweeps": [
+      {
+        "name": "sigma",
+        "values": [
+          0.75,
+          1.0,
+          1.25
+        ]
+      },
+      {
+        "name": "intensitythreshold",
+        "values": [
+          7.2,
+          18.0,
+          45.0
+        ]
+      },
+      {
+        "name": "boundary_percent",
+        "values": [
+          0.2,
+          0.35,
+          0.65
+        ]
+      }
+    ]
+  },
+  "detection_trials": [
+    {
+      "diameter_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 486.25262451171875,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999940629,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.011562354809378e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999940717,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 3.448200339910947e-06,
+        "rmse": 8.299159409951881e-06
+      },
+      "frame": 1,
+      "image_sha256": "51b2ceda7e1f178ddca58af8da6ee752c0b44b4dbf1e8e5ecdc852e4ab71a10a",
+      "matlab_detection_count": 1,
+      "matlab_diameters_xy_px": [
+        9.0
+      ],
+      "matlab_elapsed_seconds": 34.6817601,
+      "matlab_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        77.56256103515625
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "parameter_value": 0.0,
+      "python_detection_count": 1,
+      "python_diameters_xy_px": [
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        77.56254577636719
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "quality_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          77.56254577636719
+        ],
+        "mae": 1.52587890625e-05,
+        "matched_count": 1,
+        "median_relative_error": 1.9672879361969177e-07,
+        "p95_absolute_error": 1.52587890625e-05,
+        "p95_relative_error": 1.9672879361969177e-07,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          77.56256103515625
+        ],
+        "rmse": 1.52587890625e-05,
+        "signed_bias": -1.52587890625e-05,
+        "signed_errors": [
+          -1.52587890625e-05
+        ]
+      },
+      "scenario": "isolated",
+      "sweep": "baseline",
+      "trial_id": "isolated-t001-baseline",
+      "truth_count": 1
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 0.75
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 376.23504638671875,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999901049,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.0428742683832717e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999901109,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 4.448988203291794e-06,
+        "rmse": 8.285143236742169e-06
+      },
+      "frame": 1,
+      "image_sha256": "51b2ceda7e1f178ddca58af8da6ee752c0b44b4dbf1e8e5ecdc852e4ab71a10a",
+      "matlab_detection_count": 1,
+      "matlab_diameters_xy_px": [
+        9.0
+      ],
+      "matlab_elapsed_seconds": 0.5401233,
+      "matlab_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        70.14898681640625
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "parameter_value": 0.75,
+      "python_detection_count": 1,
+      "python_diameters_xy_px": [
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        70.1490478515625
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "quality_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          70.1490478515625
+        ],
+        "mae": 6.103515625e-05,
+        "matched_count": 1,
+        "median_relative_error": 8.700789422624314e-07,
+        "p95_absolute_error": 6.103515625e-05,
+        "p95_relative_error": 8.700789422624314e-07,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          70.14898681640625
+        ],
+        "rmse": 6.103515625e-05,
+        "signed_bias": 6.103515625e-05,
+        "signed_errors": [
+          6.103515625e-05
+        ]
+      },
+      "scenario": "isolated",
+      "sweep": "sigma",
+      "trial_id": "isolated-t001-sigma-00",
+      "truth_count": 1
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.25
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 700.4544067382812,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999969403,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 8.303739045184143e-08,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999969418,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 2.473792857300836e-06,
+        "rmse": 8.57675158116511e-06
+      },
+      "frame": 1,
+      "image_sha256": "51b2ceda7e1f178ddca58af8da6ee752c0b44b4dbf1e8e5ecdc852e4ab71a10a",
+      "matlab_detection_count": 1,
+      "matlab_diameters_xy_px": [
+        9.0
+      ],
+      "matlab_elapsed_seconds": 0.395392,
+      "matlab_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        96.17437744140625
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "parameter_value": 1.25,
+      "python_detection_count": 1,
+      "python_diameters_xy_px": [
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        96.17437744140625
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "quality_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          96.17437744140625
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          96.17437744140625
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "scenario": "isolated",
+      "sweep": "sigma",
+      "trial_id": "isolated-t001-sigma-02",
+      "truth_count": 1
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 7.2,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 486.25262451171875,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999940629,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.011562354809378e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999940717,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 3.448200339910947e-06,
+        "rmse": 8.299159409951881e-06
+      },
+      "frame": 1,
+      "image_sha256": "51b2ceda7e1f178ddca58af8da6ee752c0b44b4dbf1e8e5ecdc852e4ab71a10a",
+      "matlab_detection_count": 1,
+      "matlab_diameters_xy_px": [
+        9.0
+      ],
+      "matlab_elapsed_seconds": 0.3644212,
+      "matlab_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        77.56256103515625
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "parameter_value": 7.2,
+      "python_detection_count": 1,
+      "python_diameters_xy_px": [
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        77.56254577636719
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "quality_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          77.56254577636719
+        ],
+        "mae": 1.52587890625e-05,
+        "matched_count": 1,
+        "median_relative_error": 1.9672879361969177e-07,
+        "p95_absolute_error": 1.52587890625e-05,
+        "p95_relative_error": 1.9672879361969177e-07,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          77.56256103515625
+        ],
+        "rmse": 1.52587890625e-05,
+        "signed_bias": -1.52587890625e-05,
+        "signed_errors": [
+          -1.52587890625e-05
+        ]
+      },
+      "scenario": "isolated",
+      "sweep": "intensitythreshold",
+      "trial_id": "isolated-t001-intensitythreshold-00",
+      "truth_count": 1
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 45.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 486.25262451171875,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999940629,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.011562354809378e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999940717,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 3.448200339910947e-06,
+        "rmse": 8.299159409951881e-06
+      },
+      "frame": 1,
+      "image_sha256": "51b2ceda7e1f178ddca58af8da6ee752c0b44b4dbf1e8e5ecdc852e4ab71a10a",
+      "matlab_detection_count": 1,
+      "matlab_diameters_xy_px": [
+        9.0
+      ],
+      "matlab_elapsed_seconds": 0.3951922,
+      "matlab_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        77.56256103515625
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "parameter_value": 45.0,
+      "python_detection_count": 1,
+      "python_diameters_xy_px": [
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        77.56254577636719
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "quality_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          77.56254577636719
+        ],
+        "mae": 1.52587890625e-05,
+        "matched_count": 1,
+        "median_relative_error": 1.9672879361969177e-07,
+        "p95_absolute_error": 1.52587890625e-05,
+        "p95_relative_error": 1.9672879361969177e-07,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          77.56256103515625
+        ],
+        "rmse": 1.52587890625e-05,
+        "signed_bias": -1.52587890625e-05,
+        "signed_errors": [
+          -1.52587890625e-05
+        ]
+      },
+      "scenario": "isolated",
+      "sweep": "intensitythreshold",
+      "trial_id": "isolated-t001-intensitythreshold-02",
+      "truth_count": 1
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          11.0
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          11.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.2,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 486.25262451171875,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999940629,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.011562354809378e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999940717,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 3.448200339910947e-06,
+        "rmse": 8.299159409951881e-06
+      },
+      "frame": 1,
+      "image_sha256": "51b2ceda7e1f178ddca58af8da6ee752c0b44b4dbf1e8e5ecdc852e4ab71a10a",
+      "matlab_detection_count": 1,
+      "matlab_diameters_xy_px": [
+        11.0
+      ],
+      "matlab_elapsed_seconds": 0.3336663,
+      "matlab_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        77.56256103515625
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "parameter_value": 0.2,
+      "python_detection_count": 1,
+      "python_diameters_xy_px": [
+        11.0
+      ],
+      "python_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        77.56254577636719
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "quality_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          77.56254577636719
+        ],
+        "mae": 1.52587890625e-05,
+        "matched_count": 1,
+        "median_relative_error": 1.9672879361969177e-07,
+        "p95_absolute_error": 1.52587890625e-05,
+        "p95_relative_error": 1.9672879361969177e-07,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          77.56256103515625
+        ],
+        "rmse": 1.52587890625e-05,
+        "signed_bias": -1.52587890625e-05,
+        "signed_errors": [
+          -1.52587890625e-05
+        ]
+      },
+      "scenario": "isolated",
+      "sweep": "boundary_percent",
+      "trial_id": "isolated-t001-boundary_percent-00",
+      "truth_count": 1
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          7.0
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          7.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.65,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 486.25262451171875,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999940629,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.011562354809378e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999940717,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 3.448200339910947e-06,
+        "rmse": 8.299159409951881e-06
+      },
+      "frame": 1,
+      "image_sha256": "51b2ceda7e1f178ddca58af8da6ee752c0b44b4dbf1e8e5ecdc852e4ab71a10a",
+      "matlab_detection_count": 1,
+      "matlab_diameters_xy_px": [
+        7.0
+      ],
+      "matlab_elapsed_seconds": 0.2961022,
+      "matlab_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        77.56256103515625
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "parameter_value": 0.65,
+      "python_detection_count": 1,
+      "python_diameters_xy_px": [
+        7.0
+      ],
+      "python_points_xyz_px": [
+        [
+          24.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        77.56254577636719
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "quality_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          77.56254577636719
+        ],
+        "mae": 1.52587890625e-05,
+        "matched_count": 1,
+        "median_relative_error": 1.9672879361969177e-07,
+        "p95_absolute_error": 1.52587890625e-05,
+        "p95_relative_error": 1.9672879361969177e-07,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          77.56256103515625
+        ],
+        "rmse": 1.52587890625e-05,
+        "signed_bias": -1.52587890625e-05,
+        "signed_errors": [
+          -1.52587890625e-05
+        ]
+      },
+      "scenario": "isolated",
+      "sweep": "boundary_percent",
+      "trial_id": "isolated-t001-boundary_percent-02",
+      "truth_count": 1
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0,
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0,
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 667.217041015625,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999966837,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.0439146767431313e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999966841,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 2.576934113831589e-06,
+        "rmse": 8.510402262876463e-06
+      },
+      "frame": 1,
+      "image_sha256": "bd945a5e23a260289e07baf577cbf4fae8d5e13b689f1db5282ccb3cfb38e8a9",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "matlab_elapsed_seconds": 0.4331671,
+      "matlab_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        72.61357116699219,
+        72.60525512695312
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 0.0,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        72.61360168457031,
+        72.60527038574219
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          72.61360168457031,
+          72.60527038574219
+        ],
+        "mae": 2.288818359375e-05,
+        "matched_count": 2,
+        "median_relative_error": 3.1521734958510294e-07,
+        "p95_absolute_error": 2.9754638671875e-05,
+        "p95_relative_error": 4.097681133019719e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          72.61357116699219,
+          72.60525512695312
+        ],
+        "rmse": 2.412626388678268e-05,
+        "signed_bias": 2.288818359375e-05,
+        "signed_errors": [
+          3.0517578125e-05,
+          1.52587890625e-05
+        ]
+      },
+      "scenario": "close_pair",
+      "sweep": "baseline",
+      "trial_id": "close_pair-t001-baseline",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0,
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0,
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 0.75
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 537.7850341796875,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999949207,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.06639852438491e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999949275,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 3.1900832286254164e-06,
+        "rmse": 8.491613998740926e-06
+      },
+      "frame": 1,
+      "image_sha256": "bd945a5e23a260289e07baf577cbf4fae8d5e13b689f1db5282ccb3cfb38e8a9",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "matlab_elapsed_seconds": 0.3403051,
+      "matlab_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        67.99008178710938,
+        67.70095825195312
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 0.75,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        67.99008178710938,
+        67.700927734375
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          67.99008178710938,
+          67.700927734375
+        ],
+        "mae": 1.52587890625e-05,
+        "matched_count": 2,
+        "median_relative_error": 2.2538512683548012e-07,
+        "p95_absolute_error": 2.899169921875e-05,
+        "p95_relative_error": 4.282317409874122e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          67.99008178710938,
+          67.70095825195312
+        ],
+        "rmse": 2.1579186437577746e-05,
+        "signed_bias": -1.52587890625e-05,
+        "signed_errors": [
+          0.0,
+          -3.0517578125e-05
+        ]
+      },
+      "scenario": "close_pair",
+      "sweep": "sigma",
+      "trial_id": "close_pair-t001-sigma-00",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0,
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0,
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.25
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 1013.2346801757812,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          27
+        ],
+        "cosine_similarity": 0.9999999999984905,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 8.091233462294456e-08,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999984927,
+        "reference_peak_zyx": [
+          8,
+          24,
+          27
+        ],
+        "relative_l2": 1.7379014802864667e-06,
+        "rmse": 8.71595456568106e-06
+      },
+      "frame": 1,
+      "image_sha256": "bd945a5e23a260289e07baf577cbf4fae8d5e13b689f1db5282ccb3cfb38e8a9",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "matlab_elapsed_seconds": 0.3562773,
+      "matlab_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        95.20616149902344,
+        95.24232482910156
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 1.25,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        95.20616149902344,
+        95.24229431152344
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          95.20616149902344,
+          95.24229431152344
+        ],
+        "mae": 1.52587890625e-05,
+        "matched_count": 2,
+        "median_relative_error": 1.6021017010955652e-07,
+        "p95_absolute_error": 2.899169921875e-05,
+        "p95_relative_error": 3.0439932320815737e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          95.20616149902344,
+          95.24232482910156
+        ],
+        "rmse": 2.1579186437577746e-05,
+        "signed_bias": -1.52587890625e-05,
+        "signed_errors": [
+          0.0,
+          -3.0517578125e-05
+        ]
+      },
+      "scenario": "close_pair",
+      "sweep": "sigma",
+      "trial_id": "close_pair-t001-sigma-02",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0,
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0,
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 7.2,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 667.217041015625,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999966837,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.0439146767431313e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999966841,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 2.576934113831589e-06,
+        "rmse": 8.510402262876463e-06
+      },
+      "frame": 1,
+      "image_sha256": "bd945a5e23a260289e07baf577cbf4fae8d5e13b689f1db5282ccb3cfb38e8a9",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "matlab_elapsed_seconds": 0.3280888,
+      "matlab_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        72.61357116699219,
+        72.60525512695312
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 7.2,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        72.61360168457031,
+        72.60527038574219
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          72.61360168457031,
+          72.60527038574219
+        ],
+        "mae": 2.288818359375e-05,
+        "matched_count": 2,
+        "median_relative_error": 3.1521734958510294e-07,
+        "p95_absolute_error": 2.9754638671875e-05,
+        "p95_relative_error": 4.097681133019719e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          72.61357116699219,
+          72.60525512695312
+        ],
+        "rmse": 2.412626388678268e-05,
+        "signed_bias": 2.288818359375e-05,
+        "signed_errors": [
+          3.0517578125e-05,
+          1.52587890625e-05
+        ]
+      },
+      "scenario": "close_pair",
+      "sweep": "intensitythreshold",
+      "trial_id": "close_pair-t001-intensitythreshold-00",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          9.0,
+          9.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          9.0,
+          9.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 45.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 667.217041015625,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999966837,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.0439146767431313e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999966841,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 2.576934113831589e-06,
+        "rmse": 8.510402262876463e-06
+      },
+      "frame": 1,
+      "image_sha256": "bd945a5e23a260289e07baf577cbf4fae8d5e13b689f1db5282ccb3cfb38e8a9",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "matlab_elapsed_seconds": 0.3243717,
+      "matlab_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        72.61357116699219,
+        72.60525512695312
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 45.0,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        9.0,
+        9.0
+      ],
+      "python_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        72.61360168457031,
+        72.60527038574219
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          72.61360168457031,
+          72.60527038574219
+        ],
+        "mae": 2.288818359375e-05,
+        "matched_count": 2,
+        "median_relative_error": 3.1521734958510294e-07,
+        "p95_absolute_error": 2.9754638671875e-05,
+        "p95_relative_error": 4.097681133019719e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          72.61357116699219,
+          72.60525512695312
+        ],
+        "rmse": 2.412626388678268e-05,
+        "signed_bias": 2.288818359375e-05,
+        "signed_errors": [
+          3.0517578125e-05,
+          1.52587890625e-05
+        ]
+      },
+      "scenario": "close_pair",
+      "sweep": "intensitythreshold",
+      "trial_id": "close_pair-t001-intensitythreshold-02",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          11.0,
+          11.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          11.0,
+          11.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.2,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 667.217041015625,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999966837,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.0439146767431313e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999966841,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 2.576934113831589e-06,
+        "rmse": 8.510402262876463e-06
+      },
+      "frame": 1,
+      "image_sha256": "bd945a5e23a260289e07baf577cbf4fae8d5e13b689f1db5282ccb3cfb38e8a9",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        11.0,
+        11.0
+      ],
+      "matlab_elapsed_seconds": 0.3047063,
+      "matlab_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        72.61357116699219,
+        72.60525512695312
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 0.2,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        11.0,
+        11.0
+      ],
+      "python_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        72.61360168457031,
+        72.60527038574219
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          72.61360168457031,
+          72.60527038574219
+        ],
+        "mae": 2.288818359375e-05,
+        "matched_count": 2,
+        "median_relative_error": 3.1521734958510294e-07,
+        "p95_absolute_error": 2.9754638671875e-05,
+        "p95_relative_error": 4.097681133019719e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          72.61357116699219,
+          72.60525512695312
+        ],
+        "rmse": 2.412626388678268e-05,
+        "signed_bias": 2.288818359375e-05,
+        "signed_errors": [
+          3.0517578125e-05,
+          1.52587890625e-05
+        ]
+      },
+      "scenario": "close_pair",
+      "sweep": "boundary_percent",
+      "trial_id": "close_pair-t001-boundary_percent-00",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          8.0,
+          8.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          8.0,
+          8.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.65,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 667.217041015625,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999966837,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.0439146767431313e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999966841,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 2.576934113831589e-06,
+        "rmse": 8.510402262876463e-06
+      },
+      "frame": 1,
+      "image_sha256": "bd945a5e23a260289e07baf577cbf4fae8d5e13b689f1db5282ccb3cfb38e8a9",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        8.0,
+        8.0
+      ],
+      "matlab_elapsed_seconds": 0.3062062,
+      "matlab_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        72.61357116699219,
+        72.60525512695312
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 0.65,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        8.0,
+        8.0
+      ],
+      "python_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          27.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        72.61360168457031,
+        72.60527038574219
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.25,
+        "centroid_rmse": 0.25,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.25,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.25,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          72.61360168457031,
+          72.60527038574219
+        ],
+        "mae": 2.288818359375e-05,
+        "matched_count": 2,
+        "median_relative_error": 3.1521734958510294e-07,
+        "p95_absolute_error": 2.9754638671875e-05,
+        "p95_relative_error": 4.097681133019719e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          72.61357116699219,
+          72.60525512695312
+        ],
+        "rmse": 2.412626388678268e-05,
+        "signed_bias": 2.288818359375e-05,
+        "signed_errors": [
+          3.0517578125e-05,
+          1.52587890625e-05
+        ]
+      },
+      "scenario": "close_pair",
+      "sweep": "boundary_percent",
+      "trial_id": "close_pair-t001-boundary_percent-02",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          7.0,
+          7.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          7.0,
+          7.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 394.8128662109375,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999910717,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.4926420797502496e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999910784,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 4.225968046811182e-06,
+        "rmse": 8.258421069612211e-06
+      },
+      "frame": 4,
+      "image_sha256": "3474e0f9eb4d5799adc73c8d052cb00ab5593f83445cfa36372918a2b5a4085b",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        7.0,
+        7.0
+      ],
+      "matlab_elapsed_seconds": 0.3050252,
+      "matlab_points_xyz_px": [
+        [
+          20.0,
+          24.0,
+          8.0
+        ],
+        [
+          26.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        49.57684326171875,
+        48.57310485839844
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.09999999999999964,
+        "centroid_rmse": 0.09999999999999964,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.09999999999999964,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.09999999999999964,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 0.0,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        7.0,
+        7.0
+      ],
+      "python_points_xyz_px": [
+        [
+          20.0,
+          24.0,
+          8.0
+        ],
+        [
+          26.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        49.57685852050781,
+        48.57307434082031
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.09999999999999964,
+        "centroid_rmse": 0.09999999999999964,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.09999999999999964,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.09999999999999964,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          49.57685852050781,
+          48.57307434082031
+        ],
+        "mae": 2.288818359375e-05,
+        "matched_count": 2,
+        "median_relative_error": 4.6803098280884717e-07,
+        "p95_absolute_error": 2.9754638671875e-05,
+        "p95_relative_error": 6.122563546162387e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          49.57684326171875,
+          48.57310485839844
+        ],
+        "rmse": 2.412626388678268e-05,
+        "signed_bias": -7.62939453125e-06,
+        "signed_errors": [
+          1.52587890625e-05,
+          -3.0517578125e-05
+        ]
+      },
+      "scenario": "division",
+      "sweep": "baseline",
+      "trial_id": "division-t004-baseline",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          7.0,
+          7.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          7.0,
+          7.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 0.75
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 346.1451721191406,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          20
+        ],
+        "cosine_similarity": 0.9999999999883585,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.3273698138871916e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999883668,
+        "reference_peak_zyx": [
+          8,
+          24,
+          20
+        ],
+        "relative_l2": 4.8260781801590324e-06,
+        "rmse": 8.268602913078411e-06
+      },
+      "frame": 4,
+      "image_sha256": "3474e0f9eb4d5799adc73c8d052cb00ab5593f83445cfa36372918a2b5a4085b",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        7.0,
+        7.0
+      ],
+      "matlab_elapsed_seconds": 0.3267406,
+      "matlab_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          25.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        52.37345886230469,
+        51.41241455078125
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.40000000000000036,
+        "centroid_rmse": 0.40000000000000036,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.40000000000000036,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.40000000000000036,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 0.75,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        7.0,
+        7.0
+      ],
+      "python_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          25.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        52.373443603515625,
+        51.41236877441406
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.40000000000000036,
+        "centroid_rmse": 0.40000000000000036,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.40000000000000036,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.40000000000000036,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          52.373443603515625,
+          51.41236877441406
+        ],
+        "mae": 3.0517578125e-05,
+        "matched_count": 2,
+        "median_relative_error": 5.908607923222593e-07,
+        "p95_absolute_error": 4.425048828125e-05,
+        "p95_relative_error": 8.604242546267514e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          52.37345886230469,
+          51.41241455078125
+        ],
+        "rmse": 3.411968959808029e-05,
+        "signed_bias": -3.0517578125e-05,
+        "signed_errors": [
+          -1.52587890625e-05,
+          -4.57763671875e-05
+        ]
+      },
+      "scenario": "division",
+      "sweep": "sigma",
+      "trial_id": "division-t004-sigma-00",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          13.0
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          13.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.25
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 570.9296264648438,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          22
+        ],
+        "cosine_similarity": 0.9999999999953754,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.1923408881862573e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999953776,
+        "reference_peak_zyx": [
+          8,
+          24,
+          22
+        ],
+        "relative_l2": 3.041332373715631e-06,
+        "rmse": 8.594607116088396e-06
+      },
+      "frame": 4,
+      "image_sha256": "3474e0f9eb4d5799adc73c8d052cb00ab5593f83445cfa36372918a2b5a4085b",
+      "matlab_detection_count": 1,
+      "matlab_diameters_xy_px": [
+        13.0
+      ],
+      "matlab_elapsed_seconds": 0.2945995,
+      "matlab_points_xyz_px": [
+        [
+          23.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        64.4417724609375
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          -1.4000000000000004,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 1.4000000000000004,
+        "centroid_rmse": 1.4000000000000004,
+        "count_delta": -1,
+        "f1": 0.6666666666666666,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 1.4000000000000004,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": [
+            0
+          ]
+        },
+        "precision": 1.0,
+        "recall": 0.5,
+        "reference_count": 2
+      },
+      "parameter_value": 1.25,
+      "python_detection_count": 1,
+      "python_diameters_xy_px": [
+        13.0
+      ],
+      "python_points_xyz_px": [
+        [
+          23.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        64.4417724609375
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          -1.4000000000000004,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 1.4000000000000004,
+        "centroid_rmse": 1.4000000000000004,
+        "count_delta": -1,
+        "f1": 0.6666666666666666,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 1.4000000000000004,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": [
+            0
+          ]
+        },
+        "precision": 1.0,
+        "recall": 0.5,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          64.4417724609375
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          64.4417724609375
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "scenario": "division",
+      "sweep": "sigma",
+      "trial_id": "division-t004-sigma-02",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          7.0,
+          7.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          7.0,
+          7.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 7.2,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 394.8128662109375,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999910717,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.4926420797502496e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999910784,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 4.225968046811182e-06,
+        "rmse": 8.258421069612211e-06
+      },
+      "frame": 4,
+      "image_sha256": "3474e0f9eb4d5799adc73c8d052cb00ab5593f83445cfa36372918a2b5a4085b",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        7.0,
+        7.0
+      ],
+      "matlab_elapsed_seconds": 0.3005675,
+      "matlab_points_xyz_px": [
+        [
+          20.0,
+          24.0,
+          8.0
+        ],
+        [
+          26.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        49.57684326171875,
+        48.57310485839844
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.09999999999999964,
+        "centroid_rmse": 0.09999999999999964,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.09999999999999964,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.09999999999999964,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 7.2,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        7.0,
+        7.0
+      ],
+      "python_points_xyz_px": [
+        [
+          20.0,
+          24.0,
+          8.0
+        ],
+        [
+          26.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        49.57685852050781,
+        48.57307434082031
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.09999999999999964,
+        "centroid_rmse": 0.09999999999999964,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.09999999999999964,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.09999999999999964,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          49.57685852050781,
+          48.57307434082031
+        ],
+        "mae": 2.288818359375e-05,
+        "matched_count": 2,
+        "median_relative_error": 4.6803098280884717e-07,
+        "p95_absolute_error": 2.9754638671875e-05,
+        "p95_relative_error": 6.122563546162387e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          49.57684326171875,
+          48.57310485839844
+        ],
+        "rmse": 2.412626388678268e-05,
+        "signed_bias": -7.62939453125e-06,
+        "signed_errors": [
+          1.52587890625e-05,
+          -3.0517578125e-05
+        ]
+      },
+      "scenario": "division",
+      "sweep": "intensitythreshold",
+      "trial_id": "division-t004-intensitythreshold-00",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          7.0,
+          7.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          7.0,
+          7.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.35,
+        "cell_count": 4,
+        "intensitythreshold": 45.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 394.8128662109375,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999910717,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.4926420797502496e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999910784,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 4.225968046811182e-06,
+        "rmse": 8.258421069612211e-06
+      },
+      "frame": 4,
+      "image_sha256": "3474e0f9eb4d5799adc73c8d052cb00ab5593f83445cfa36372918a2b5a4085b",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        7.0,
+        7.0
+      ],
+      "matlab_elapsed_seconds": 0.2744966,
+      "matlab_points_xyz_px": [
+        [
+          20.0,
+          24.0,
+          8.0
+        ],
+        [
+          26.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        49.57684326171875,
+        48.57310485839844
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.09999999999999964,
+        "centroid_rmse": 0.09999999999999964,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.09999999999999964,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.09999999999999964,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 45.0,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        7.0,
+        7.0
+      ],
+      "python_points_xyz_px": [
+        [
+          20.0,
+          24.0,
+          8.0
+        ],
+        [
+          26.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        49.57685852050781,
+        48.57307434082031
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.09999999999999964,
+        "centroid_rmse": 0.09999999999999964,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.09999999999999964,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.09999999999999964,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          49.57685852050781,
+          48.57307434082031
+        ],
+        "mae": 2.288818359375e-05,
+        "matched_count": 2,
+        "median_relative_error": 4.6803098280884717e-07,
+        "p95_absolute_error": 2.9754638671875e-05,
+        "p95_relative_error": 6.122563546162387e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          49.57684326171875,
+          48.57310485839844
+        ],
+        "rmse": 2.412626388678268e-05,
+        "signed_bias": -7.62939453125e-06,
+        "signed_errors": [
+          1.52587890625e-05,
+          -3.0517578125e-05
+        ]
+      },
+      "scenario": "division",
+      "sweep": "intensitythreshold",
+      "trial_id": "division-t004-intensitythreshold-02",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          13.0
+        ],
+        "mae": 0.0,
+        "matched_count": 1,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          13.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.2,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 1
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 394.8128662109375,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999910717,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.4926420797502496e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999910784,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 4.225968046811182e-06,
+        "rmse": 8.258421069612211e-06
+      },
+      "frame": 4,
+      "image_sha256": "3474e0f9eb4d5799adc73c8d052cb00ab5593f83445cfa36372918a2b5a4085b",
+      "matlab_detection_count": 1,
+      "matlab_diameters_xy_px": [
+        13.0
+      ],
+      "matlab_elapsed_seconds": 0.4027035,
+      "matlab_points_xyz_px": [
+        [
+          22.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        49.57684326171875
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.9000000000000004,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.9000000000000004,
+        "centroid_rmse": 0.9000000000000004,
+        "count_delta": -1,
+        "f1": 0.6666666666666666,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.9000000000000004,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": [
+            1
+          ]
+        },
+        "precision": 1.0,
+        "recall": 0.5,
+        "reference_count": 2
+      },
+      "parameter_value": 0.2,
+      "python_detection_count": 1,
+      "python_diameters_xy_px": [
+        13.0
+      ],
+      "python_points_xyz_px": [
+        [
+          22.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        49.57685852050781
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 1,
+        "centroid_bias": [
+          0.9000000000000004,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.9000000000000004,
+        "centroid_rmse": 0.9000000000000004,
+        "count_delta": -1,
+        "f1": 0.6666666666666666,
+        "matched_count": 1,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.9000000000000004,
+              "reference_index": 0
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": [
+            1
+          ]
+        },
+        "precision": 1.0,
+        "recall": 0.5,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 1,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          49.57685852050781
+        ],
+        "mae": 1.52587890625e-05,
+        "matched_count": 1,
+        "median_relative_error": 3.0778056968952327e-07,
+        "p95_absolute_error": 1.52587890625e-05,
+        "p95_relative_error": 3.0778056968952327e-07,
+        "reference_count": 1,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          49.57684326171875
+        ],
+        "rmse": 1.52587890625e-05,
+        "signed_bias": 1.52587890625e-05,
+        "signed_errors": [
+          1.52587890625e-05
+        ]
+      },
+      "scenario": "division",
+      "sweep": "boundary_percent",
+      "trial_id": "division-t004-boundary_percent-00",
+      "truth_count": 2
+    },
+    {
+      "diameter_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          5.0,
+          8.0
+        ],
+        "mae": 0.0,
+        "matched_count": 2,
+        "median_relative_error": 0.0,
+        "p95_absolute_error": 0.0,
+        "p95_relative_error": 0.0,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          5.0,
+          8.0
+        ],
+        "rmse": 0.0,
+        "signed_bias": 0.0,
+        "signed_errors": [
+          0.0,
+          0.0
+        ]
+      },
+      "effective_settings": {
+        "boundary_percent": 0.65,
+        "cell_count": 4,
+        "intensitythreshold": 18.0,
+        "radius_um": 2.0,
+        "sigma": 1.0
+      },
+      "engine_detection_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.0,
+        "centroid_rmse": 0.0,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.0,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.0,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 0.25,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "engine_matching_tolerance_um": 0.25,
+      "filter_reference_energy": 394.8128662109375,
+      "filter_similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999910717,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.4926420797502496e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999910784,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 4.225968046811182e-06,
+        "rmse": 8.258421069612211e-06
+      },
+      "frame": 4,
+      "image_sha256": "3474e0f9eb4d5799adc73c8d052cb00ab5593f83445cfa36372918a2b5a4085b",
+      "matlab_detection_count": 2,
+      "matlab_diameters_xy_px": [
+        5.0,
+        8.0
+      ],
+      "matlab_elapsed_seconds": 0.3067255,
+      "matlab_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          25.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "matlab_quality": [
+        49.57684326171875,
+        48.57310485839844
+      ],
+      "matlab_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.40000000000000036,
+        "centroid_rmse": 0.40000000000000036,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.40000000000000036,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.40000000000000036,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "parameter_value": 0.65,
+      "python_detection_count": 2,
+      "python_diameters_xy_px": [
+        5.0,
+        8.0
+      ],
+      "python_points_xyz_px": [
+        [
+          21.0,
+          24.0,
+          8.0
+        ],
+        [
+          25.0,
+          24.0,
+          8.0
+        ]
+      ],
+      "python_quality": [
+        49.57685852050781,
+        48.57307434082031
+      ],
+      "python_truth_similarity": {
+        "candidate_count": 2,
+        "centroid_bias": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid_p95": 0.40000000000000036,
+        "centroid_rmse": 0.40000000000000036,
+        "count_delta": 0,
+        "f1": 1.0,
+        "matched_count": 2,
+        "matching": {
+          "matches": [
+            {
+              "candidate_index": 0,
+              "distance": 0.40000000000000036,
+              "reference_index": 0
+            },
+            {
+              "candidate_index": 1,
+              "distance": 0.40000000000000036,
+              "reference_index": 1
+            }
+          ],
+          "tolerance": 2.0,
+          "unmatched_candidate": [],
+          "unmatched_reference": []
+        },
+        "precision": 1.0,
+        "recall": 1.0,
+        "reference_count": 2
+      },
+      "quality_similarity": {
+        "candidate_count": 2,
+        "candidate_coverage": 1.0,
+        "candidate_values": [
+          49.57685852050781,
+          48.57307434082031
+        ],
+        "mae": 2.288818359375e-05,
+        "matched_count": 2,
+        "median_relative_error": 4.6803098280884717e-07,
+        "p95_absolute_error": 2.9754638671875e-05,
+        "p95_relative_error": 6.122563546162387e-07,
+        "reference_count": 2,
+        "reference_coverage": 1.0,
+        "reference_values": [
+          49.57684326171875,
+          48.57310485839844
+        ],
+        "rmse": 2.412626388678268e-05,
+        "signed_bias": -7.62939453125e-06,
+        "signed_errors": [
+          1.52587890625e-05,
+          -3.0517578125e-05
+        ]
+      },
+      "scenario": "division",
+      "sweep": "boundary_percent",
+      "trial_id": "division-t004-boundary_percent-02",
+      "truth_count": 2
+    }
+  ],
+  "filter_trials": [
+    {
+      "frame": 1,
+      "matlab_energy": 537.7850341796875,
+      "matlab_peak": 67.99008178710938,
+      "python_energy": 537.7849731445312,
+      "python_peak": 67.99008178710938,
+      "scenario": "close_pair",
+      "sigma": 0.75,
+      "similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999949207,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.06639852438491e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999949275,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 3.1900832286254164e-06,
+        "rmse": 8.491613998740926e-06
+      }
+    },
+    {
+      "frame": 1,
+      "matlab_energy": 667.217041015625,
+      "matlab_peak": 72.61357116699219,
+      "python_energy": 667.2171020507812,
+      "python_peak": 72.61360168457031,
+      "scenario": "close_pair",
+      "sigma": 1.0,
+      "similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999966837,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.0439146767431313e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999966841,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 2.576934113831589e-06,
+        "rmse": 8.510402262876463e-06
+      }
+    },
+    {
+      "frame": 1,
+      "matlab_energy": 1013.2346801757812,
+      "matlab_peak": 95.24232482910156,
+      "python_energy": 1013.2346801757812,
+      "python_peak": 95.24229431152344,
+      "scenario": "close_pair",
+      "sigma": 1.25,
+      "similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          27
+        ],
+        "cosine_similarity": 0.9999999999984905,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 8.091233462294456e-08,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999984927,
+        "reference_peak_zyx": [
+          8,
+          24,
+          27
+        ],
+        "relative_l2": 1.7379014802864667e-06,
+        "rmse": 8.71595456568106e-06
+      }
+    },
+    {
+      "frame": 4,
+      "matlab_energy": 346.1451721191406,
+      "matlab_peak": 52.37345886230469,
+      "python_energy": 346.14520263671875,
+      "python_peak": 52.373443603515625,
+      "scenario": "division",
+      "sigma": 0.75,
+      "similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          20
+        ],
+        "cosine_similarity": 0.9999999999883585,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.3273698138871916e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999883668,
+        "reference_peak_zyx": [
+          8,
+          24,
+          20
+        ],
+        "relative_l2": 4.8260781801590324e-06,
+        "rmse": 8.268602913078411e-06
+      }
+    },
+    {
+      "frame": 4,
+      "matlab_energy": 394.8128662109375,
+      "matlab_peak": 49.57684326171875,
+      "python_energy": 394.81280517578125,
+      "python_peak": 49.57685852050781,
+      "scenario": "division",
+      "sigma": 1.0,
+      "similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "cosine_similarity": 0.9999999999910717,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.4926420797502496e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999910784,
+        "reference_peak_zyx": [
+          8,
+          24,
+          21
+        ],
+        "relative_l2": 4.225968046811182e-06,
+        "rmse": 8.258421069612211e-06
+      }
+    },
+    {
+      "frame": 4,
+      "matlab_energy": 570.9296264648438,
+      "matlab_peak": 64.4417724609375,
+      "python_energy": 570.9296264648438,
+      "python_peak": 64.4417724609375,
+      "scenario": "division",
+      "sigma": 1.25,
+      "similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          22
+        ],
+        "cosine_similarity": 0.9999999999953754,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.1923408881862573e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999953776,
+        "reference_peak_zyx": [
+          8,
+          24,
+          22
+        ],
+        "relative_l2": 3.041332373715631e-06,
+        "rmse": 8.594607116088396e-06
+      }
+    },
+    {
+      "frame": 1,
+      "matlab_energy": 376.23504638671875,
+      "matlab_peak": 70.14898681640625,
+      "python_energy": 376.23504638671875,
+      "python_peak": 70.1490478515625,
+      "scenario": "isolated",
+      "sigma": 0.75,
+      "similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999901049,
+        "max_absolute_error": 6.103515625e-05,
+        "nrmse_dynamic_range": 1.0428742683832717e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999901109,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 4.448988203291794e-06,
+        "rmse": 8.285143236742169e-06
+      }
+    },
+    {
+      "frame": 1,
+      "matlab_energy": 486.25262451171875,
+      "matlab_peak": 77.56256103515625,
+      "python_energy": 486.2525939941406,
+      "python_peak": 77.56254577636719,
+      "scenario": "isolated",
+      "sigma": 1.0,
+      "similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999940629,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 1.011562354809378e-07,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999940717,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 3.448200339910947e-06,
+        "rmse": 8.299159409951881e-06
+      }
+    },
+    {
+      "frame": 1,
+      "matlab_energy": 700.4544067382812,
+      "matlab_peak": 96.17437744140625,
+      "python_energy": 700.4544067382812,
+      "python_peak": 96.17437744140625,
+      "scenario": "isolated",
+      "sigma": 1.25,
+      "similarity": {
+        "candidate_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "cosine_similarity": 0.9999999999969403,
+        "max_absolute_error": 4.57763671875e-05,
+        "nrmse_dynamic_range": 8.303739045184143e-08,
+        "p99_absolute_error": 2.288818359375e-05,
+        "peak_displacement_px": 0.0,
+        "pearson_correlation": 0.9999999999969418,
+        "reference_peak_zyx": [
+          8,
+          24,
+          24
+        ],
+        "relative_l2": 2.473792857300836e-06,
+        "rmse": 8.57675158116511e-06
+      }
+    }
+  ],
+  "generated_at_utc": "2026-07-15T19:39:32.395150+00:00",
+  "known_gaps": [
+    "Ray geometry, contiguous slice claims, and the distance/aspect-ratio conflict predicates are native; distribution-backed log-odds merge/split predicates remain a separate compatibility tier.",
+    "parameters.rangethreshold is exercised by MATLAB but is not yet mapped to the native detector.",
+    "Tracking classifier/model sensitivity is a separate oracle tier and is not scored by this detector report."
+  ],
+  "provenance": {
+    "matlab_executable_name": "matlab.exe",
+    "matlab_version": "25.1.0.2943329 (R2025a)",
+    "numpy": "2.5.1",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.13 (main, Mar  3 2026, 15:01:35) [MSC v.1944 64 bit (AMD64)]",
+    "scipy": "1.18.0",
+    "starrynite_revision": "e3d5ddc381223ae8ce031f64947ffbd944a11593",
+    "upstream_distribution_sha256": "3ed54b3b4a0d7807cca7f93df6482393c7ba22eaa901b613bdf32cf102aaf233",
+    "upstream_process_volume_sha256": "8382d6e53c5df5493d7ad21d2e44918ffbde4c5632511724a1d0d863dff429a2",
+    "upstream_tracking_driver_sha256": "6a702f804c431557d18db7cb49f57be541dbaa231e1894cc4a3cdab2b8a7e200",
+    "upstream_tracking_model_sha256": "3431637f95caa91e3839d808de426b80f9e76d15e0ac5b6cc44d1a04647eb0fc",
+    "wrapper_sha256": "d54cccccef770be0323cac64c55c0d009ea755b4c0e2e2538c5537b98cfefc36"
+  },
+  "schema_version": 1,
+  "sensitivity": [
+    {
+      "detection_count": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.75,
+          1.0,
+          1.25
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      },
+      "frame": 1,
+      "parameter": "sigma",
+      "scenario": "isolated",
+      "truth_f1": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.75,
+          1.0,
+          1.25
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      }
+    },
+    {
+      "detection_count": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          7.2,
+          18.0,
+          45.0
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      },
+      "frame": 1,
+      "parameter": "intensitythreshold",
+      "scenario": "isolated",
+      "truth_f1": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          7.2,
+          18.0,
+          45.0
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      }
+    },
+    {
+      "detection_count": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.2,
+          0.35,
+          0.65
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      },
+      "frame": 1,
+      "parameter": "boundary_percent",
+      "scenario": "isolated",
+      "truth_f1": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.2,
+          0.35,
+          0.65
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      }
+    },
+    {
+      "detection_count": {
+        "candidate_curve": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.75,
+          1.0,
+          1.25
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      },
+      "frame": 1,
+      "parameter": "sigma",
+      "scenario": "close_pair",
+      "truth_f1": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.75,
+          1.0,
+          1.25
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      }
+    },
+    {
+      "detection_count": {
+        "candidate_curve": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          7.2,
+          18.0,
+          45.0
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      },
+      "frame": 1,
+      "parameter": "intensitythreshold",
+      "scenario": "close_pair",
+      "truth_f1": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          7.2,
+          18.0,
+          45.0
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      }
+    },
+    {
+      "detection_count": {
+        "candidate_curve": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.2,
+          0.35,
+          0.65
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      },
+      "frame": 1,
+      "parameter": "boundary_percent",
+      "scenario": "close_pair",
+      "truth_f1": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.2,
+          0.35,
+          0.65
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      }
+    },
+    {
+      "detection_count": {
+        "candidate_curve": [
+          2.0,
+          2.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.75,
+          1.0,
+          1.25
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          2.0,
+          2.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      },
+      "frame": 4,
+      "parameter": "sigma",
+      "scenario": "division",
+      "truth_f1": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          0.6666666666666666
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.75,
+          1.0,
+          1.25
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          0.6666666666666666
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      }
+    },
+    {
+      "detection_count": {
+        "candidate_curve": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          7.2,
+          18.0,
+          45.0
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      },
+      "frame": 4,
+      "parameter": "intensitythreshold",
+      "scenario": "division",
+      "truth_f1": {
+        "candidate_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          7.2,
+          18.0,
+          45.0
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      }
+    },
+    {
+      "detection_count": {
+        "candidate_curve": [
+          1.0,
+          2.0,
+          2.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.2,
+          0.35,
+          0.65
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          1.0,
+          2.0,
+          2.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      },
+      "frame": 4,
+      "parameter": "boundary_percent",
+      "scenario": "division",
+      "truth_f1": {
+        "candidate_curve": [
+          0.6666666666666666,
+          1.0,
+          1.0
+        ],
+        "normalized_area_between_curves": 0.0,
+        "normalized_curve_rmse": 0.0,
+        "parameter_values": [
+          0.2,
+          0.35,
+          0.65
+        ],
+        "pearson_correlation": 1.0,
+        "reference_curve": [
+          0.6666666666666666,
+          1.0,
+          1.0
+        ],
+        "slope_sign_agreement": 1.0,
+        "spearman_correlation": 1.0,
+        "transition_distance": 0.0
+      }
+    }
+  ],
+  "status": "completed",
+  "summary": {
+    "centroid_p95_um": 0.0,
+    "diameter_mae_px": 0.0,
+    "diameter_median_relative_error": 0.0,
+    "diameter_p95_relative_error": 0.0,
+    "diameter_signed_bias_px": 0.0,
+    "exact_count_trial_fraction": 1.0,
+    "exact_detection_trial_fraction": 1.0,
+    "matched_detection_coverage": 1.0,
+    "max_filter_relative_l2": 4.8260781801590324e-06,
+    "maximum_filter_absolute_error": 6.103515625e-05,
+    "maximum_filter_peak_displacement_px": 0.0,
+    "mean_detection_count_area_between_curves": 0.0,
+    "mean_detection_count_slope_sign_agreement": 1.0,
+    "mean_engine_detection_f1": 1.0,
+    "mean_matlab_truth_f1": 0.9682539682539681,
+    "mean_python_truth_f1": 0.9682539682539681,
+    "median_filter_relative_l2": 3.448200339910947e-06,
+    "minimum_engine_detection_f1": 1.0,
+    "minimum_filter_correlation": 0.9999999999883668,
+    "quality_p95_relative_error": 7.250004144618749e-07,
+    "quality_signed_bias": 1.3871626420454546e-06,
+    "trial_count": 21
+  },
+  "synthetic_cases": [
+    {
+      "calibration": {
+        "plane_start": 1,
+        "xy_um": 0.5,
+        "z_um": 1.0
+      },
+      "description": "Two near-resolution nuclei; probes maxima suppression and merging.",
+      "image_sha256": "eed33b3373f7180498afef06ca1dcb1ecc49ddfc582636cb167fd5f1c5376b86",
+      "name": "close_pair",
+      "object_count": 2,
+      "shape_tzyx": [
+        1,
+        17,
+        49,
+        49
+      ]
+    },
+    {
+      "calibration": {
+        "plane_start": 1,
+        "xy_um": 0.5,
+        "z_um": 1.0
+      },
+      "description": "A moving parent separates into two daughters over six frames.",
+      "image_sha256": "a254f5f3c3cf8be5074888d484eefc8ba218fc5245d17d9d4afdfbd5231ac88c",
+      "name": "division",
+      "object_count": 9,
+      "shape_tzyx": [
+        6,
+        17,
+        49,
+        49
+      ]
+    },
+    {
+      "calibration": {
+        "plane_start": 1,
+        "xy_um": 0.5,
+        "z_um": 1.0
+      },
+      "description": "One centered nucleus; establishes numerical/filter parity.",
+      "image_sha256": "5036e167ff750ab1f46da6d339cec6f261085c82a52612f89a9a1fbdb6434fbc",
+      "name": "isolated",
+      "object_count": 1,
+      "shape_tzyx": [
+        1,
+        17,
+        49,
+        49
+      ]
+    }
+  ]
+}

@@ -80,6 +80,18 @@ class CanonicalTransform:
         ap = ap / ap_norm
         lr = lr / lr_norm
 
+        # AuxInfo/manual vectors are measurements and are rarely perfectly
+        # orthogonal.  Gram-Schmidt them into the closest usable anatomical
+        # frame rather than requiring an unrealistically exact acquisition.
+        self.input_orthogonality = abs(float(np.dot(ap, lr)))
+        lr = lr - float(np.dot(lr, ap)) * ap
+        lr_orth_norm = np.linalg.norm(lr)
+        if lr_orth_norm < 1e-6:
+            raise TransformValidationError(
+                "AP and LR vectors are nearly parallel; cannot form a frame"
+            )
+        lr = lr / lr_orth_norm
+
         # Compute DV as cross product (completes the right-handed frame)
         dv = np.cross(ap, lr)
         dv_norm = np.linalg.norm(dv)
@@ -129,6 +141,10 @@ class CanonicalTransform:
             The vector rotated into the canonical frame.
         """
         return self.rotation.apply(np.asarray(vec, dtype=np.float64))
+
+    def inverse_apply(self, vec: np.ndarray) -> np.ndarray:
+        """Rotate a canonical-frame vector back into the measured lab frame."""
+        return self.rotation.inv().apply(np.asarray(vec, dtype=np.float64))
 
     def __repr__(self) -> str:
         return f"CanonicalTransform(active={self.active}, rmsd={self.rmsd:.6f})"

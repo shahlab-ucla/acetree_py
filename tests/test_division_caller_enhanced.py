@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
 import pytest
@@ -10,9 +9,7 @@ import pytest
 from acetree_py.core.nucleus import NILLI, Nucleus
 from acetree_py.naming.canonical_transform import CanonicalTransform
 from acetree_py.naming.division_caller import (
-    DEFAULT_AVG_FRAMES,
     DivisionCaller,
-    DivisionClassification,
     _angle_to_confidence,
     _follow_successor,
 )
@@ -230,6 +227,53 @@ class TestFounderMode:
         # v2 should take precedence
         assert dc.is_v2
         assert not dc.is_founder_mode
+
+    def test_lineage_mode_falls_back_to_static_founder_frame(self, rule_manager):
+        # An empty lineage map makes the requested local frame unavailable.
+        dc = DivisionCaller(
+            rule_manager=rule_manager,
+            z_pix_res=1.0,
+            founder_ap=np.array([0.0, 1.0, 0.0]),
+            founder_lr=np.array([0.0, 0.0, 1.0]),
+            founder_dv=np.array([1.0, 0.0, 0.0]),
+            lineage_map=[[""]],
+            nuclei_record=[[_make_nuc(1, 0, 0, 0)]],
+        )
+
+        corrected = dc._measurement_correction(
+            np.array([0.0, 5.0, 0.0]), timepoint=0,
+        )
+
+        assert dc.is_lineage_mode
+        np.testing.assert_allclose(corrected, [-5.0, 0.0, 0.0])
+
+    def test_lineage_mode_without_complete_frame_preserves_family(self, rule_manager):
+        dc = DivisionCaller(
+            rule_manager=rule_manager,
+            z_pix_res=1.0,
+            founder_ap=np.array([1.0, 0.0, 0.0]),
+            founder_lr=None,
+            founder_dv=None,
+            lineage_map=[["", ""]],
+            nuclei_record=[[
+                _make_nuc(1, 0, 0, 0),
+                _make_nuc(2, 20, 0, 0),
+            ]],
+        )
+        parent = _make_nuc(1, 10, 0, 0, identity="EMS")
+
+        names = dc.assign_names(
+            parent,
+            dc._nuclei_record[0][0],
+            dc._nuclei_record[0][1],
+            timepoint=0,
+        )
+
+        assert names == ("E", "MS")
+        assert not dc.has_complete_body_frame(0)
+        assert dc.classifications[-1].confidence == 0.0
+        assert dc.classifications[-1].daughter1_name == "E"
+        assert dc.classifications[-1].daughter2_name == "MS"
 
 
 class TestBackwardCompatibility:

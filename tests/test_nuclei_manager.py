@@ -358,10 +358,19 @@ class TestGetApDirectionAt:
         from acetree_py.core.nuclei_manager import NucleiManager
         from acetree_py.io.auxinfo import AuxInfo
         mgr = NucleiManager()
-        mgr.auxinfo = AuxInfo(version=1, data={"axis": "PDL"})
+        mgr.auxinfo = AuxInfo(version=1, data={"axis": "PDR"})
         mgr.identity_assigner = None
         ap = mgr.get_ap_direction_at(1)
         np.testing.assert_allclose(ap, [-1.0, 0.0, 0.0])
+
+    def test_invalid_handedness_code_is_not_treated_as_orientation(self):
+        import numpy as np
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.io.auxinfo import AuxInfo
+        mgr = NucleiManager()
+        mgr.auxinfo = AuxInfo(version=1, data={"axis": "PDL"})
+        mgr.identity_assigner = None
+        np.testing.assert_allclose(mgr.get_ap_direction_at(1), [1.0, 0.0, 0.0])
 
     def test_auxinfo_v2_ap_orientation_overrides_v1(self):
         """V2 AP orientation is an arbitrary 3D vector; it takes
@@ -389,3 +398,36 @@ class TestGetApDirectionAt:
         mgr.identity_assigner = None
         ap = mgr.get_ap_direction_at(1)
         np.testing.assert_allclose(ap, [1.0, 0.0, 0.0])
+
+    def test_inferred_seed_frame_remains_available_to_ui_after_dropout(self):
+        from types import SimpleNamespace
+
+        import numpy as np
+
+        from acetree_py.core.nuclei_manager import NucleiManager
+        from acetree_py.core.nucleus import Nucleus
+        from acetree_py.naming.division_caller import DivisionCaller
+        from acetree_py.naming.rules import RuleManager
+
+        seed = (
+            np.array([-1.0, 0.0, 0.0]),
+            np.array([0.0, 0.0, 1.0]),
+            np.array([0.0, 1.0, 0.0]),
+        )
+        caller = DivisionCaller(
+            RuleManager(),
+            lineage_map=[["ABa"]],
+            nuclei_record=[[Nucleus(status=1)]],
+            seed_ap=seed[0],
+            seed_lr=seed[1],
+            seed_dv=seed[2],
+        )
+        manager = NucleiManager()
+        manager.identity_assigner = SimpleNamespace(division_caller=caller)
+
+        axes = manager.get_body_axes_at(1)
+
+        assert axes is not None
+        for actual, expected in zip(axes, seed):
+            np.testing.assert_allclose(actual, expected)
+        np.testing.assert_allclose(manager.get_ap_direction_at(1), seed[0])

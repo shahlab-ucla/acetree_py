@@ -2,6 +2,8 @@
 
 Mathematically precise descriptions of the Sulston naming system, coordinate transforms, division classification, undo mechanism, and editing operations.
 
+For the cross-cutting user/task contract and edge-case matrix, see [Naming and Manual-Curation Workflows](naming_workflows.md).
+
 ---
 
 ## 1. Sulston Naming System
@@ -47,6 +49,18 @@ The first ~5 divisions have special names (P0, AB, P1, EMS, P2, etc.) rather tha
 
 ## 2. Naming Pipeline
 
+### 2.0 Name State Model
+
+Every live nucleus carries two distinct name fields:
+
+| Field | Meaning | May automatic naming change it? |
+|---|---|---|
+| `identity` | Current automatic/computed identity | Yes |
+| `assigned_id` | Explicit user override | No |
+| `effective_name` | `assigned_id` when non-empty, otherwise `identity` | Derived |
+
+GUI labels, tree lookup, validation, kill/rename targeting, and division-parent lookup use `effective_name`. A suggested automatic name must never be copied into `assigned_id`; doing so would silently convert a prediction into a permanent user decision. Rename creates an override only when the requested name differs from the effective name. **Use Automatic** clears `assigned_id` across the same cell continuation and lets the next naming pass recompute `identity`.
+
 ### 2.1 Overall Flow
 
 ```
@@ -56,23 +70,29 @@ Input: nuclei_record[t][i] for all timepoints t, nucleus index i
 Step 1:  Clear non-forced names
          ∀ nuc: if assigned_id = "": identity ← ""
 
-Step 1b: Propagate forced names (assigned_id) through continuation chains
+Step 1b: Propagate forced names (assigned_id) through valid continuation chains
          For each nucleus with assigned_id set:
-           Forward: follow successor1 chain (non-dividing only),
+           Forward: follow the single alive, reciprocal successor (non-dividing only),
                     set assigned_id + identity on each continuation cell
-           Backward: follow predecessor chain (stop at division boundaries),
+           Backward: follow the alive, reciprocal predecessor (stop at division boundaries),
                      set assigned_id + identity back to cell's birth
 
-Step 2:  Build CanonicalTransform (if AuxInfo v2)
+Step 2:  Select the highest-precedence valid orientation source
+         (v2/manual → supported v1 → lineage → founder fallback)
 
 Step 3:  Topology-based founder identification
          → FounderAssignment with ABa, ABp, EMS, P2 indices + confidence
 
-Step 4:  If Step 3 fails (confidence < 0.3): warn and assign generic names
+Step 4:  If Step 3 fails (confidence < 0.3): preserve compatible loaded names;
+         invalidate contradicted founder hypotheses; repair a positively
+         identified false-four polar-body state; use generic names only for
+         the roots/branches that remain unresolved
          (legacy InitialID fallback available via legacy_mode=True)
 
 Step 5:  Set up DivisionCaller with coordinate axes
-         Compute seed axes (AP, LR) at 4-cell midpoint for sign anchoring
+         Evaluate the valid 4-cell window, retain the best complete AP/DV/LR
+         frame as a reusable static seed, and prefer dynamic lineage axes
+         whenever their current-timepoint geometry is usable
 
 Step 6:  Forward pass — apply canonical rules:
          for t = four_cell_time to ending_index:
@@ -80,28 +100,50 @@ Step 6:  Forward pass — apply canonical rules:
              if nuc has no name and has a predecessor:
                parent = predecessor at t-1
                if parent is NOT dividing: nuc.identity ← parent.identity
-               if parent IS dividing:
-                 (d1, d2) = DivisionCaller.assign_names(parent, daughter1, daughter2)
-                 daughter1.identity ← d1
-                 daughter2.identity ← d2
+               if parent IS dividing and both links are alive and reciprocal:
+                  rule = RuleManager.get_rule(parent.effective_name)
+                  expected = {rule.daughter1, rule.daughter2}
+                  (d1, d2) = DivisionCaller.order_names(parent, daughter1, daughter2)
+                  if geometry is unavailable or ambiguous:
+                    preserve an exact loaded ordering when possible, otherwise
+                    use deterministic successor order and emit a low-confidence warning
+                  require {d1, d2} = expected
+                  daughter1.identity ← d1
+                  daughter2.identity ← d2
 
 Step 7:  Assign generic names to remaining unnamed nuclei
          name = "Nuc{time:03d}_{z}_{x}_{y}" (3-digit zero-padded, matching Java format)
+         Nuc is reserved for unknown/disconnected roots and malformed topology;
+         it is not a fallback for a valid division of a named parent
 ```
+
+The daughter **family** and the daughter **ordering** are separate decisions.
+For every valid reciprocal two-child division of a named parent, `RuleManager`
+fixes the exact unordered pair. Geometry, timing, and body axes decide only
+which physical successor receives which member of that pair. A missing or weak
+axis can lower ordering confidence, but it cannot change the family or break the
+parent's lineage chain. Special founder rules such as `P1 → EMS/P2` and
+`P2 → C/P3` are RuleManager mappings rather than literal string suffixes.
+An incompatible `assigned_id` remains visible as an explicit curator-owned
+exception and validation conflict; automatic naming never overwrites it.
 
 ### 2.2 Pre-assigned Name Handling
 
-If a nucleus has `assigned_id` set (manual override via Rename), the forced name is **propagated through the cell's entire lifetime** before canonical rules run:
+If a live nucleus has `assigned_id` set (manual override via Rename), the forced name is **propagated through the cell's valid continuation** before canonical rules run:
 
-1. **Forward propagation**: The forced name follows the `successor1` chain (non-dividing continuations) to all future timepoints where the cell exists, stopping at divisions.
-2. **Backward propagation**: The forced name follows the `predecessor` chain back to the cell's birth (the timepoint where the predecessor divided to create this cell).
+1. **Forward propagation**: The forced name follows the sole live successor through consecutive timepoints, but only when the child's predecessor points back to the same parent.
+2. **Backward propagation**: The forced name follows the live predecessor back to the cell's birth, but only when that parent's sole successor points back to the child.
 3. **Division boundary**: Propagation does not cross division boundaries. When the forced-name cell eventually divides, its name is used as the parent name for the division caller, which applies the standard Sulston rules to name the daughters.
+4. **Invalid/dead boundary**: Dead nuclei, missing timepoints, non-reciprocal links, and ambiguous successor sets stop propagation rather than being repaired implicitly.
 
-If a different `assigned_id` already exists on a nucleus in the chain, propagation stops (the existing override takes precedence).
+If a different `assigned_id` already exists on a nucleus in the chain, propagation stops and reports a conflict. Traversal order never decides which user assertion wins.
 
-When both daughters of a division have pre-assigned names, the automatic classification is skipped. If only one daughter has a pre-assigned name, the other receives the complement name.
+When both daughters of a division have pre-assigned names, those curator-owned
+values remain authoritative even when they conflict with the automatic rule.
+If one daughter has a compatible pre-assigned member of the RuleManager pair,
+that anchor selects the ordering and the sister receives the other member.
 
-If automatic naming would produce a name collision with an existing `assigned_id`, the automatic name gets an `"X"` suffix appended.
+Automatic naming never invents an `"X"` suffix to hide a collision. A forced/automatic mismatch may swap the automatically assigned sister pair when that resolves the intended complement. Two incompatible forced daughter identities remain explicit validation conflicts for the user to correct.
 
 ---
 
@@ -109,9 +151,14 @@ If automatic naming would produce a name collision with an existing `assigned_id
 
 ### 3.1 Four-Cell Window Detection
 
-A **four-cell window** is a contiguous range of timepoints $[t_\text{first}, t_\text{last}]$ where exactly 4 alive, non-polar-body nuclei exist:
+A **four-cell window** is a contiguous range of timepoints $[t_\text{first}, t_\text{last}]$ where exactly 4 alive nuclei not already identified as polar bodies exist:
 
-$$\forall t \in [t_\text{first}, t_\text{last}]: \quad |\{n \in \text{nuclei}(t) : n.\text{status} \geq 1 \wedge n.\text{size} < \text{polar}\_\text{size}\}| = 4$$
+$$\forall t \in [t_\text{first}, t_\text{last}]: \quad |\{n \in \text{nuclei}(t) : n.\text{status} \geq 1 \wedge \text{"polar"} \notin n.\text{effectiveName}\}| = 4$$
+
+Ordinary founder counting does **not** silently classify polar bodies by size;
+an unnamed small detection remains a candidate until curated. Size is used
+only by the guarded four-to-two recovery below, after two rows have been
+explicitly removed and both are substantially smaller than the survivors.
 
 The midpoint is: $t_\text{mid} = \lfloor (t_\text{first} + t_\text{last}) / 2 \rfloor$
 
@@ -159,20 +206,20 @@ $$\text{AB pair} = \begin{cases} \text{pair}_A & \text{if } t_A \leq t_B \\ \tex
 
 $$\text{EMS} = \begin{cases} \text{earlier divider} & \text{if forward timing gap} \geq 1 \\ \arg\max_{n \in \text{P1 pair}} n.\text{size} & \text{otherwise} \end{cases}$$
 
-**AB pair (ABa vs ABp):** Determined by projection onto the AP axis vector, averaged over the 4-cell stage window for robustness. The AP direction is estimated from the centroid of the AB pair toward P2. ABa is the daughter with the larger projection onto this AP vector (more anterior):
+**AB pair (ABa vs ABp):** Determined by projection onto the AP axis vector, averaged over the 4-cell stage window for robustness. A valid explicit posterior→anterior orientation is used when available; otherwise AP is estimated from P2 toward the AB pair. ABa is the daughter with the larger projection (more anterior):
 
 $$\vec{u}_\text{AP} = \frac{\vec{c}_\text{AB} - \vec{r}_{P2}}{\|\vec{c}_\text{AB} - \vec{r}_{P2}\|}$$
 $$\text{ABa} = \arg\max_{n \in \text{AB pair}} \left(\frac{1}{T}\sum_{t} \vec{r}_n(t) \cdot \vec{u}_\text{AP}(t)\right)$$
 
-where the average is taken over all timepoints in the 4-cell window. If no 2-cell stage is present (AP axis degenerate), PC1 of the 4-cell point cloud is used as the embryo long axis — ABa is closer to one end.
+where the average is taken over all timepoints in the 4-cell window. If AP geometry is degenerate, PC1 of the four-cell point cloud is used as the embryo long axis and oriented toward the AB end. A final raw image-x tiebreaker remains deterministic for diagnostics, but its confidence is capped below the automatic-commit threshold because microscope x is not anatomy.
 
-This projection-based method is robust regardless of embryo orientation in the image frame, unlike the legacy approach which used raw image-X coordinates.
+Projection avoids assuming a particular image direction when a defensible AP cue exists. Degenerate PC1/raw-coordinate fallbacks are retained for diagnosis but are not treated as equivalent biological evidence.
 
 ### 3.5 Confidence Calculation
 
 The overall confidence combines three factors:
 
-$$C = C_\text{timing} \times C_\text{size} \times C_\text{axis} - \text{penalty}$$
+$$C = C_\text{timing} \times C_\text{size} \times (0.5+0.5C_\text{axis}) - \text{penalty}$$
 
 **Timing confidence** from backward trace:
 
@@ -195,13 +242,58 @@ Let $s_\text{diff}$ = absolute size difference between the larger and smaller ce
 
 $$C_\text{size} = \min\left(1.0,\ 0.5 + \frac{s_\text{diff}}{s_\text{sum}}\right)$$
 
-**Axis confidence:**
+**Axis confidence:** combines four-cell separation with the conditioning of the AP/DV geometry. Let $C_\text{sep}$ be the normalized minimum-to-median pairwise separation and let $q_\perp$ be the EMS→ABp vector's usable component perpendicular to P2→ABa:
 
-$$C_\text{axis} = \begin{cases} 1.0 & \text{if axes successfully determined} \\ 0.0 & \text{otherwise} \end{cases}$$
+$$C_\text{axis}=\min(C_\text{sep},q_\perp).$$
+
+The component is exposed separately so a geometrically flat/compressed acquisition lowers downstream naming trust without discarding otherwise strong topology. Raw image-x fallback caps both axis and overall confidence at 0.1.
 
 **Threshold:** Confidence must be ≥ 0.3 for the identification to be accepted.
 
-### 3.6 Back-Tracing
+### 3.6 Curated False-Four Recovery
+
+Manual initialization can temporarily produce four detected objects at the
+biological two-cell stage because two polar bodies were detected. After the
+curator removes both false objects, the frame contains four retained rows but
+only two live rows. A prior automatic `ABa`/`ABp`/`EMS`/`P2` hypothesis is
+invalidated only when both dead rows are substantially smaller than both live
+rows. This positive size gate distinguishes the workflow from a real
+four-cell-stage ablation. Before accepting that footprint, each retained row
+is traced back through reciprocal continuation links to its birth division.
+Two sister pairs born from two parents identify a genuine four-cell lineage
+and veto recovery even in a later continuation frame or when the killed cells
+are small. Claimed but malformed lineage links also fail closed.
+
+The two live continuation components are ordered as `AB` and `P1` by:
+
+1. two observed future division times, or one observed division while the
+   reciprocal sister continuation is observed beyond it;
+2. a valid explicit posterior→anterior direction (the anterior cell is AB);
+3. strong two-cell blastomere-size asymmetry (the larger cell is AB).
+
+Rejected four-cell labels are not reused as evidence. Broken links and
+right-censored tracks do not imply a later division. If ordering remains
+ambiguous, the impossible four-cell labels and their automatic descendants are
+cleared and replaced with neutral `Nuc...` names. Forced `assigned_id` values
+remain authoritative.
+
+Once the two roots are resolved as `AB` and `P1`, their first reciprocal
+divisions never fall back to a different lineage family. The two-cell
+separation supplies a partial posterior→anterior direction, and the rule table
+fixes the exact unordered daughter families: `AB` produces `ABa`/`ABp`, while
+`P1` produces `EMS`/`P2`. If that sister ordering is degenerate, AceTree first
+preserves a consistent previously loaded pair and otherwise uses stable
+successor order with a lower-confidence warning. When all four recovered
+founders overlap, AceTree reconstructs and retains a lineage body frame and
+returns later divisions to the normal geometry-aware caller. If a later dynamic
+frame is incomplete or weak, the retained static four-cell frame is the
+ordering fallback. If neither frame can order a valid division, the exact
+RuleManager pair is still assigned in deterministic successor order with a
+low-confidence warning. Neutral names remain the fail-closed result for
+disconnected roots or malformed/non-reciprocal topology, not for daughters of
+a valid named parent.
+
+### 3.7 Back-Tracing
 
 Once the 4 founders are identified, trace backward through predecessor links:
 
@@ -218,20 +310,29 @@ Once the 4 founders are identified, trace backward through predecessor links:
 
 ### 4.1 Canonical Frame
 
-The canonical coordinate system is defined as:
+Body-axis vectors have biological direction, not merely an unsigned image axis:
+
+- AP points **posterior → anterior**.
+- DV points **ventral → dorsal**.
+- LR points **right → left**.
+- The frame is right-handed: $\vec e_\text{DV}=\vec e_\text{AP}\times\vec e_\text{LR}$.
+
+The division-rule canonical coordinate system is represented as:
 
 $$\vec{e}_\text{AP} = (-1, 0, 0), \quad \vec{e}_\text{LR} = (0, 0, 1), \quad \vec{e}_\text{DV} = \vec{e}_\text{AP} \times \vec{e}_\text{LR} = (0, 1, 0)$$
+
+All geometry is evaluated in physical coordinates. For stored image coordinates $(x,y,z)$, the vector used by naming is $(x,y,z\,z_\text{pix_res})$. This applies equally to landmark vectors, founder centroids, and daughter-division vectors.
 
 ### 4.2 v2 Transform (Wahba's Problem)
 
 Given measured AP vector $\vec{a}$ and LR vector $\vec{l}$ from AuxInfo v2:
 
-1. Normalize: $\hat{a} = \vec{a}/\|\vec{a}\|$, $\hat{l} = \vec{l}/\|\vec{l}\|$
-2. Compute DV: $\hat{d} = \frac{\hat{a} \times \hat{l}}{\|\hat{a} \times \hat{l}\|}$
-3. Form source basis: $S = [\hat{a}; \hat{d}; \hat{l}]$ (3×3, rows = vectors)
-4. Form target basis: $T = [\vec{e}_\text{AP}; \vec{e}_\text{DV}; \vec{e}_\text{LR}]$
-5. Solve for rotation $R$ minimizing $\sum_i \|T_i - R(S_i)\|^2$ via SVD (Wahba's problem).
-6. Validate: $\|R(\hat{a}) - \vec{e}_\text{AP}\| < \epsilon$ and $\|R(\hat{l}) - \vec{e}_\text{LR}\| < \epsilon$ with $\epsilon = 10^{-4}$.
+1. Reject zero-length or nearly parallel vectors.
+2. Normalize AP and project LR perpendicular to AP (Gram–Schmidt); normalize the result.
+3. Compute $\hat d=\hat a\times\hat l$ and verify handedness.
+4. Form source basis $S=[\hat a;\hat d;\hat l]$ and target basis $T=[\vec e_\text{AP};\vec e_\text{DV};\vec e_\text{LR}]$.
+5. Solve for the best rotation $R$ with `scipy.spatial.transform.Rotation.align_vectors()`.
+6. Validate the mapped axes and retain the input orthogonality as a diagnostic.
 
 **Application:** For any measured vector $\vec{v}$: $\vec{v}_\text{canonical} = R(\vec{v})$.
 
@@ -251,9 +352,29 @@ $$\begin{pmatrix} x' \\ y' \end{pmatrix} = \begin{pmatrix} \cos\theta & -\sin\th
 
 3. Apply sign flips: $\vec{v}_\text{corrected} = M \cdot (x', y', z)^T$
 
-### 4.4 Per-Timepoint Lineage Centroid Axes (Primary No-AuxInfo Mode)
+Only the supported v1 anatomical orientations (`ADL`, `AVR`, `PDR`, and `PVL`) count as orientation metadata. A placeholder such as `XXX` is not a body-axis assertion.
 
-When no AuxInfo is available, axes are derived **at each timepoint** from the spatial distribution of lineage-labelled cells. This is the primary coordinate transform mode when AuxInfo is absent, and is inherently robust to global embryo rotations during imaging (common in compressed embryos).
+### 4.4 Manual Landmark Frame
+
+The simplified correction workflow records anatomical endpoints at one reference timepoint. It requires an AP pair plus one signed secondary pair:
+
+$$\vec a=\vec r_\text{anterior}-\vec r_\text{posterior}$$
+
+and either
+
+$$\vec d_0=\vec r_\text{dorsal}-\vec r_\text{ventral}$$
+
+or
+
+$$\vec l_0=\vec r_\text{left}-\vec r_\text{right}.$$
+
+The secondary vector is projected perpendicular to AP. With AP+DV, $\vec l=\vec d\times\vec a$; with AP+LR, $\vec d=\vec a\times\vec l$. Normalization and handedness checks produce an orthonormal frame. Endpoint labels must all come from the same timepoint, and all z coordinates are physically scaled before subtraction.
+
+Each frame records `provenance`, `reference_time`, and `quality`. A manually applied frame is serialized as AuxInfo v2 beside the nuclei archive and takes precedence over automatic lineage geometry on reload. Save and undo treat the frame change as ordinary editable state.
+
+### 4.5 Per-Timepoint Lineage Centroid Axes (Automatic Fallback)
+
+When no valid explicit orientation is available, axes are derived at each timepoint from the spatial distribution of founder-lineage descendants. This can follow gradual embryo motion, but its confidence and provenance remain visible because compression or sparse tracking can make the geometry ambiguous.
 
 **Lineage map construction** (`naming/lineage_axes.py`):
 
@@ -268,71 +389,62 @@ A lineage label (ABa, ABp, EMS, or P2) is assigned to every nucleus by propagati
 Let $\mathcal{A}_a(t), \mathcal{A}_p(t), \mathcal{E}(t), \mathcal{P}_2(t)$ be the sets of alive labelled cells at time $t$.
 
 1. **Group centroids:**
-$$\vec{c}_\text{AB}(t) = \text{mean}(\mathcal{A}_a(t) \cup \mathcal{A}_p(t)), \quad \vec{c}_{P1}(t) = \text{mean}(\mathcal{E}(t) \cup \mathcal{P}_2(t))$$
 $$\vec{c}_\text{ABa}(t) = \text{mean}(\mathcal{A}_a(t)), \quad \vec{c}_\text{ABp}(t) = \text{mean}(\mathcal{A}_p(t))$$
+$$\vec{c}_\text{EMS}(t) = \text{mean}(\mathcal{E}(t)), \quad \vec{c}_\text{P2}(t) = \text{mean}(\mathcal{P}_2(t))$$
 
-2. **AP axis** (P1 → AB direction):
-$$\vec{u}_\text{AP}(t) = \frac{\vec{c}_\text{AB}(t) - \vec{c}_{P1}(t)}{\|\vec{c}_\text{AB}(t) - \vec{c}_{P1}(t)\|}$$
+2. **AP seed** (P2 → ABa):
+$$\vec a(t)=\vec c_\text{ABa}(t)-\vec c_\text{P2}(t),\qquad \vec u_\text{AP}(t)=\frac{\vec a(t)}{\|\vec a(t)\|}$$
 
-3. **LR axis** (ABp → ABa, projected perpendicular to AP):
-$$\vec{s}(t) = \vec{c}_\text{ABa}(t) - \vec{c}_\text{ABp}(t)$$
-$$\vec{s}_\perp(t) = \vec{s}(t) - (\vec{s}(t) \cdot \vec{u}_\text{AP}(t))\, \vec{u}_\text{AP}(t)$$
-$$\vec{u}_\text{LR}(t) = \frac{\vec{s}_\perp(t)}{\|\vec{s}_\perp(t)\|}$$
+3. **DV seed** (EMS → ABp), projected perpendicular to AP:
+$$\vec d_0(t)=\vec c_\text{ABp}(t)-\vec c_\text{EMS}(t)$$
+$$\vec d_\perp(t)=\vec d_0(t)-(\vec d_0(t)\cdot\vec u_\text{AP}(t))\vec u_\text{AP}(t)$$
+$$\vec u_\text{DV}(t)=\frac{\vec d_\perp(t)}{\|\vec d_\perp(t)\|}$$
 
-4. **DV axis** (completes right-handed frame):
-$$\vec{u}_\text{DV}(t) = \vec{u}_\text{AP}(t) \times \vec{u}_\text{LR}(t)$$
+4. **LR axis** (right → left), completing the frame:
+$$\vec u_\text{LR}(t)=\vec u_\text{DV}(t)\times\vec u_\text{AP}(t)$$
 
-**LR quality metric:**
+This construction satisfies $\vec u_\text{DV}=\vec u_\text{AP}\times\vec u_\text{LR}$.
 
-The LR axis can become geometrically degenerate during division transitions when ABa and ABp descendants become nearly collinear with AP. The quality metric quantifies this:
+**Secondary-axis quality:**
 
-$$q_\text{LR}(t) = \frac{\|\vec{s}_\perp(t)\|}{\|\vec{s}(t)\|}$$
+The DV seed becomes unreliable when it is nearly parallel to AP. The usable perpendicular fraction is:
 
-where $\|\vec{s}(t)\|$ is the total ABa-ABp centroid separation and $\|\vec{s}_\perp(t)\|$ is the perpendicular component. When $q_\text{LR} < 0.15$, the LR axis is unreliable (less than 15% of the separation is perpendicular to AP).
+$$q_\perp(t)=\frac{\|\vec d_\perp(t)\|}{\|\vec d_0(t)\|}.$$
 
-`compute_local_axes()` returns `(ap_vec, lr_vec, dv_vec, lr_quality)`.
+Small separation, a small perpendicular fraction, incomplete lineage groups, or discontinuous estimates lower confidence. Cached neighboring frames may preserve temporal sign continuity; continuity is not itself evidence that the biological left/right sign is correct.
 
-**Quality-aware sign correction:**
-
-LR axis direction is inherently ambiguous (ABa could be on either side). Sign continuity is maintained by comparing against recent cached axes, with quality-dependent behavior:
-
-- **High quality** ($q_\text{LR} \geq 0.15$): Only correct sign against nearby cached timepoints (gap $\leq 3$ frames). Store in the LR history buffer for smoothing.
-- **Low quality** ($q_\text{LR} < 0.15$): Use temporal smoothing — an exponentially-weighted average of recent high-quality LR vectors (half-life 10 timepoints). Fall back to sign correction against any cached timepoint if smoothing is unavailable.
-
-This prevents noise from degenerate frames (where perpendicular LR component drops to 0.8–4.7 pixels) from corrupting the axis estimate.
+`compute_local_axes()` returns `(ap_vec, lr_vec, dv_vec, secondary_quality)`.
 
 **Division vector projection:**
 
 Given a raw division vector $\vec{d}$ at timepoint $t$, project onto the local axes:
 $$\vec{d}_\text{canonical}(t) = (-\vec{d} \cdot \vec{u}_\text{AP}(t),\ \vec{d} \cdot \vec{u}_\text{DV}(t),\ \vec{d} \cdot \vec{u}_\text{LR}(t))$$
 
-**Why per-timepoint?** In compressed embryos, the embryo can rotate around its AP axis during imaging. A static axis estimate from the 4-cell stage becomes progressively incorrect. By re-deriving axes from the *current* positions of ABa-lineage vs ABp-lineage centroids at each timepoint, the system automatically tracks these rotations.
+**Why per-timepoint?** A static early frame can become stale as an embryo moves
+or is mechanically compressed. Re-deriving from current lineage centroids can
+follow that motion, while quality thresholds prevent a weak frame from being
+presented as certain. Dynamic axes are therefore preferred, but a transient
+missing lineage group or degenerate local frame does not erase the reusable
+four-cell seed.
 
-### 4.5 Static Founder-Derived Transform (Legacy Fallback)
+### 4.6 Reusable Static Four-Cell Transform
 
-Used only as a fallback when the lineage centroid approach fails (e.g., too few labelled cells at a given timepoint). Axes are derived once from the 4-cell positions:
+Used when current lineage-centroid geometry is missing or below the usable
+quality boundary. Every topologically valid frame in the four-cell window is
+evaluated; the complete candidate with the highest perpendicular
+secondary-axis quality is selected, with the earliest frame winning an exact
+tie. The selected AP/LR/DV frame and its source timepoint are retained for the
+remainder of the naming run. This avoids making the arbitrary window midpoint
+a single point of failure.
 
 Let $\vec{r}_a, \vec{r}_b, \vec{r}_e, \vec{r}_p$ be the 3D positions (with z scaled by `z_pix_res`) of ABa, ABp, EMS, P2 respectively.
 
-1. **AB centroid:**
-$$\vec{c}_\text{AB} = \frac{\vec{r}_a + \vec{r}_b}{2}$$
+Use the same four-cell construction as Section 4.5 at the selected four-cell
+seed frame:
 
-2. **AP axis** (anterior-posterior):
-$$\vec{u}_\text{AP} = \frac{\vec{c}_\text{AB} - \vec{r}_p}{\|\vec{c}_\text{AB} - \vec{r}_p\|}$$
+$$\vec a=\vec r_\text{ABa}-\vec r_\text{P2},\qquad \vec d_0=\vec r_\text{ABp}-\vec r_\text{EMS}.$$
 
-3. **AB separation projected perpendicular to AP:**
-$$\vec{s} = \vec{r}_a - \vec{r}_b$$
-$$\vec{s}_\perp = \vec{s} - (\vec{s} \cdot \vec{u}_\text{AP})\, \vec{u}_\text{AP}$$
-
-4. **DV axis** (dorsal-ventral):
-$$\vec{u}_\text{DV} = \frac{\vec{u}_\text{AP} \times \vec{s}_\perp}{\|\vec{u}_\text{AP} \times \vec{s}_\perp\|}$$
-
-5. **LR axis** (left-right):
-$$\vec{u}_\text{LR} = \frac{\vec{u}_\text{DV} \times \vec{u}_\text{AP}}{\|\vec{u}_\text{DV} \times \vec{u}_\text{AP}\|}$$
-
-6. **Handedness check:** Ensure ABa is on the positive LR side.
-$$\text{lr}_\text{ABa} = (\vec{r}_a - \vec{c}_\text{AB}) \cdot \vec{u}_\text{LR}$$
-If $\text{lr}_\text{ABa} < 0$, flip both: $\vec{u}_\text{LR} \leftarrow -\vec{u}_\text{LR}$, $\vec{u}_\text{DV} \leftarrow -\vec{u}_\text{DV}$.
+Normalize AP, project and normalize DV perpendicular to AP, then compute $\vec u_\text{LR}=\vec u_\text{DV}\times\vec u_\text{AP}$. Do **not** treat the ABa–ABp separation as the LR axis.
 
 **Division vector projection in static founder mode:**
 
@@ -342,9 +454,13 @@ $$d_\text{AP} = \vec{d} \cdot \vec{u}_\text{AP}, \quad d_\text{DV} = \vec{d} \cd
 Map to canonical frame:
 $$\vec{d}_\text{canonical} = (-d_\text{AP},\ d_\text{DV},\ d_\text{LR})$$
 
-The negation of AP maps to the canonical AP direction $(-1, 0, 0)$.
+The negation of AP maps to the canonical AP direction $(-1, 0, 0)$. A later
+high-quality local frame is still preferred because it follows embryo motion;
+the static frame is used for local-axis dropout or low-quality geometry. Its
+source timepoint is retained and logged, while the division confidence remains
+the angle-based confidence of the classification in that retained frame.
 
-**Limitation:** This static approach assumes the embryo orientation does not change after the 4-cell stage. For compressed embryos that rotate during imaging, the per-timepoint lineage centroid approach (Section 4.4) is preferred.
+**Biological limitation:** the signed LR axis is not identifiable solely from the ABa/ABp pair at the four-cell stage. Establishing left versus right requires a trusted oriented secondary cue (manual landmarks or metadata), or later handedness/chirality information. Automatic four-cell geometry is therefore a fallible estimate, especially under compression, and must expose confidence rather than silently locking names. The invariant lineage described by [Sulston et al. (1983)](https://www.wormatlas.org/papers/Sulston_embryonic_lineage_1983.pdf), automated geometry in [Bao et al. (2006)](https://pmc.ncbi.nlm.nih.gov/articles/PMC1413828/), embryonic chirality in [Pohl and Bao (2010)](https://pmc.ncbi.nlm.nih.gov/articles/PMC2952354/), and compression effects in [Hench et al. (2009)](https://pubmed.ncbi.nlm.nih.gov/19527702/) provide the biological and experimental context.
 
 ---
 
@@ -352,7 +468,11 @@ The negation of AP maps to the canonical AP direction $(-1, 0, 0)$.
 
 ### 5.1 Classification Algorithm
 
-Given parent nucleus $P$ dividing into daughters $D_1, D_2$, and division rule $(s, \vec{a})$ where $s$ is the Sulston letter and $\vec{a}$ is the rule's axis unit vector:
+Given parent nucleus $P$ dividing through two alive reciprocal links into
+daughters $D_1,D_2$, first obtain the exact RuleManager pair
+$(R_1,R_2)$. Classification never selects a different pair; it only orders
+$(R_1,R_2)$ over the two physical successors. For division rule $(s, \vec{a})$
+where $s$ is the Sulston letter and $\vec{a}$ is the rule's axis unit vector:
 
 1. **Raw division vector:**
 $$\vec{\delta} = (D_2.x - D_1.x,\ D_2.y - D_1.y,\ (D_2.z - D_1.z) \times z_{\text{pix}\_\text{res}})$$
@@ -368,6 +488,12 @@ $$\theta = \arccos\left(\frac{|\alpha|}{\|\vec{\delta}_c\| \cdot \|\vec{a}\|}\ri
 5. **Name assignment:**
 $$\text{if } \alpha \geq 0: \quad D_1 \gets \text{daughter}_1,\ D_2 \gets \text{daughter}_2$$
 $$\text{if } \alpha < 0: \quad D_1 \gets \text{daughter}_2,\ D_2 \gets \text{daughter}_1$$
+
+6. **Ambiguous ordering:** If no usable transform or discriminating geometry is
+available, preserve a topology-compatible exact loaded pair when possible;
+otherwise assign `daughter1` to `successor1` and `daughter2` to `successor2`.
+Record confidence 0 and a stable-successor-order warning. The unordered pair
+still equals $(R_1,R_2)$.
 
 ### 5.2 Confidence from Angle
 
@@ -395,11 +521,15 @@ $$\vec{\delta}_\text{avg} = \frac{1}{n} \sum_k \hat{\delta}_k$$
 
 The averaged vector is then used in the standard classification algorithm (Section 5.1).
 
-**Note:** Multi-frame averaging is **disabled in lineage centroid mode**. With per-timepoint axes that may differ between frames, averaging the division vector across frames mixes coordinate systems (each frame's vector is projected through different axes). Single-frame classification with quality-aware axis smoothing (Section 4.4) gives better results empirically.
+**Note:** Multi-frame averaging is **disabled in lineage centroid mode**. With per-timepoint axes that may differ between frames, averaging the division vector across frames mixes coordinate systems (each frame's vector is projected through different axes). Single-frame classification with quality-aware axis smoothing (Section 4.5) gives better results empirically.
 
 ### 5.4 Deferred Majority-Vote Evaluation
 
-When the initial single-frame classification has low confidence ($C < 0.3$, corresponding to $\theta > 55°$), the result may be unreliable — particularly during LR axis degeneracy. Rather than committing to a potentially wrong assignment, the system defers and re-evaluates using a look-ahead window.
+When the initial single-frame classification has low confidence ($C < 0.3$,
+corresponding to $\theta > 55°$), the sister ordering may be unreliable —
+particularly during LR axis degeneracy. The system defers the ordering decision
+and re-evaluates using a look-ahead window; the parent-specific daughter family
+itself is never deferred.
 
 **Algorithm:**
 
@@ -412,9 +542,9 @@ $$\text{margin} = \frac{|V_+ - V_-|}{V_+ + V_-}$$
 
 $$C_\text{vote} = \max(C_\text{best},\ \text{margin})$$
 
-5. The deferred result replaces the initial classification if $C_\text{vote} \geq C_\text{initial}$.
+5. The deferred result replaces the initial ordering if $C_\text{vote} \geq C_\text{initial}$. If no frame supplies a usable vote, the deterministic fallback in Section 5.1 assigns the same RuleManager pair and reports low confidence.
 
-This mechanism is especially effective when the axes at the moment of division are degenerate (low LR quality) but recover within a few frames as cells separate.
+This mechanism is especially useful when the secondary axis at the moment of division is geometrically weak but recovers within a few frames as cells separate. The result records the axis label, confidence, and orientation source so the GUI can present it as a preview rather than a fact.
 
 ---
 
@@ -426,9 +556,14 @@ For parent name $P$:
 
 1. **Pre-computed rules** (`new_rules.tsv`): ~620 empirically determined rules with axis vectors derived from actual embryo measurements. Format: `Parent\tLetter\tD1\tD2\tX\tY\tZ`.
 
-2. **Names hash** (`names_hash.csv`): ~60 Sulston letter mappings for less-common divisions. Letter is decoded from an encoded integer value. The axis vector is the standard axis for that letter.
+2. **Canonical founder fallback mappings**: if a legacy rule resource is
+   missing, special non-concatenative pairs remain explicit, including
+   `P0 → AB/P1`, `P1 → EMS/P2`, `EMS → E/MS`, `P2 → C/P3`,
+   `P3 → D/P4`, and `P4 → Z2/Z3`.
 
-3. **Default**: Use letter `"a"` (AP axis), axis vector $(1, 0, 0)$.
+3. **Names hash** (`names_hash.csv`): ~60 Sulston letter mappings for less-common divisions. Letter is decoded from an encoded integer value. The axis vector is the standard axis for that letter.
+
+4. **Default**: Use letter `"a"` (AP axis), axis vector $(1, 0, 0)$.
 
 ### 6.2 Axis Vector Convention
 
@@ -466,6 +601,10 @@ $$c \leftarrow R.\text{pop}(), \quad \text{execute}(c), \quad U \leftarrow U \| 
 
 **Stack size limit:** $|U| \leq 1000$. When exceeded: $U \leftarrow U[1:]$ (oldest command discarded).
 
+**Gesture atomicity:** One completed GUI gesture creates one history entry. Add-with-interpolation, track placement, relink-with-interpolation, rename state changes, and body-axis application use a `CompositeCommand` when multiple low-level mutations are required. Execute is all-or-nothing; undo reverses children in reverse order.
+
+**Saved state:** History maintains a savepoint independently from stack depth. A successful Save or Save As marks the current state saved. Undoing away from it is dirty; redoing exactly back to it is clean. Editing after undo discards the redo branch and cannot become clean merely because the undo-stack length happens to match the old length.
+
 ### 7.3 Callback Architecture
 
 After every `do`/`undo`/`redo`, the `on_edit` callback is invoked. In the GUI, this triggers:
@@ -480,9 +619,9 @@ After every `do`/`undo`/`redo`, the `on_edit` callback is invoked. In the GUI, t
 
 ### 8.1 AddNucleus
 
-**Execute:** Create `Nucleus(x, y, z, size, identity, predecessor, status=1)`. Append to `nuclei_record[time-1]`. Save the appended index.
+**Execute:** Create `Nucleus(x, y, z, size, identity, assigned_id, predecessor, status=1)`. Append to `nuclei_record[time-1]`, save the appended index, and immediately establish the reciprocal successor link when a predecessor is supplied. Automatic identity may be inherited for continuity, but only a pre-existing `assigned_id` may be inherited as a forced override.
 
-**Undo:** Pop the last element from `nuclei_record[time-1]`.
+**Undo:** Remove the added nucleus and restore the predecessor's prior successor slots.
 
 ### 8.2 RemoveNucleus
 
@@ -496,6 +635,8 @@ After every `do`/`undo`/`redo`, the `on_edit` callback is invoked. In the GUI, t
 
 **Undo:** Restore `(x_0, y_0, z_0, \text{size}_0)`.
 
+Position changes are structurally significant for naming: a move can change division geometry and therefore daughter assignment. The post-edit callback reruns naming and rebuilds affected lineage state.
+
 ### 8.4 RenameCell
 
 **Execute:**
@@ -508,7 +649,17 @@ After every `do`/`undo`/`redo`, the `on_edit` callback is invoked. In the GUI, t
 
 **Interaction with the naming pipeline:** `_propagate_assigned_ids()` (Section 2.2) is now a safety net rather than the primary propagation mechanism — the command itself has already written the forced name end-to-end. Daughters beyond the next division are still named automatically by the division caller using the forced name as parent.
 
-### 8.4.5 SwapCellNames
+Whitespace is trimmed before validation. A request equal to the existing effective name is a true no-op and creates no history entry. Commas, line breaks, and control characters are rejected because nucleus records are CSV-compatible text.
+
+### 8.5 ClearNameOverride / Use Automatic
+
+Snapshot `identity` and `assigned_id` across the valid continuation, clear `assigned_id`, and rerun naming. Undo restores both fields exactly. This is distinct from renaming to an empty string: it means “return responsibility to the automatic pipeline.”
+
+### 8.6 SetCellNameState
+
+Snapshot and set the `identity`/`assigned_id` pair over one anchored continuation component. This low-level command is used inside composite placement gestures so a parent-specific automatic daughter suggestion can be stored in `identity` while inherited forced state is retained or cleared deliberately. Undo restores both fields exactly.
+
+### 8.7 SwapCellNames
 
 Used to resolve name collisions when the user tries to rename a cell to a name already in use by another cell.
 
@@ -522,7 +673,7 @@ Used to resolve name collisions when the user tries to rename a cell to a name a
 
 **Empty-name handling:** If either cell has no effective name (e.g. never got a Sulston name), that side of the swap writes the empty string, effectively clearing the other chain's forced name. This is intentional — the operation is "B now has A's name and vice versa," which means blank round-trips if A was blank.
 
-### 8.5 RelinkNucleus
+### 8.8 RelinkNucleus
 
 This is the most complex command, managing bidirectional links.
 
@@ -538,17 +689,17 @@ This is the most complex command, managing bidirectional links.
 - `_remove_successor(parent, child_idx)`: If `succ1 = child_idx`, shift `succ2 → succ1`. If `succ2 = child_idx`, clear it.
 - `_add_successor(parent, child_idx)`: Fill `succ1` first, then `succ2`.
 
-### 8.6 KillCell
+### 8.9 KillCell
 
-**Execute:** For each timepoint in `[start_time, end_time]`, find all alive nuclei with matching identity. Save `(time, index, status, identity, assigned_id)` for each. Kill them all.
+**Execute:** Resolve the selected cell from an anchored `(time,index)` nucleus, then traverse its valid continuation within `[start_time,end_time]`. Matching uses `effective_name`, not `identity`, so forced names work correctly. Save `(time,index,status,identity,assigned_id)` and kill only members of that anchored component; a same-named disconnected cell is not collateral damage.
 
 **Undo:** Restore all saved tuples.
 
-### 8.7 ResurrectCell
+### 8.10 ResurrectCell
 
-Inverse of RemoveNucleus. Sets `status ← 1` and optionally applies a new identity.
+Inverse of RemoveNucleus. It rejects an already-live target, sets `status ← 1`, and restores or explicitly applies both automatic identity and `assigned_id` as appropriate.
 
-### 8.8 RelinkWithInterpolation
+### 8.11 RelinkWithInterpolation
 
 **Execute:**
 1. Let $n = \text{end}\_\text{time} - \text{start}\_\text{time}$.
@@ -565,6 +716,12 @@ $$\text{size}_k = S.\text{size} + (E.\text{size} - S.\text{size}) \cdot \frac{k}
 
 **Undo:** Remove all interpolated nuclei in reverse order. Restore all predecessor/successor links.
 
+The full interpolation plus endpoint relink is executed as one composite history entry. Validators reject a new link that would merge incompatible forced identities; automatic naming must not resolve that conflict by traversal order.
+
+### 8.12 SetBodyAxes
+
+Snapshot the prior AuxInfo/orientation state, install a validated `BodyAxisFrame`, invalidate the identity assigner, and rerun naming. Undo restores the previous frame and resulting naming state. Applying orientation is one user action and one undo step.
+
 ---
 
 ## 9. Validation System
@@ -580,13 +737,20 @@ Each validator returns a list of error message strings. An empty list means the 
 | `validate_relink`                | Valid time/index; new pred exists; new pred has < 2 successors |
 | `validate_kill_cell`             | Name non-empty; start_time valid; cell exists and is alive  |
 | `validate_relink_interpolation`  | end_time > start_time; both nuclei exist; start has < 2 successors |
+| Name validation                  | Trimmed non-empty value; no comma, CR/LF, or control character |
+
+Relink validators also require alive reciprocal endpoints and reject merges between incompatible forced identities. Resurrect validation requires an explicitly selected dead nucleus.
 
 ### 9.2 Post-Naming Validation (`naming/validation.py`)
 
 `validate_naming()` checks for:
 - Naming gaps (unnamed alive cells in the middle of lineages)
 - Duplicate names at a single timepoint
+- Disconnected cells with the same effective name (reported as collisions, never renamed to synthetic `_2` aliases)
 - Name inconsistencies (parent-child name mismatches)
+- Valid reciprocal divisions whose effective daughter set is not the exact
+  RuleManager pair for the effective parent, including explicit forced
+  conflicts (which remain curator-owned but are reported)
 
 Returns a list of `NamingWarning` objects.
 

@@ -113,6 +113,24 @@ class TestCanonicalTransform:
         )
         assert ct.rmsd < 1e-4
 
+    def test_noisy_nonorthogonal_measurement_is_orthogonalized(self):
+        ct = CanonicalTransform(
+            ap_vec=np.array([1.0, 0.0, 0.0]),
+            lr_vec=np.array([0.25, 1.0, 0.0]),
+        )
+
+        assert ct.active
+        assert ct.input_orthogonality > 0.2
+        np.testing.assert_allclose(ct.apply([1.0, 0.0, 0.0]), AP_CANONICAL)
+
+    def test_inverse_apply_round_trip(self):
+        ct = CanonicalTransform(
+            ap_vec=np.array([0.0, 1.0, 0.0]),
+            lr_vec=np.array([1.0, 0.2, 1.0]),
+        )
+        measured = np.array([2.0, -3.0, 4.0])
+        np.testing.assert_allclose(ct.inverse_apply(ct.apply(measured)), measured)
+
     def test_apply_division_vector(self):
         """Test applying the transform to a realistic division vector."""
         ct = CanonicalTransform(

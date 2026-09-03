@@ -18,11 +18,15 @@ Ported from: org.rhwlab.image.ZipImage (ZipImage.java)
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import logging
+import os
 import re
 import typing
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -83,6 +87,168 @@ class ImageProvider(Protocol):
     def image_shape(self) -> tuple[int, int]:
         """(height, width) of each plane."""
         ...
+
+
+@runtime_checkable
+class AllChannelStackProvider(Protocol):
+    """Optional fast path for loading every channel of one timepoint."""
+
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Return channel-ordered ``(Z, Y, X)`` stacks for one timepoint."""
+        ...
+
+
+def enumerate_image_source_files(
+    provider: ImageProvider,
+    *,
+    timepoints: Iterable[int],
+    planes: Iterable[int] | None = None,
+) -> tuple[Path, ...] | None:
+    """Enumerate files a provider can consume for a bounded movie range.
+
+    Built-in wrapper providers are unwrapped recursively.  Per-plane sources
+    include every configured plane at every requested absolute timepoint,
+    including paths which do not currently exist; this is intentional so a
+    later file appearance changes the manifest.  Unknown and in-memory
+    providers return ``None`` and therefore retain their existing behavior.
+
+    Third-party providers can opt in without inheriting from a concrete class
+    by implementing::
+
+        image_source_files(*, timepoints: tuple[int, ...],
+                           planes: tuple[int, ...]) -> Iterable[Path]
+
+    The hook must be side-effect free and should return missing expected paths
+    as well as existing paths when file appearance must invalidate a cache.
+    """
+
+    bounded_times = tuple(
+        sorted({int(value) for value in timepoints if int(value) > 0})
+    )
+    bounded_planes = tuple(
+        sorted({int(value) for value in (planes or ()) if int(value) > 0})
+    )
+
+    if isinstance(provider, SplitChannelProvider):
+        return enumerate_image_source_files(
+            provider._inner,
+            timepoints=bounded_times,
+            planes=bounded_planes,
+        )
+    if isinstance(provider, MultiChannelFolderProvider):
+        combined: list[Path] = []
+        for channel_provider in provider._channels:
+            channel_files = enumerate_image_source_files(
+                channel_provider,
+                timepoints=bounded_times,
+                planes=bounded_planes,
+            )
+            if channel_files is None:
+                return None
+            combined.extend(channel_files)
+        return _canonical_source_paths(combined)
+    if isinstance(provider, ZipTiffProvider):
+        selected_planes = bounded_planes or tuple(range(1, provider._num_planes + 1))
+        return _canonical_source_paths(
+            provider._build_path(time, plane)
+            for time in bounded_times
+            for plane in selected_planes
+        )
+    if isinstance(provider, TiffDirectoryProvider):
+        selected_planes = bounded_planes or tuple(range(1, provider._num_planes + 1))
+        return _canonical_source_paths(
+            provider.directory
+            / provider.pattern.format(time=time, plane=plane, channel=channel)
+            for time in bounded_times
+            for plane in selected_planes
+            for channel in range(max(1, provider.num_channels))
+        )
+    if isinstance(provider, StackTiffProvider):
+        return _canonical_source_paths(
+            provider._build_path(time) for time in bounded_times
+        )
+    if isinstance(provider, OmeTiffProvider):
+        if provider.path.is_dir():
+            # Keep exactly the same extension grouping and lexical ordering
+            # used by OmeTiffProvider._load_directory. That implementation
+            # eagerly reads the entire directory even when only a bounded set
+            # of logical timepoints is later requested, so every file belongs
+            # in the source manifest.
+            files = sorted(provider.path.glob("*.tif")) + sorted(
+                provider.path.glob("*.tiff")
+            )
+            return _canonical_source_paths(files)
+        return _canonical_source_paths((provider.path,))
+    if isinstance(provider, NumpyProvider):
+        return None
+
+    hook = getattr(provider, "image_source_files", None)
+    if not callable(hook):
+        return None
+    return _canonical_source_paths(
+        hook(timepoints=bounded_times, planes=bounded_planes)
+    )
+
+
+def image_source_manifest_token(
+    provider: ImageProvider,
+    *,
+    timepoints: Iterable[int],
+    planes: Iterable[int] | None = None,
+) -> str | None:
+    """Return a deterministic stat-only token for a provider's movie files.
+
+    Contents are deliberately not read.  Canonical path, existence, file
+    type, byte size, and nanosecond modification time are sufficient to make
+    session caches fail closed while keeping validation inexpensive.
+    """
+
+    paths = enumerate_image_source_files(
+        provider,
+        timepoints=timepoints,
+        planes=planes,
+    )
+    if paths is None:
+        return None
+    records = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            records.append(
+                {
+                    "path": os.path.normcase(str(path)),
+                    "exists": False,
+                    "is_file": False,
+                    "size": None,
+                    "mtime_ns": None,
+                }
+            )
+        else:
+            records.append(
+                {
+                    "path": os.path.normcase(str(path)),
+                    "exists": True,
+                    "is_file": path.is_file(),
+                    "size": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                }
+            )
+    payload = json.dumps(
+        {"schema": 1, "files": records},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_source_paths(paths: Iterable[str | Path]) -> tuple[Path, ...]:
+    unique: dict[str, Path] = {}
+    for value in paths:
+        path = Path(value).expanduser().resolve(strict=False)
+        unique[os.path.normcase(str(path))] = path
+    return tuple(unique[key] for key in sorted(unique))
 
 
 # ── Implementations ──────────────────────────────────────────────
@@ -525,6 +691,58 @@ class StackTiffProvider:
             self._update_shape(img[0])
         return img
 
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Decode every TIFF page once and distribute it across channels."""
+
+        tif = self._get_tiff_handle(time)
+        n_pages = len(tif.pages)
+        if n_pages == 0:
+            raise FileNotFoundError(f"Empty TIFF stack for time={time}")
+
+        if n_pages == 1:
+            page = tif.pages[0]
+            image = page.asarray()
+            if image.ndim == 2 and self._num_channels == 1:
+                image = image[np.newaxis, ...]
+                channels = (image,)
+            elif image.ndim == 3 and self._num_channels == 1:
+                samples_per_pixel = int(getattr(page, "samplesperpixel", 1) or 1)
+                if samples_per_pixel > 1:
+                    raise ValueError(
+                        "Cannot treat a sample-bearing RGB TIFF page as a Z stack"
+                    )
+                channels = (image,)
+            elif image.ndim == 4 and image.shape[0] == self._num_channels:
+                channels = tuple(image[channel] for channel in range(self._num_channels))
+            else:
+                raise ValueError(
+                    "Cannot map single-page TIFF shape "
+                    f"{image.shape} to {self._num_channels} channels"
+                )
+            self._num_planes_cached = int(channels[0].shape[0])
+            self._update_shape(channels[0][0])
+            return channels
+
+        if n_pages % self._num_channels:
+            raise ValueError(
+                f"TIFF has {n_pages} pages, not divisible by "
+                f"{self._num_channels} channels"
+            )
+        num_planes = n_pages // self._num_channels
+        by_channel: list[list[np.ndarray]] = [
+            [] for _channel in range(self._num_channels)
+        ]
+        for page_index, page in enumerate(tif.pages):
+            if self._channel_order == "CZ":
+                channel = page_index % self._num_channels
+            else:
+                channel = page_index // num_planes
+            by_channel[channel].append(page.asarray())
+        channels = tuple(np.stack(planes) for planes in by_channel)
+        self._num_planes_cached = num_planes
+        self._update_shape(channels[0][0])
+        return channels
+
     @property
     def num_timepoints(self) -> int:
         if self._num_timepoints is not None:
@@ -680,6 +898,18 @@ class OmeTiffProvider:
         else:
             raise ValueError(f"Unexpected data shape: {self._data.shape}")
 
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Return direct channel views from the already-loaded OME array."""
+
+        self._ensure_loaded()
+        assert self._data is not None
+        time_data = self._data[time - 1]
+        if self._data.ndim == 5:
+            return tuple(time_data[channel] for channel in range(self._n_channels))
+        if self._data.ndim == 4:
+            return (time_data,)
+        raise ValueError(f"Unexpected data shape: {self._data.shape}")
+
     @property
     def num_timepoints(self) -> int:
         self._ensure_loaded()
@@ -779,6 +1009,34 @@ class SplitChannelProvider:
             return np.ascontiguousarray(raw[..., ::-1])
         else:
             return raw
+
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Split one raw stack once instead of reloading it per channel."""
+
+        if not self._split:
+            loader = getattr(self._inner, "get_all_channel_stacks", None)
+            if callable(loader):
+                channels = tuple(loader(time))
+            else:
+                channels = tuple(
+                    self._inner.get_stack(time, channel)
+                    for channel in range(self._inner.num_channels)
+                )
+            if self._flip:
+                return tuple(
+                    np.ascontiguousarray(channel[..., ::-1]) for channel in channels
+                )
+            return channels
+
+        raw = self._inner.get_stack(time, 0)
+        half_width = raw.shape[-1] // 2
+        if self._flip:
+            green = np.ascontiguousarray(raw[..., half_width:][..., ::-1])
+            red = np.ascontiguousarray(raw[..., :half_width][..., ::-1])
+        else:
+            green = raw[..., :half_width]
+            red = raw[..., half_width:]
+        return (green, red)
 
     @property
     def num_timepoints(self) -> int:
@@ -1395,6 +1653,14 @@ class NumpyProvider:
             return self._data[t_idx, channel]
         return self._data[t_idx]
 
+    def get_all_channel_stacks(self, time: int) -> tuple[np.ndarray, ...]:
+        """Return direct channel views without copying the backing array."""
+
+        time_data = self._data[time - 1]
+        if self._data.ndim == 5:
+            return tuple(time_data[channel] for channel in range(self._n_channels))
+        return (time_data,)
+
     @property
     def num_timepoints(self) -> int:
         return self._data.shape[0]
@@ -1412,3 +1678,88 @@ class NumpyProvider:
     @property
     def image_shape(self) -> tuple[int, int]:
         return (self._data.shape[-2], self._data.shape[-1])
+
+
+def clone_image_provider_for_worker(
+    provider: ImageProvider,
+) -> ImageProvider | None:
+    """Create an independent built-in provider for background analysis.
+
+    Several disk-backed providers cache an open ZIP or TIFF handle. Sharing
+    those handles with video playback while tracking runs in another thread is
+    unsafe. This function reconstructs every built-in provider with the same
+    source settings but fresh caches. Unknown third-party providers return
+    ``None`` so callers can retain their existing compatibility fallback.
+    """
+
+    if isinstance(provider, ZipTiffProvider):
+        return ZipTiffProvider(
+            provider.tif_directory,
+            tif_prefix=provider.tif_prefix,
+            num_planes=provider._num_planes,
+            use_zip=provider.use_zip,
+            t_width=provider.t_width,
+            p_width=provider.p_width,
+        )
+    if isinstance(provider, TiffDirectoryProvider):
+        return TiffDirectoryProvider(
+            provider.directory,
+            pattern=provider.pattern,
+            num_planes=provider._num_planes,
+        )
+    if isinstance(provider, StackTiffProvider):
+        return StackTiffProvider(
+            provider.directory,
+            pattern=provider.pattern,
+            num_channels=provider._num_channels,
+            channel_order=provider._channel_order,
+        )
+    if isinstance(provider, OmeTiffProvider):
+        return OmeTiffProvider(provider.path)
+    if isinstance(provider, SplitChannelProvider):
+        inner = clone_image_provider_for_worker(provider._inner)
+        if inner is None:
+            return None
+        return SplitChannelProvider(
+            inner,
+            split=provider._split,
+            flip=provider._flip,
+        )
+    if isinstance(provider, MultiChannelFolderProvider):
+        channels = [
+            clone_image_provider_for_worker(channel)
+            for channel in provider._channels
+        ]
+        if any(channel is None for channel in channels):
+            return None
+        return MultiChannelFolderProvider(
+            [channel for channel in channels if channel is not None],
+            flip=provider._flip,
+        )
+    if isinstance(provider, NumpyProvider):
+        # The wrapper is independent; the immutable analysis path only reads
+        # the underlying array, so copying a potentially large volume is not
+        # necessary.
+        return NumpyProvider(provider._data)
+    return None
+
+
+def close_worker_image_provider(provider: ImageProvider) -> None:
+    """Release cached handles owned by a cloned background provider."""
+
+    if isinstance(provider, SplitChannelProvider):
+        close_worker_image_provider(provider._inner)
+        return
+    if isinstance(provider, MultiChannelFolderProvider):
+        for channel in provider._channels:
+            close_worker_image_provider(channel)
+        return
+    for attribute in ("_open_zip", "_open_tif"):
+        handle = getattr(provider, attribute, None)
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                logger.debug("Could not close background image handle", exc_info=True)
+            finally:
+                setattr(provider, attribute, None)
