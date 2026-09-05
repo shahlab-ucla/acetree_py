@@ -6,6 +6,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import tifffile
+
+pytest.importorskip("qtpy.QtWidgets")
+
 from qtpy.QtCore import QTimer, Qt
 from qtpy.QtWidgets import QWidget
 
