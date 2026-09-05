@@ -140,3 +140,7 @@ Agent gate: **65 passed**, including 11 worker lifecycle cases and existing expr
 ### Real napari workflow checkpoint
 
 At 586a8b0 with Windows Qt/OpenGL and synthetic two-channel images, absolute planeStart=7: edit/undo/redo, real napari polygon drawing, review, filtering/overlay clearing, ROI async measure -> scalar CSV/SVG -> vertex edit/export rejection -> remeasure/export recovery, nuclear async measure/channel selection, clean ZIP Save As/ROI reopen/source preservation, 3D visibility restoration, detached 3D and expression windows all passed. The old layout after saving a long path still grew to 1280x1125; C4 addresses that before final fit acceptance. Harness and screenshots are workspace scratch artifacts.
+
+### R3 — measurement save state
+
+Successful nuclear publication marks the archive fields unsaved independently of undo history. A complete Save/Save As clears that state; cancellation, failed saves, failed retarget and intermediate copies preserve it. The workspace consumes the flag. Extended existing async/save workflows: **28 passed**; functional lint passed. Reviewed before integration.

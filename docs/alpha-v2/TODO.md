@@ -18,7 +18,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 | A5 Async nuclear measurement | measurement | M | A4 | atomic files/fields/store; stale/cancel preserves previous | complete; 4b18613 + 13b7578, 65 focused tests |
 | B4 Shared tracking settings | core | M | B3 | focused helpers, selected/global workflows unchanged | complete; dcd47c6 (agent), 118 focused tests |
 | C4 Workflow workspace | UI | M | C1,C3 | Nuclei/Objects/Tracking; 1280x720; all actions reachable | pending |
-| R3 Measurement save state | core/coordinator | S | A5,C4 | successful measurement remains unsaved until Save; cancel/failure preserves state | in progress |
+| R3 Measurement save state | core/coordinator | S | A5,C4 | successful measurement remains unsaved until Save; cancel/failure preserves state | complete; a52fde4, 28 focused tests |
 | R2 Alpha installation/docs | coordinator | S | integration | installers identify alpha-v2; docs match UI | installation complete; workflow docs pending |
 | Final acceptance | coordinator | M | all above | full non-MATLAB suite; live napari; memory/navigation evidence | pending |
 
@@ -39,7 +39,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 - [x] A5
 - [x] B4
 - [ ] C4
-- [ ] R3
+- [x] R3
 - [ ] R2
 - [ ] Final acceptance
 
