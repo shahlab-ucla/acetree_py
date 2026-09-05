@@ -699,6 +699,11 @@ Use Measure when:
 4. Click **OK**. A progress dialog shows `channel c/N, timepoint t/T…` and can be cancelled.
 5. When the run completes, every open lineage tree panel rebuilds to reflect the fresh `rweight` values. A status message reports how many CSVs were written.
 
+Nucleus Z coordinates are absolute planes. Alpha v2 samples the first image
+slice at the configured `planeStart` (normally 1), including cropped datasets
+whose first plane has a higher number. Recomputing older measurements can
+change values that were affected by the previous one-plane sampling offset.
+
 The completed run also keeps every measured image channel available to any
 open **Expression Plot** window for the rest of the session. The legacy nuclei
 ZIP still stores only the selected AT channel; after reopening a dataset, run
@@ -1039,6 +1044,12 @@ The `.aceexpr` extension has two intentionally different compatibility modes:
   cacheless selected-trace capture. It remains readable and restylable, but it
   is not promoted into a full cache during load.
 
+Alpha v2 records nuclear measurement algorithm 2. Older algorithm-1 caches and
+captures retain their original provenance and are labeled historical. They can
+still be opened, but corrected algorithm-2 values cannot be combined numerically
+with historical or unversioned measurements. Attach the sources and recompute
+older rows, or exclude those rows using **Use**, before comparing them.
+
 Use the workflow as follows:
 
 1. In a recomputed live comparison, click **Save measurement set…**. AceTree
@@ -1125,12 +1136,15 @@ automatically.
 
 1. Open a dataset with images and choose **Objects → Show Subcellular
    Objects** if the right-side dock is hidden.
-2. Click **Manage classes…**, enter a class name, and choose its display color.
-   The current UI creates one class per invocation. Select the class in the
+2. Click **Manage classes…**. Choose **New class…** to create a class, or select
+   an existing class to rename it or change its color. Empty classes can be
+   deleted; classes containing tracks remain protected from deletion. These
+   edits support Undo after closing the dialog. Select the class in the
    **Class** box before drawing a new object.
 3. Use **Show ROIs**, **Cell**, **State**, and **Search** to filter the overlay
-   and track list. Selecting an object does not clear the selected nucleus or
-   cell.
+   and track list. Hiding the selected object clears it as an editing target.
+   Selecting an object preserves the selected nucleus or cell. **Current cell**
+   shows no objects until a cell is selected.
 
 #### Draw and edit observations
 
@@ -1172,6 +1186,10 @@ frame…** removes only the current observation.
 Orphaned or unassociated geometry remains visible and measurable. It is omitted
 only from operations that require a resolved cell. Track rows use both text and
 glyphs to distinguish Draft, Reviewed, Needs review, Absent, and Missing states.
+Use **Expected span…** to set the interval requiring annotation. Unspecified
+bounds use the first and last recorded observations. A track is Complete only
+when every expected timepoint has a reviewed segmentation or reviewed absence;
+unrecorded gaps remain incomplete.
 
 #### Measure raw ROI intensities
 
@@ -1228,8 +1246,10 @@ Ordinary **Save** (`Ctrl+S`) writes ROI annotations to
 `<dataset>.subcellular-rois.json` beside the dataset XML in the same coordinated
 save boundary as the nuclei ZIP, AuxInfo, and dirty XML. If any authoritative
 replacement fails, AceTree restores the previous generation and keeps the
-document dirty. Current **Save As** retargets the nuclei ZIP while the ROI
-sidecar remains beside the source XML.
+document dirty. For an XML-backed dataset, **Save As** retargets the nuclei ZIP
+in the source XML while its ROI sidecar remains beside that XML. For a dataset
+opened directly from a ZIP, Save As copies even clean ROI annotations beside
+the new ZIP and sends later saves there, leaving the original sidecar intact.
 
 The sidecar preserves object UUIDs, class/index allocation, geometry,
 associations, explicit absence, and review states. Measurement snapshots are

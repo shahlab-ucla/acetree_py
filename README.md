@@ -4,6 +4,12 @@ Python reimplementation of [AceTree](https://github.com/zhirongbaolab/AceTree) f
 
 Built on [napari](https://napari.org) with full undo/redo, topology-based cell naming, interactive relink, 3D volume view, multi-channel display, rule-based visualization, manual tracking, and multi-panel lineage tree display.
 
+The [alpha v2 audit and task list](docs/alpha-v2/TODO.md) records the refinement
+work and its [validation evidence](docs/alpha-v2/VALIDATION.md). Nuclear
+measurements now honor the configured first Z plane; older measurement caches
+retain their historical provenance and require recomputation before comparison
+with corrected measurements.
+
 ## Installation
 
 Requires **Python 3.10+** and Git. Alpha v2 is developed on `alpha-v2`,
