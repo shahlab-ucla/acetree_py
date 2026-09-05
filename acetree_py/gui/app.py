@@ -175,6 +175,7 @@ class AceTreeApp:
         self.image_source_error = ""
         self.roi_manager = roi_manager if roi_manager is not None else RoiManager()
         self.roi_measurement_engine = RoiMeasurementEngine(image_provider)
+        self._measurement_jobs = None
         self.edit_history = EditHistory(
             manager.nuclei_record,
             on_edit=self._on_edit,
@@ -3739,14 +3740,11 @@ class AceTreeApp:
                 if self._subcellular_objects_panel is not None:
                     self._subcellular_objects_panel.set_mode("edit")
             elif action == "measure":
-                snapshot = self.roi_measurement_engine.measure(
-                    self.roi_manager,
-                    object_ids=(object_id,),
-                )
-                self._refresh_roi_scalar_plot_windows(snapshot)
-                self._say(
-                    f"Measured {len(snapshot.samples)} ROI channel samples"
-                )
+                from ..analysis.roi_measurements import RoiMeasurementRequest
+
+                self.start_roi_measurement(RoiMeasurementRequest(
+                    document=self.roi_manager, object_ids=(object_id,),
+                ))
             elif action == "plot_track":
                 from .roi_scalar_plot_window import RoiScalarPlotWindow
 
@@ -4656,57 +4654,61 @@ class AceTreeApp:
         except (AttributeError, RuntimeError):
             logger.debug("Could not reveal the Subcellular Objects dock")
 
+    def _measurement_job_controller(self):
+        if self._measurement_jobs is None:
+            from .measurement_jobs import MeasurementJobs
+
+            window = self.viewer.window._qt_window if self.viewer is not None else None
+            self._measurement_jobs = MeasurementJobs(window, self._say)
+        return self._measurement_jobs
+
+    def start_roi_measurement(self, request) -> bool:
+        """Capture ROI inputs now, then compute privately and publish on completion."""
+
+        from ..analysis.roi_measurement_job import (
+            prepare_roi_measurement, compute_roi_measurement, publish_roi_measurement,
+        )
+
+        jobs = self._measurement_job_controller()
+        if jobs.active:
+            self._say("A measurement is already running; cancel it or wait for completion")
+            return False
+        if self.image_provider is None:
+            self._say("No image source is available for ROI measurement")
+            return False
+        prepared = prepare_roi_measurement(request, self.image_provider)
+
+        def publish(snapshot):
+            publish_roi_measurement(
+                prepared, snapshot, self.roi_manager, self.image_provider,
+                self.roi_measurement_engine.store,
+            )
+            self._refresh_roi_scalar_plot_windows(snapshot)
+            self._say(f"Measured {len(snapshot.samples)} ROI channel samples")
+
+        return jobs.start(
+            "Measure Subcellular Objects",
+            lambda progress, cancelled: compute_roi_measurement(prepared, progress, cancelled),
+            publish,
+        )
+
     def _on_measure_rois(self) -> None:
         if self.viewer is None or self.image_provider is None:
             self._say("No image source is available for ROI measurement")
             return
-        from qtpy.QtCore import Qt
-        from qtpy.QtWidgets import QApplication, QDialog, QProgressDialog
-
+        if self._measurement_job_controller().active:
+            self._say("A measurement is already running; cancel it or wait for completion")
+            return
+        from qtpy.QtWidgets import QDialog
         from .roi_measure_dialog import RoiMeasureDialog
 
         dialog = RoiMeasureDialog(self, parent=self.viewer.window._qt_window)
         if dialog.exec_() != QDialog.Accepted:
             return
         try:
-            request = dialog.build_request()
-        except (ValueError, RuntimeError) as error:
+            self.start_roi_measurement(dialog.build_request())
+        except (TypeError, ValueError, RuntimeError) as error:
             self._say(str(error))
-            return
-        progress = QProgressDialog(
-            "Measuring subcellular objects…",
-            "Cancel",
-            0,
-            1,
-            self.viewer.window._qt_window,
-        )
-        progress.setWindowTitle("Measure Subcellular Objects")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-
-        def progress_cb(completed: int, total: int) -> bool:
-            progress.setMaximum(max(1, total))
-            progress.setValue(completed)
-            progress.setLabelText(
-                f"Measuring ROI channel sample {completed}/{max(1, total)}…"
-            )
-            QApplication.processEvents()
-            return not progress.wasCanceled()
-
-        try:
-            snapshot = self.roi_measurement_engine.measure(
-                request,
-                progress_cb=progress_cb,
-            )
-        except Exception as error:
-            logger.exception("ROI measurement failed")
-            self._say(f"ROI measurement failed: {error}")
-            return
-        finally:
-            progress.close()
-        self._refresh_roi_scalar_plot_windows(snapshot)
-        self._say(f"Measured {len(snapshot.samples)} ROI channel samples")
 
     def _on_measure(self) -> None:
         """Run the Measure orchestrator from a File → Measure… dialog.

@@ -1716,6 +1716,21 @@ class NumpyProvider:
 def clone_image_provider_for_worker(
     provider: ImageProvider,
 ) -> ImageProvider | None:
+    """Clone built-in handles while retaining already discovered dimensions."""
+
+    clone = _clone_image_provider_for_worker(provider)
+    if clone is not None:
+        # Shape/plane discovery can precede analysis; losing those scalar
+        # values makes an otherwise valid ROI rasterize against an empty image.
+        for name in ("_shape", "_num_planes_cached", "_num_timepoints"):
+            if hasattr(provider, name):
+                setattr(clone, name, getattr(provider, name))
+    return clone
+
+
+def _clone_image_provider_for_worker(
+    provider: ImageProvider,
+) -> ImageProvider | None:
     """Create an independent built-in provider for background analysis.
 
     Several disk-backed providers cache an open ZIP or TIFF handle. Sharing
