@@ -90,3 +90,11 @@ Agent gate: **125 passed**. Sparse continuation across 100,000 existing nuclei/2
 ### Integrated checkpoint
 
 At ca96488, venv/offscreen run: **1889 passed, 8 skipped, 19 deselected, 8 failed**. Seven failures were OpenGL context creation under Qt offscreen; real Windows-backend rendering works. One old build-label assertion was corrected to alpha v2. Final gate uses the functioning renderer.
+
+### A3 — bounded ROI image memory and operation freshness
+
+Decoded planes/stacks are released when sorted time/channel task groups advance and reused by objects within each group. Prepared read contexts validate image manifests once per plot/export and index the immutable document for sample checks. Direct readers continue to validate their own dependencies.
+
+Agent gate: **37 passed**. Mixed 2D/3D movie regression verified one live decoded group, six plane and six stack reads across three times/two channels, unchanged values, and all decoded arrays released after completion. Plot/export scenario verifies one manifest read per operation, metadata stability, geometry invalidation/recompute and external-file rejection.
+
+Windows GUI checkpoint: **73 passed, 1 failed**. All OpenGL context failures resolved; remaining contrast test called a removed single-channel method. Updated the existing scenario to click Auto All and compare real layer limits with image percentiles, then exercise manual limits.

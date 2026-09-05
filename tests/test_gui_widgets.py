@@ -15,7 +15,7 @@ import pytest
 # Skip entire module if Qt/napari not available
 try:
     from qtpy.QtCore import Qt
-    from qtpy.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication, QPushButton
     import napari
 
     _GUI_AVAILABLE = True
@@ -576,16 +576,19 @@ class TestNapariIntegration:
         widget = ContrastTools(app)
         qtbot.addWidget(widget)
 
-        # Auto contrast should work with real image layer
-        widget._auto_contrast()
-        # Min should be > 0 (data is random 0-999)
-        assert widget._min_spin.value() >= 0
-        assert widget._max_spin.value() > widget._min_spin.value()
+        widget.refresh()
+        auto = next(button for button in widget.findChildren(QPushButton)
+                    if button.text() == "Auto All")
+        auto.click()
+        ctrl = widget._channel_ctrls[0]
+        layer = app._image_layers[0]
+        expected = [int(value) for value in np.percentile(layer.data, [1, 99])]
+        assert layer.contrast_limits == pytest.approx(expected, abs=1)
 
-        # Setting values should update the layer
-        widget._min_slider.setValue(100)
-        widget._max_slider.setValue(900)
-        limits = app._image_layer.contrast_limits
+        # Setting values should update the layer.
+        ctrl.min_slider.setValue(100)
+        ctrl.max_slider.setValue(900)
+        limits = layer.contrast_limits
         assert limits[0] == pytest.approx(100, abs=1)
         assert limits[1] == pytest.approx(900, abs=1)
 

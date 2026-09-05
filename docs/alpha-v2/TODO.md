@@ -10,7 +10,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 | R1 Clean ROI Save As | coordinator | S | baseline | new ZIP reopens clean ROI; next save preserves source | complete; 23 save tests passed |
 | A2 Channel identity | coordinator | S | baseline (independent of A1) | missing-first channel rejected without renumbering | complete; 214 focused tests |
 | B2 Tracking request preservation | core | M | B1 | branch policies round-trip; nested inputs detached | complete; 3ee0990 (agent), 226 passed/2 skipped |
-| A3 ROI bounded memory/freshness | measurement | M | A2 | images bounded per group; manifest once per plot/export | pending |
+| A3 ROI bounded memory/freshness | measurement | M | A2 | images bounded per group; manifest once per plot/export | complete; c0700aa (agent), 37 focused tests |
 | C2 ROI plot freshness | UI | M | C1,A3 contract | edit blocks all export; remeasure restores | pending |
 | B3 Bounded tracking undo | core | M | B2 | affected-only snapshots; rollback and nucleus identity | complete; ec8bdb5 (agent), 125 focused tests |
 | C3 Object management/navigation | UI | M | C1 | class/span actions; true completeness; no Z list rebuild | complete; 2b9574b (agent), 33 focused tests |
@@ -30,7 +30,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 - [x] R1
 - [x] A2
 - [x] B2
-- [ ] A3
+- [x] A3
 - [ ] C2
 - [x] B3
 - [x] C3
