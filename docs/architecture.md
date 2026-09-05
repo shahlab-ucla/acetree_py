@@ -57,6 +57,7 @@ acetree_py/                    # Root package (__version__ = "0.2.0")
     auto_tracking_dialog.py    # Modeless selected-cell configure/review workbench
     global_tracking_dialog.py  # Modeless whole-dataset draft workbench
     tracking_worker.py         # Cancellable Qt-thread analysis adapter
+    measurement_jobs.py        # Shared ROI/nuclear job lifetime and GUI publication
     tracking_preview.py        # Proposal/gap/diagnostic expansion for review
     lineage_widget.py          # LineageWidget (Sulston tree)
     lineage_layout.py          # Layout engine (pure computation)
@@ -82,7 +83,10 @@ acetree_py/                    # Root package (__version__ = "0.2.0")
     export.py                  # CSV, Newick export functions
     measure.py                 # Per-nucleus pixel sampling (port of ExtractRed)
     measure_csv.py             # Measure CSV writer (per-channel, absolute time)
-    measure_runner.py          # Measure orchestrator + correction-neutral families
+    measure_runner.py          # Private staging, atomic publication, expression families
+    nuclear_measurement_job.py # Detached nuclei/CSV inputs and worker publication checks
+    roi_measurement_job.py     # Immutable ROI input and private-provider worker boundaries
+    roi_measurements.py        # Bounded image groups and operation-scoped freshness
   utils/
     geometry.py                # 3D vector math helpers
   resources/
@@ -602,7 +606,7 @@ Toggled via the **3D** button in player controls. Switches napari to `ndisplay=3
 - In editing mode: white=selected, purple=named, orange=unnamed (Nuc\*), gray=no name.
 - In visualization mode: colors from the active `ColorRuleEngine` rules.
 
-All channels are loaded as 3D stacks when entering 3D mode. Click-to-select and relink pick mode work in 3D. Tracking proposals use separate read-only napari Points and Shapes/path layers, with ring/diamond/cross symbols for detections, interpolation, and diagnostic candidates. A stopped selected-forward search is a calibrated three-ring wireframe sphere. Proposal rendering normalizes Z to stack-local coordinates; the current image-provider/navigation contract still assumes datasets begin at plane 1, so non-default `plane_start` is not advertised as an end-to-end loading feature.
+All channels are loaded as 3D stacks when entering 3D mode. Click-to-select and relink pick mode work in 3D. Tracking proposals use separate read-only napari Points and Shapes/path layers, with ring/diamond/cross symbols for detections, interpolation, and diagnostic candidates. A stopped selected-forward search is a calibrated three-ring wireframe sphere. Proposal rendering normalizes Z to stack-local coordinates; the viewer and image-provider boundary translate absolute planes using the configured `plane_start`. Nuclear and ROI measurement apply the same origin.
 
 ### 6.9 Detached 3D Viewer (`gui/viewer_3d_window.py`)
 
@@ -711,6 +715,32 @@ measurement snapshot. A successful correction change marks the XML config
 dirty so ordinary Save persists the correction identity alongside the nuclei
 ZIP. The public
 `run_measure() -> list[Path]` return contract remains unchanged.
+
+The GUI uses `prepare_nuclear_measurement` to copy nuclei, movie/config settings,
+and flat CSV cell fields; no naming or parent/daughter graph enters the worker.
+`prepare_measure_publication` computes on a private provider, stages the CSVs,
+and builds the immutable result. `commit_measure_publication` validates the
+live manager and performs the transaction on the GUI thread. The controller
+checks source identities, image manifests, edit events and cancellation before
+calling commit. `discard_measure_publication` removes unpublished staged files.
+The synchronous `run_measure` API wraps prepare and commit for headless callers.
+
+`MeasurementJobs` owns one active ROI or nuclear job per app, a nonmodal progress
+dialog, cooperative cancellation, queued publication and Qt teardown. Closing a
+window invalidates publication without waiting; process exit joins the owned
+worker so file handles and staged outputs are released before Python teardown.
+Built-in image providers clone handles and retain discovered dimensions; unknown
+providers retain the synchronous measurement APIs rather than sharing handles.
+
+ROI workers capture immutable documents and publish complete snapshots only after
+source validation. Decoded image caches live for one sorted time/channel task
+group. Plot and export readers prepare one image-manifest validation context and
+use indexed, per-sample geometry checks; contexts do not survive an operation.
+
+Nuclear measurement algorithm 2 subtracts `plane_start` from absolute nucleus Z.
+Historical algorithm-1 caches keep their recorded version; corrected/historical
+numeric comparisons require remeasurement or exclusion, without changing the
+existing `.aceexpr` schema.
 
 The measurement set is keyed by `(timepoint, nucleus.index)` and stores raw,
 annulus, blot, pixel-count, and selected expression values for every channel.

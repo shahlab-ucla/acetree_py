@@ -21,6 +21,7 @@ The accepted scope is balanced correctness/performance refinement and a Nuclei /
 | B3 | P2 | Tracking acceptance snapshots every nucleus; global analysis copies nuclei it does not use. Snapshot only affected state. |
 | C3 | P2 | Object rows rescan all histories on Z changes; missing expected frames can still be Complete. Existing class/span commands lack UI. |
 | A4/A5 | P2 | Measurement runs synchronously with processEvents. Prepare privately and validate/publish on GUI thread. |
+| R3 | P2 | Successful nuclear measurement with unchanged correction has no unsaved indicator; the new workspace must keep this distinct from undo history until a successful save. |
 | B4 | P3 | Tracking dialogs duplicate preset/settings and compatibility presentation; twelve methods/148 lines are AST-identical. Extract focused composed helpers. |
 
 ## Deferred findings and boundaries

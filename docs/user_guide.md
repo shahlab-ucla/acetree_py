@@ -696,7 +696,9 @@ Use Measure when:
 3. In the dialog:
    - **AT channel** — the channel whose measurements will be written back onto each `Nucleus` as `rwraw` / `rwcorr1` and drive the lineage-tree coloring. All channels are still measured; this just picks which one becomes the "AT" channel.
    - **Output folder** — where the per-channel CSVs go. Defaults to `<zip_dir>/measurements` when a nuclei zip is loaded.
-4. Click **OK**. A progress dialog shows `channel c/N, timepoint t/T…` and can be cancelled.
+4. Click **OK**. Measurement runs in the background with a cancellable progress
+   dialog. Navigation stays available. One ROI or nuclear measurement can run
+   at a time; cancel the current run or wait before starting another.
 5. When the run completes, every open lineage tree panel rebuilds to reflect the fresh `rweight` values. A status message reports how many CSVs were written.
 
 Nucleus Z coordinates are absolute planes. Alpha v2 samples the first image
@@ -1186,7 +1188,7 @@ frame…** removes only the current observation.
 Orphaned or unassociated geometry remains visible and measurable. It is omitted
 only from operations that require a resolved cell. Track rows use both text and
 glyphs to distinguish Draft, Reviewed, Needs review, Absent, and Missing states.
-Use **Expected span…** to set the interval requiring annotation. Unspecified
+Use **Set span…** to set the interval requiring annotation. Unspecified
 bounds use the first and last recorded observations. A track is Complete only
 when every expected timepoint has a reviewed segmentation or reviewed absence;
 unrecorded gaps remain incomplete.
@@ -1211,7 +1213,9 @@ Global, and Blot background corrections are not applied. A real intensity of
 zero remains zero; absent, invalid, unavailable, clipped, or non-finite samples
 retain an explicit status instead of being converted to zero. Physical
 normalizations require matching XY/Z calibration. Cancellation, an image-source
-change, or an ROI edit during the run publishes no partial snapshot.
+change, or an ROI edit during the run publishes no partial snapshot. Measurement
+runs in the background; the image viewer remains responsive, and ROI/nuclear
+runs share one active measurement slot.
 
 The selected row's **Measure** button is a quick object-only run using the
 default scalar settings. Use the Objects-menu dialog when profiles,

@@ -130,3 +130,13 @@ Fresh-process tracemalloc with two synthetic objects (2D polygon and 3D contours
 ### Differential functional lint
 
 At 101589a, production F/E9 diagnostics: **32 baseline, 32 alpha, zero introduced**. Existing style-only and unused-code cleanup outside the accepted tasks was not expanded into a formatter sweep.
+
+### A4/A5 — background measurement completed
+
+Nuclear snapshots copy nuclei and movie/config settings plus flat CSV cell rows; naming/parent/daughter graphs remain on the GUI side. ROI/nuclear jobs share a single active slot. GUI completion validates manager/provider identities, source manifests and edit freshness before publication; expression channel changes only after success. Cancelled, edited, replaced-source and closed-window runs preserve prior results and discard staged files.
+
+Agent gate: **65 passed**, including 11 worker lifecycle cases and existing expression transactions. Independent reproductions after fixes: deleted-progress window close had no exceptions and discarded once; application quit during a three-second read ran provider cleanup/discard, stopped the thread and exited with code 0. Ordinary cancellation/window close remains nonblocking; final process exit cooperatively drains its owned worker.
+
+### Real napari workflow checkpoint
+
+At 586a8b0 with Windows Qt/OpenGL and synthetic two-channel images, absolute planeStart=7: edit/undo/redo, real napari polygon drawing, review, filtering/overlay clearing, ROI async measure -> scalar CSV/SVG -> vertex edit/export rejection -> remeasure/export recovery, nuclear async measure/channel selection, clean ZIP Save As/ROI reopen/source preservation, 3D visibility restoration, detached 3D and expression windows all passed. The old layout after saving a long path still grew to 1280x1125; C4 addresses that before final fit acceptance. Harness and screenshots are workspace scratch artifacts.
