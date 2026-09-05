@@ -77,7 +77,7 @@ python -m pip install "acetree-py[gui] @ git+https://github.com/shahlab-ucla/ace
 | qtpy       | 2.4    | >= 2.3              |
 | tifffile   | 2026.3 | >= 2023.1           |
 
-**napari version note:** The GUI uses some napari-internal APIs for dock widget management. These are tested against napari 0.5.x–0.6.x. The upper bound (`<0.7`) guards against potential breaking changes.
+**napari version note:** The GUI supports napari 0.5.x–0.6.x and uses some internal dock APIs. This alpha was validated with napari 0.6.6. The upper bound (`<0.7`) guards against potential breaking changes.
 
 ## Usage
 
@@ -128,7 +128,7 @@ Use **Track Selected Cell...** for sparse forward tracking in any new or loaded
 XML dataset. Use **Track Whole Movie...** for an empty record, including the
 initial draft offered by the dataset wizard. Both entry points, plus Manual
 Track, are available from the top-level **Tracking** menu and the scrollable
-**Edit & Tracking Tools** dock. **Advanced and custom settings**
+**Workflow > Tracking** tab. **Advanced and custom settings**
 can load, edit, and save an external legacy parameter file, and AceTree remembers
 the most recently selected external file. Exact mode never silently falls back
 to native scoring, and no nuclei change until **Accept Draft**.
@@ -173,6 +173,7 @@ acetree-py info config.xml --cell ABala
 
 ## Features
 
+- **Nuclei / Objects / Tracking workspace** — compact navigation, shared save/undo controls, scrollable inspectors, and independent analysis windows fit a 1280x720 display.
 - **Napari-based viewer** with nucleus overlay, z-plane navigation, cell tracking, and hover tooltips
 - **Multi-channel display** — per-channel contrast sliders, visibility toggles, green/magenta colormaps for dual-channel data
 - **Interleaved multichannel TIFFs** — single TIFF per timepoint with pages laid out as `Z1C1, Z1C2, Z2C1, Z2C2, …` (or planar `Z1C1..ZnC1, Z1C2..ZnC2`); supported by the XML config (`<image numChannels="N" channelOrder="CZ|ZC"/>`), the dataset-creation wizard, and the `acetree-py create --interleaved` CLI flag
@@ -191,7 +192,7 @@ acetree-py info config.xml --cell ABala
 - **Save/Save As** — persist edits to ZIP files compatible with Java AceTree
 - **Export** — cell tables, nucleus tables, expression time series, Newick trees
 - **Subcellular objects and ROI measurements (Objects menu)** — manually curate stable, class-indexed 2D polygons, thick lines, and consecutive-Z contour stacks alongside nuclei; associate observations with same-frame cells; track Draft/Reviewed/Needs review/Absent states; measure raw scalar intensities, physical geometry, distributions, and thick-line profiles across image channels; plot gap-aware scalar tracks or spatial profiles; and export exact CSV/SVG results. Versioned checksummed `.subcellular-rois.json` sidecars save atomically with the authoritative dataset and fail closed on malformed, newer, or externally changed data.
-- **Expression Plot (Window → New Expression Plot…)** — open any number of independent multi-cell plots, choose any freshly measured image channel, align by absolute time, birth, or normalized lifetime, optionally apply tunable gap-preserving Gaussian smoothing, customize series/axes/legend styling, and export the exact plotted snapshot as CSV or SVG. Incomplete or edit-stale measurements prompt for Measure and fail closed for export. Subcellular scalar tracks use the dedicated **Plot track** action in the Objects dock.
+- **Expression Plot (Window → New Expression Plot…)** — open any number of independent multi-cell plots, choose any freshly measured image channel, align by absolute time, birth, or normalized lifetime, optionally apply tunable gap-preserving Gaussian smoothing, customize series/axes/legend styling, and export the exact plotted snapshot as CSV or SVG. Incomplete or edit-stale measurements prompt for Measure and fail closed for export. Subcellular scalar tracks use the dedicated **Plot track** action in the **Workflow > Objects** tab.
 - **Expression Comparison and measurement sets (Window → New Expression Comparison…)** - compare one exact canonical cell across any number of saved XML datasets, group replicates, show transparent individual traces, and add mean/median summaries with supported error bands. Image recomputation reads a dataset once to build a correction-neutral cache for every named cell and every image channel; cell, channel, and correction changes then materialize immediately without image I/O (`local`/`cross` use the documented global fallback). **Save measurement set…** writes the reusable cache and current view to a checksummed schema-v2 `.aceexpr` file without recomputing, even when the current plot cannot be exported. Reopen it through **Window → Open Expression Measurement Set / Result…**, the window's open button, or drag/drop; CSV, SVG, and another measurement-set save work offline. Add or drop more XMLs, then choose **Recompute new or stale** to append only missing/changed caches or **Recompute all…** to replace every attached cache. Legacy schema-v1 `.aceexpr` captures still open as fixed one-request results.
 
 ## Documentation

@@ -53,6 +53,7 @@ acetree_py/                    # Root package (__version__ = "0.2.0")
     persistence.py             # Versioned .tracking.json sidecar
   gui/                         # napari GUI — all Qt/napari deps isolated here
     app.py                     # AceTreeApp (main application)
+    workspace.py               # Workflow tabs, shared actions and browse/channel layout
     viewer_integration.py      # ViewerIntegration (nucleus overlay)
     auto_tracking_dialog.py    # Modeless selected-cell configure/review workbench
     global_tracking_dialog.py  # Modeless whole-dataset draft workbench
@@ -451,20 +452,26 @@ Main coordinator. Owns the napari `Viewer`, `NucleiManager`, `EditHistory`, and 
 
 **Stable selection:** The app stores `_selection_anchor = (time,index)` and re-resolves the selected nucleus after naming/tree rebuilds. Changing z-plane does not clear selection; explicit Deselect does. Any index fallback is time-qualified so duplicate per-frame indices cannot select the wrong nucleus.
 
+`gui/workspace.py` composes existing panels rather than duplicating their handlers.
+Shared document actions and target/mode/save status surround Nuclei, Objects and
+Tracking tabs. Browse & Channels combines lineage search with scrollable channel
+controls. Native layer docks are hidden through their actual handles with a title
+fallback; their napari menu toggles remain available.
+
 **Widget layout:**
 ```
-┌──────────────────────────────────────────────┐
-│  napari Viewer (image + nucleus overlay)      │
-├──────────┬───────────────────┬───────────────┤
-│ Contrast │                   │ Edit          │
-│ (per-ch) │                   │ Tools         │
-│          │                   │               │
-│ Lineage  │                   │               │
-│ List     │                   │               │
-├──────────┴───────────────────┴───────────────┤
-│ Player Controls (time/plane/labels/deselect/3D)│
-│ Lineage Tree (Sulston tree visualization)     │
-└──────────────────────────────────────────────┘
++--------------------------------------------------------------+
+| Player Controls: time, plane, labels, deselect, 3D             |
++----------------+-------------------------+-------------------+
+| Browse &       | Image viewer            | Workflow          |
+| Channels       | Nuclei and ROI overlays | Save / Undo       |
+|                |                         | Current target    |
+| Cell search    |                         |                   |
+| Lineage list   |                         | Nuclei | Objects  |
+|                +-------------------------+        | Tracking |
+| Channel        | Lineage tree            |                   |
+| contrast       | Independent panels      | Status / History  |
++----------------+-------------------------+-------------------+
 ```
 
 Napari's default layer list and layer controls panels are hidden on startup to save screen space. They remain accessible via napari's Window menu.
@@ -494,7 +501,7 @@ Draws nucleus circles as a napari Shapes layer (polygon approximation with 32 ve
 
 **Division line overlay:** When the selected cell has just divided (current_time == cell.end_time + 1), a yellow line connects the two daughter cell positions. Disappears on any navigation or selection change.
 
-**Ghost trail layer:** When enabled (via the Trails button in **Edit & Tracking Tools**), a semi-transparent trail of the selected cell's past positions is drawn as shapes connected by lines. Trail length is configurable (default 10 timepoints). Works in both 2D (shapes) and 3D (points).
+**Ghost trail layer:** When enabled (via the Trails button in **Workflow > Nuclei**), a semi-transparent trail of the selected cell's past positions is drawn as shapes connected by lines. Trail length is configurable (default 10 timepoints). Works in both 2D (shapes) and 3D (points).
 
 **Hover tooltip:** A floating tooltip appears when hovering over a nucleus, showing the cell name and basic info. Uses a delay (`_hover_delay_ms = 300ms`) to avoid flicker.
 
@@ -522,9 +529,10 @@ Uses `_ClickableGraphicsView` subclass to handle single-click despite `ScrollHan
 - **Window > New Lineage Panel...** menu action opens a config dialog
 
 **Menu bar additions** (injected into napari's menu bar at launch):
-- **File → Measure…** — opens `MeasureDialog`, runs per-channel pixel measurement via `analysis.measure_runner.run_measure`, writes CSVs, refreshes tree colors (see §7.3).
+- **File → Measure…** — opens `MeasureDialog`, starts private background nuclear measurement, atomically publishes CSVs and fields, then refreshes tree colors (see §7.3).
 - **Window → \<panel toggles\>** — auto-generated `toggleViewAction()` entries for every dock widget.
 - **Window → New Lineage Panel…** — opens `LineagePanelConfigDialog`.
+- **Window → Show Nuclei / Show Objects / Show Tracking** — reveals the Workflow dock and activates the requested tab.
 
 ### 6.4 LineageLayout (`gui/lineage_layout.py`)
 
@@ -567,7 +575,7 @@ Pure computational layout engine (no Qt dependency):
 
 **Track Selected Cell Forward** — A semiautomated, selected-cell proposal:
 1. Select a live nucleus and choose **Tracking > Track Selected Cell Forward…**
-   or the same action in the scrollable **Edit & Tracking Tools** dock.
+   or the same action in the **Workflow > Tracking** tab.
 2. The modeless workbench builds a `selected_forward` request using DoG or LoG, Simple LAP, a moving local ROI, and an ambiguity threshold. Common settings, advanced filtering, and session-preserved refinements remain editable.
 3. Analysis reports per-frame progress and supports cancellation. The pipeline follows only the seeded continuation and stops rather than guessing at ambiguity or a likely division.
 4. `tracking_preview.py` expands gap links into the same interpolated positions acceptance will create and retains diagnostic candidates/search regions separately. `ViewerIntegration` renders them in dedicated read-only napari layers with redundant color and circle/diamond/cross/path/ring symbols that never share callbacks or selection with curated `Nuclei`.

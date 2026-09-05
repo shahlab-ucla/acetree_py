@@ -111,35 +111,35 @@ acetree-py info config.xml --cell ABala
 When you launch the GUI, you'll see:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                                                     │
-│             Main Image Viewer                       │
-│  (napari canvas with nucleus overlay + hover tips)  │
-│                                                     │
-├──────────┬──────────────────────┬───────────────────┤
-│ Contrast │                      │ Edit & Tracking   │
-│ (per-ch) │                      │ (color mode,      │
-│          │                      │  buttons, viz)    │
-│ Lineage  │                      │                   │
-│ List     │                      │ Subcellular       │
-│          │                      │ Objects           │
-├──────────┴──────────────────────┴───────────────────┤
-│  Player Controls (time/plane/labels/deselect/3D)    │
-│  Lineage Tree (Sulston tree visualization)          │
-└─────────────────────────────────────────────────────┘
++--------------------------------------------------------------+
+| Player Controls: time, plane, labels, deselect, 3D             |
++----------------+-------------------------+-------------------+
+| Browse &       | Image viewer            | Workflow          |
+| Channels       | Nuclei and ROI overlays | Save / Undo       |
+|                |                         | Current target    |
+| Cell search    |                         |                   |
+| Lineage list   |                         | Nuclei | Objects  |
+|                +-------------------------+        | Tracking |
+| Channel        | Lineage tree            |                   |
+| contrast       | Independent panels      | Status / History  |
++----------------+-------------------------+-------------------+
 ```
 
 ### Panels
 
-| Panel               | Location    | Purpose                                        |
-|---------------------|------------|------------------------------------------------|
-| **Image Viewer**     | Center     | Shows the current z-plane with nucleus circles; hover over a cell to see a tooltip |
-| **Contrast**         | Left       | Per-channel brightness/contrast with visibility toggles |
-| **Lineage List**     | Left       | Searchable hierarchical cell tree               |
-| **Player Controls**  | Bottom     | Time/plane navigation, labels, deselect, 3D mode, 3D window |
-| **Lineage Tree**     | Bottom     | Visual Sulston tree (multiple panels supported) |
-| **Edit & Tracking Tools** | Right | Manual/automated tracking, color mode, editing, and visualization tools |
-| **Subcellular Objects** | Right | ROI classes, object tracks, drawing, association, review, measurement, and plots |
+| Panel | Location | Purpose |
+|---|---|---|
+| **Image Viewer** | Center | Current Z plane, nucleus/ROI overlays and hover tips |
+| **Browse & Channels** | Left | Searchable lineage list above scrollable channel contrast controls |
+| **Player Controls** | Top | Time/plane navigation, labels, deselect, 3D mode and detached 3D window |
+| **Lineage Tree** | Below the canvas | Sulston tree; independent extra panels remain available |
+| **Workflow** | Right | Shared Save/Save As/Undo/Redo, target/mode status, and Nuclei / Objects / Tracking tabs |
+
+The workspace fits a 1280x720 window. Drag the dock or splitter borders to adjust
+space. Secondary controls scroll; primary object edit/measure/plot actions stay
+visible. **Window > Show Nuclei / Show Objects / Show Tracking** opens the desired
+tab, including when the Workflow dock is hidden. Save state distinguishes unsaved
+nuclear measurements from undoable edits and remains unsaved until Save succeeds.
 
 Napari's built-in layer list and layer controls are hidden by default to save screen space. They remain accessible via the napari Window menu.
 
@@ -230,41 +230,18 @@ All edits are **undoable** (`Ctrl+Z`) and **redoable** (`Ctrl+Y`). Up to 1000 ed
 
 ### 6.1 Edit Panel Layout
 
-```
-┌─ Edit & Tracking Tools ──────┐
-│ Color Mode                   │
-│ (o) Editing  (o) Visualization│
-│ Preset: [Lineage depth ▾]   │
-│ [Edit Rules...]              │
-│                              │
-│ File: [Save] [Save As...]    │
-│       [Undo] [Redo]          │
-│                              │
-│ Nucleus Operations           │
-│ [Add] [Remove] [Move/Resize↗]│
-│                              │
-│ Cell Operations              │
-│ [Rename] [Kill] [Resurrect]  │
-│                              │
-│ Link Operations              │
-│ [Relink] [Manual Track]      │
-│ [Track Selected Cell...]     │
-│                              │
-│ Body Orientation             │
-│ Endpoint: [Anterior ▾]       │
-│ [Label selected] [Apply axes]│
-│                              │
-│ Status: Ready                │
-│                              │
-│ Visualization                │
-│ [Trails] Length: [10]        │
-│ [Screenshot] [Record...]     │
-│                              │
-│ [Edit History...]            │
-└──────────────────────────────┘
-```
+The **Workflow** dock keeps Save, Save As, Undo and Redo above three tabs:
 
-The Move/Resize D-pad controls are now in a popup dialog (click **Move / Resize** to open). Edit History is also a popup window. This keeps the edit panel compact.
+- **Nuclei:** Add/remove/move/resize, nuclear measurement, expression plots,
+  cell naming, color modes and visualization controls.
+- **Objects:** Class management, drawing, filters, tracks, association/review,
+  expected spans, raw measurements and scalar/profile plots.
+- **Tracking:** Relink, Manual Track, Track Selected Cell, Track Whole Movie,
+  and body orientation controls.
+
+The current cell/object and active canvas mode remain visible above the tabs.
+**Move / Resize** opens the D-pad; **History…** opens edit history. Existing
+keyboard shortcuts and independent analysis windows remain available.
 
 ### 6.2 Nucleus Operations
 
@@ -364,7 +341,7 @@ order and clearly reports low confidence. Suggested names remain automatic
 
 #### Track Selected Cell Workbench
 
-**Tracking > Track Selected Cell Forward…** (also in **Edit & Tracking Tools**) follows one selected cell without detecting or replacing the rest of the embryo. It is available after manual initialization and after opening an existing XML dataset:
+**Tracking > Track Selected Cell Forward…** (also in **Workflow > Tracking**) follows one selected cell without detecting or replacing the rest of the embryo. It is available after manual initialization and after opening an existing XML dataset:
 
 1. Select a live cell and click **Track Selected Cell**. If the selection is earlier in an existing one-child continuation, AceTree safely starts from its terminal nucleus. It never chooses a daughter at a division.
 2. In **1. Configure**, choose **Modern StarryNite (recommended)**, **LoG detection + LAP tracking**, or **DoG detection + LAP tracking**. Modern StarryNite also offers six bundled imaging presets. The guided surface starts with a short range of up to ten future frames and keeps the channel, radius, threshold, end time, and division behavior visible. Component selection, local-search tuning, gap/ambiguity controls, and custom parameter/model tools are hidden under **Show advanced and custom settings** by default.
@@ -430,7 +407,7 @@ Before creation, the wizard verifies every requested channel source, multichanne
 
 The per-frame table appears only for a full draft and includes every requested frame, including frames with no detections, interpolated gap positions, new track starts, mean quality, and warnings. Select rows by mouse or keyboard while inspecting the same read-only overlay in 2D, main 3D, or detached 3D. Change settings and choose **Update Full Draft** as often as needed; the previous overlay is visibly stale and cannot be accepted after a setting or document change. **Accept Draft** is the only action that adds positions, as one undoable edit. **Discard Draft**, cancellation, failure, or closing the window leaves the dataset empty.
 
-For discoverability, **Tracking > Track Whole Movie...** and **Edit & Tracking Tools > Tracking & Links > Track Whole Movie...** reopen this workbench while the dataset is still empty. Once any nucleus record exists, use **Track Selected Cell...** for a selected lineage or Undo the accepted initial draft before rerunning whole-movie tracking. This restriction prevents an embryo-wide run from duplicating curated nuclei.
+For discoverability, **Tracking > Track Whole Movie...** and **Workflow > Tracking > Track Whole Movie...** reopen this workbench while the dataset is still empty. Once any nucleus record exists, use **Track Selected Cell...** for a selected lineage or Undo the accepted initial draft before rerunning whole-movie tracking. This restriction prevents an embryo-wide run from duplicating curated nuclei.
 
 #### Real-world StarryNite test checklist
 
@@ -458,7 +435,7 @@ Recommended whole-movie sequence:
 
 1. Create or open an empty dataset, then open **Review Initial Tracking Draft**
    or choose **Tracking > Track Whole Movie...** (also available in the
-   **Edit & Tracking Tools** dock).
+   **Workflow > Tracking** tab).
 2. Choose **Modern StarryNite (recommended)** or **Legacy StarryNite exact replay
    (advanced)**, then select the bundled imaging preset matching the microscope.
 3. If radius, intensity threshold, or missing-frame allowance needs adjustment,
@@ -618,7 +595,7 @@ The Edit Panel provides a **Color Mode** toggle at the top:
 
 ## 7. Contrast Adjustment
 
-The **Contrast** panel on the left side provides per-channel controls. For multi-channel data (e.g. split-channel dual-color images), each channel gets its own control group:
+The channels section of **Browse & Channels** on the left provides per-channel controls. For multi-channel data (e.g. split-channel dual-color images), each channel gets its own control group:
 
 - **Visible checkbox**: Toggle channel visibility (multi-channel only)
 - **Min/Max sliders**: Drag to adjust the display range
@@ -876,7 +853,7 @@ measured image channel, not only the trace currently plotted. Older schema-v1
 Expression Comparison is also **cell/nucleus-only**. It does not compare
 subcellular-object UUIDs across datasets, and `.aceexpr` files do not contain
 the subcellular ROI sidecar or ROI measurement snapshots. Plot ROI tracks in
-the active dataset through the Subcellular Objects dock instead.
+the active dataset through the **Workflow > Objects** tab instead.
 
 The recommended workflow is:
 
@@ -1136,9 +1113,9 @@ automatically.
 
 #### Open the object tools and create a class
 
-1. Open a dataset with images and choose **Objects → Show Subcellular
-   Objects** if the right-side dock is hidden.
-2. Click **Manage classes…**. Choose **New class…** to create a class, or select
+1. Open a dataset with images and select **Workflow > Objects**, or choose
+   **Objects → Show Subcellular Objects** to reveal the tab.
+2. Click **Manage…**. Choose **New class…** to create a class, or select
    an existing class to rename it or change its color. Empty classes can be
    deleted; classes containing tracks remain protected from deletion. These
    edits support Undo after closing the dialog. Select the class in the
@@ -1152,15 +1129,15 @@ automatically.
 
 1. Navigate to the required absolute timepoint and Z plane. Optionally select a
    live cell first; a new observation captures that same-frame association.
-2. Choose **2D Polygon**, **Thick Line**, or **3D Contour Stack**. Draw in the
+2. Choose **Polygon**, **Thick line**, or **3D contours**. Draw in the
    temporary white editor layer and double-click to close a polygon or contour.
    Click **Finish** or press **Enter** to validate and commit one undoable edit.
    Click **Cancel** or press **Escape** to discard the draft without creating an
    object or frame.
 3. To build a 3D stack, keep the object selected, move to the adjacent Z plane,
-   choose **3D Contour Stack** again, and draw the next contour. Planes must be
+   choose **3D contours** again, and draw the next contour. Planes must be
    consecutive; AceTree does not silently interpolate a missing contour.
-4. Select an existing observation and click **Edit** to change its vertices.
+4. Select an existing observation and click **Edit geometry** to change its vertices.
    One completed drag/finish is one `Ctrl+Z` / `Ctrl+Y` history entry. Changing
    time or Z, entering a nucleus Add/Track/Relink mode, or switching to 3D view
    cancels an unfinished ROI edit. The main and detached 3D views are previews,
@@ -1180,7 +1157,7 @@ frame…** removes only the current observation.
   selected live cell.
 - **Pick cell** enters a right-click picker; right-click a nucleus at the same
   timepoint, or press **Escape** to cancel.
-- **Clear association** keeps the geometry but makes it object-centric only.
+- **Clear** in the association row keeps the geometry but makes it object-centric only.
 - **Mark reviewed** records that the current geometry and association were
   checked. A later geometry or association change moves a reviewed record to
   **Needs review**. Saving does not change review state.
@@ -1411,7 +1388,7 @@ All open panels update synchronously when edits are committed (relink, kill, ren
 4. Use the 3D window's color preset dropdown to switch between lineage depth and expression views independently of the main viewer.
 
 ### Screenshots and recording
-- Click **Screenshot** in the Visualization section of **Edit & Tracking Tools** to capture the current view as a PNG.
+- Click **Screenshot** in the Visualization section of **Workflow > Nuclei** to capture the current view as a PNG.
 - Click **Record...** to export a sequence of PNGs across a timepoint range (useful for making movies).
 
 ### Exporting for analysis
@@ -1530,7 +1507,7 @@ The non-interactive CLI also defaults to manual mode; select `dog-lap` or
 Once the GUI is open on a new (empty) dataset:
 
 1. Navigate to the desired timepoint and z-plane.
-2. Click **Add** in the **Edit & Tracking Tools** panel to enter add mode.
+2. Click **Add** in the **Workflow > Nuclei** tab to enter add mode.
 3. **Left-click** anywhere in the image to place a nucleus at that position.
 4. The nucleus is created at the current z-plane with a default diameter of 20 pixels.
 5. Press **Esc** to exit add mode.

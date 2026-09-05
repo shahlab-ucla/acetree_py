@@ -144,3 +144,9 @@ At 586a8b0 with Windows Qt/OpenGL and synthetic two-channel images, absolute pla
 ### R3 — measurement save state
 
 Successful nuclear publication marks the archive fields unsaved independently of undo history. A complete Save/Save As clears that state; cancellation, failed saves, failed retarget and intermediate copies preserve it. The workspace consumes the flag. Extended existing async/save workflows: **28 passed**; functional lint passed. Reviewed before integration.
+
+### C4/R2 — compact workspace and matching documentation
+
+Workflow now holds shared save/undo/target/status controls around Nuclei, Objects and Tracking tabs. Browse & Channels combines the lineage list and channel controls, Player Controls occupies two compact top rows, and independent lineage panels remain below the canvas. Menu launchers reveal the relevant tab. Objects retains persistent edit/measure/plot actions with scrollable review and metadata controls; long paths wrap.
+
+Agent Windows gate: **127 passed**, final context-ordering/Qt-guard gate **10 passed**. Real napari stays **1280x720**, minimum hint **811x425**; a sidecar path over 300 characters cannot enlarge it. Reviewed actual screenshots and code before integration. User guide, README and architecture now describe the final workspace and background workflows. Final combined gate follows.
