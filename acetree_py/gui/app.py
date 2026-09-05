@@ -4710,101 +4710,76 @@ class AceTreeApp:
         except (TypeError, ValueError, RuntimeError) as error:
             self._say(str(error))
 
-    def _on_measure(self) -> None:
-        """Run the Measure orchestrator from a File → Measure… dialog.
+    def start_nuclear_measurement(
+        self, output_dir: Path, at_channel: int, correction_method: str,
+    ) -> bool:
+        """Capture nuclei now and publish staged results only while still current."""
 
-        Opens :class:`MeasureDialog`, shows a progress dialog while
-        :func:`run_measure` iterates every channel × timepoint, then
-        rebuilds every lineage panel so the refreshed ``rweight``
-        values show up in the tree colors.
-        """
-        from qtpy.QtCore import Qt
-        from qtpy.QtWidgets import (
-            QApplication,
-            QMessageBox,
-            QProgressDialog,
+        from ..analysis.measure_runner import discard_measure_publication
+        from ..analysis.nuclear_measurement_job import (
+            prepare_nuclear_measurement, compute_nuclear_measurement,
+            publish_nuclear_measurement,
         )
 
+        jobs = self._measurement_job_controller()
+        if jobs.active:
+            self._say("A measurement is already running; cancel it or wait for completion")
+            return False
         if self.image_provider is None:
-            QMessageBox.warning(
-                None,
-                "Measure",
-                "No image data loaded — cannot run Measure.",
+            self._say("No image data loaded; cannot run Measure")
+            return False
+        change_counter = self.edit_history.change_counter
+        prepared = prepare_nuclear_measurement(
+            self.manager, self.image_provider, output_dir, at_channel, correction_method,
+        )
+
+        def publish(result):
+            if self.edit_history.change_counter != change_counter:
+                raise RuntimeError("Nuclei changed during measurement; run Measure again")
+            written = publish_nuclear_measurement(
+                prepared, result, self.manager, self.image_provider,
             )
+            self.current_expression_channel = at_channel
+            self._refresh_nuclear_measurement_windows(written, output_dir)
+
+        return jobs.start(
+            "Measure Nuclei",
+            lambda progress, cancelled: compute_nuclear_measurement(prepared, progress, cancelled),
+            publish,
+            discard=discard_measure_publication,
+        )
+
+    def _on_measure(self) -> None:
+        """Choose nuclear measurement settings and start a cancellable worker."""
+
+        from qtpy.QtWidgets import QMessageBox
+
+        if self._measurement_job_controller().active:
+            self._say("A measurement is already running; cancel it or wait for completion")
+            return
+        if self.image_provider is None:
+            QMessageBox.warning(None, "Measure", "No image data loaded; cannot run Measure.")
             return
         if not self.manager.nuclei_record:
-            QMessageBox.warning(
-                None,
-                "Measure",
-                "No nuclei loaded — cannot run Measure.",
-            )
+            QMessageBox.warning(None, "Measure", "No nuclei loaded; cannot run Measure.")
             return
 
         from .measure_dialog import MeasureDialog
+
         qt_window = self.viewer.window._qt_window if self.viewer else None
-        dlg = MeasureDialog(self, parent=qt_window)
-        if not dlg.exec_():
+        dialog = MeasureDialog(self, parent=qt_window)
+        if not dialog.exec_():
             return
-        values = dlg.get_values()
-        at_channel: int = values["at_channel"]
-        self.current_expression_channel = at_channel
-        output_dir: Path = values["output_dir"]
-        correction_method: str = values.get("correction_method", "global")
-
-        n_channels = int(self.image_provider.num_channels)
-        n_timepoints = len(self.manager.nuclei_record)
-        total_steps = max(1, n_channels * n_timepoints)
-
-        progress = QProgressDialog(
-            "Measuring…", "Cancel", 0, total_steps, qt_window,
-        )
-        progress.setWindowTitle("Measure")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-
-        completed_steps = 0
-
-        def progress_cb(c_idx: int, n_ch: int, t_1based: int, n_tp: int) -> bool:
-            nonlocal completed_steps
-            completed_steps += 1
-            progress.setValue(min(total_steps, completed_steps))
-            progress.setLabelText(
-                "Reading movie once for all channels "
-                f"(selected correction: {correction_method}; "
-                f"{completed_steps}/{total_steps})…"
-            )
-            QApplication.processEvents()
-            return not progress.wasCanceled()
-
-        from ..analysis.measure_runner import run_measure
+        values = dialog.get_values()
         try:
-            written = run_measure(
-                self.manager,
-                self.image_provider,
-                output_dir,
-                at_channel,
-                progress_cb=progress_cb,
-                correction_method=correction_method,
+            self.start_nuclear_measurement(
+                values["output_dir"], values["at_channel"],
+                values.get("correction_method", "global"),
             )
-        except RuntimeError as e:
-            # User-cancelled or orchestrator-raised runtime error
-            progress.close()
-            QMessageBox.information(None, "Measure", str(e))
-            return
-        except Exception as e:  # noqa: BLE001 — surface unknown errors
-            progress.close()
-            logger.exception("Measure failed")
-            QMessageBox.critical(
-                None,
-                "Measure failed",
-                f"Measure could not complete:\n{e}",
-            )
-            return
-        finally:
-            progress.setValue(total_steps)
-            progress.close()
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._say(str(error))
 
+    def _refresh_nuclear_measurement_windows(self, written, output_dir: Path) -> None:
         # Re-color lineage trees with the fresh rweight values.
         for lw in self._lineage_widgets:
             try:
@@ -4830,11 +4805,7 @@ class AceTreeApp:
             f"Measured {len(written)} channel(s); "
             f"wrote CSV(s) to {output_dir}"
         )
-        try:
-            self.viewer.status = msg
-        except Exception:
-            pass
-        QMessageBox.information(None, "Measure complete", msg)
+        self._say(msg)
 
     def _delete_active_nucleus(self) -> None:
         """Delete the selected nucleus at the current timepoint.

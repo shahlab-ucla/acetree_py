@@ -6,11 +6,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import tifffile
-from qtpy.QtCore import QTimer
+from qtpy.QtCore import QTimer, Qt
 from qtpy.QtWidgets import QWidget
 
 from acetree_py.analysis import roi_measurement_job
-from acetree_py.analysis.roi_measurements import RoiMeasurementEngine, RoiMeasurementRequest
+from acetree_py.analysis.roi_measurements import RoiMeasurementRequest
 from acetree_py.core.nuclei_manager import NucleiManager
 from acetree_py.core.roi_manager import RoiManager
 from acetree_py.core.subcellular_roi import Polygon2D
@@ -31,7 +31,8 @@ def test_roi_job_is_responsive_and_publishes_only_current_results(qtbot, tmp_pat
     previous = app.roi_measurement_engine.measure(manager)
     original_handle = provider._open_tif
     window = QWidget()
-    qtbot.addWidget(window)
+    if outcome != "close":
+        qtbot.addWidget(window)
     window.show()
     app.viewer = SimpleNamespace(window=SimpleNamespace(_qt_window=window))
     notices = []
@@ -80,6 +81,7 @@ def test_roi_job_is_responsive_and_publishes_only_current_results(qtbot, tmp_pat
         elif outcome == "images":
             (tmp_path / "t001.tif").write_bytes(b"external source changed")
         elif outcome == "close":
+            window.setAttribute(Qt.WA_DeleteOnClose, True)
             window.close()
         release.set()
         qtbot.waitUntil(lambda: not jobs.active, timeout=10000)
@@ -105,3 +107,131 @@ def test_roi_job_is_responsive_and_publishes_only_current_results(qtbot, tmp_pat
         jobs.shutdown()
         qtbot.waitUntil(lambda: not jobs.active, timeout=10000)
         close_worker_image_provider(provider)
+
+
+@pytest.mark.parametrize("outcome", ["success", "cancel", "edit", "provider", "close"])
+def test_nuclear_job_stages_privately_and_commits_only_current_outputs(qtbot, tmp_path, monkeypatch, outcome):
+    from acetree_py.analysis import nuclear_measurement_job
+    from acetree_py.analysis.measure_runner import run_measure
+    from tests.test_expression_measurements import _manager, _provider
+
+    manager = _manager()
+    output = tmp_path / "measurements"
+    written = run_measure(manager, _provider(), output, 0, correction_method="none")
+    previous_store = manager.expression_measurements
+    previous_files = {path: path.read_bytes() for path in written}
+    nucleus = manager.nuclei_record[0][0]
+    previous_fields = (nucleus.rwraw, nucleus.rweight)
+    app = AceTreeApp(manager, _provider(220, 440))
+    app.current_expression_channel = 1
+    window = QWidget()
+    if outcome != "close":
+        qtbot.addWidget(window)
+    window.show()
+    app.viewer = SimpleNamespace(window=SimpleNamespace(_qt_window=window))
+    notices, refreshed = [], []
+    app._say = notices.append
+    app._refresh_nuclear_measurement_windows = lambda paths, directory: refreshed.append(paths)
+    prepared_event, release = Event(), Event()
+    original_prepare = nuclear_measurement_job.prepare_measure_publication
+    compute_threads = []
+
+    def stage_then_wait(*args, **kwargs):
+        result = original_prepare(*args, **kwargs)
+        compute_threads.append(get_ident())
+        prepared_event.set()
+        assert release.wait(5), "Test did not release staged measurement"
+        return result
+
+    monkeypatch.setattr(nuclear_measurement_job, "prepare_measure_publication", stage_then_wait)
+    jobs = app._measurement_job_controller()
+    try:
+        assert app.start_nuclear_measurement(output, 0, "none")
+        qtbot.waitUntil(prepared_event.is_set, timeout=5000)
+        assert not app.start_roi_measurement(RoiMeasurementRequest(app.roi_manager))
+        assert compute_threads and get_ident() not in compute_threads
+        assert manager.expression_measurements is previous_store
+        assert (nucleus.rwraw, nucleus.rweight) == previous_fields
+        assert {path: path.read_bytes() for path in written} == previous_files
+        assert list(output.glob("*.tmp"))
+        assert app.current_expression_channel == 1
+
+        if outcome == "cancel":
+            jobs.cancel()
+        elif outcome == "edit":
+            # Even edit/undo returning to identical geometry advances freshness.
+            manager.mark_data_edited()
+        elif outcome == "provider":
+            app.image_provider = _provider(330, 550)
+        elif outcome == "close":
+            window.setAttribute(Qt.WA_DeleteOnClose, True)
+            window.close()
+        release.set()
+        qtbot.waitUntil(lambda: not jobs.active, timeout=10000)
+        assert not list(output.glob("*.tmp"))
+        assert not list(output.glob("*.bak"))
+        assert manager.nuclei_record[0][0] is nucleus
+        if outcome == "success":
+            assert len(refreshed) == 1
+            assert manager.expression_measurements is not previous_store
+            assert nucleus.rwraw == 220_000
+            assert app.current_expression_channel == 0
+            assert b"220000" in written[0].read_bytes()
+            assert b"440000" in written[1].read_bytes()
+        else:
+            assert not refreshed
+            assert manager.expression_measurements is previous_store
+            assert (nucleus.rwraw, nucleus.rweight) == previous_fields
+            assert {path: path.read_bytes() for path in written} == previous_files
+            assert app.current_expression_channel == 1
+    finally:
+        release.set()
+        jobs.shutdown()
+        qtbot.waitUntil(lambda: not jobs.active, timeout=10000)
+
+
+def test_application_quit_drains_owned_worker_and_discards_unpublished_result():
+    # A real application exit needs its own process: abandoning a running Qt
+    # thread can abort Python before cleanup and cannot be tested in this runner.
+    import os
+    import subprocess
+    import sys
+
+    script = """
+import time
+from threading import Event
+from qtpy.QtCore import QTimer
+from qtpy.QtWidgets import QApplication, QWidget
+from acetree_py.gui.measurement_jobs import MeasurementJobs
+app = QApplication([])
+window = QWidget()
+window.show()
+started = Event()
+jobs = MeasurementJobs(window, print)
+def compute(progress, cancelled):
+    started.set()
+    try:
+        time.sleep(1.8)
+        return 'result'
+    finally:
+        print('provider cleanup completed', flush=True)
+def quit_when_started():
+    if started.is_set():
+        app.quit()
+    else:
+        QTimer.singleShot(10, quit_when_started)
+jobs.start('Measure', compute, lambda result: print('unexpected publish'),
+           discard=lambda result: print('staged output discarded', flush=True))
+QTimer.singleShot(10, quit_when_started)
+app.exec_()
+assert not jobs._thread.isRunning()
+print('clean exit', flush=True)
+"""
+    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONPATH=os.pathsep.join(sys.path))
+    result = subprocess.run([sys.executable, "-B", "-c", script], env=environment,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "provider cleanup completed" in result.stdout
+    assert "staged output discarded" in result.stdout
+    assert "clean exit" in result.stdout
+    assert "unexpected publish" not in result.stdout

@@ -33,7 +33,7 @@ class MeasurementJobs(QObject):
             window.installEventFilter(self)
         app = QApplication.instance()
         if app is not None:
-            app.aboutToQuit.connect(self.shutdown)
+            app.aboutToQuit.connect(self._finish_before_quit)
 
     @property
     def active(self) -> bool:
@@ -53,7 +53,11 @@ class MeasurementJobs(QObject):
         self._progress.setAutoClose(False)
         self._progress.setAutoReset(False)
         self._progress.canceled.connect(self.cancel)
+        self._progress.destroyed.connect(
+            lambda _object=None, progress=self._progress: self._forget_progress(progress)
+        )
         self._progress.show()
+
         def run(progress, cancelled):
             result = compute(progress, cancelled)
             if cancelled():
@@ -81,14 +85,20 @@ class MeasurementJobs(QObject):
     def cancel(self) -> None:
         self._cancel.set()
         if self._progress is not None:
-            self._progress.setLabelText("Cancelling measurement…")
+            try:
+                self._progress.setLabelText("Cancelling measurement…")
+            except RuntimeError:
+                self._progress = None
 
     @Slot(int, int, str)
     def _on_progress(self, done: int, total: int, message: str) -> None:
         if self._progress is not None and not self._cancel.is_set():
-            self._progress.setMaximum(max(1, total))
-            self._progress.setValue(done)
-            self._progress.setLabelText(message)
+            try:
+                self._progress.setMaximum(max(1, total))
+                self._progress.setValue(done)
+                self._progress.setLabelText(message)
+            except RuntimeError:
+                self._progress = None
 
     @Slot(object)
     def _on_success(self, result) -> None:
@@ -118,9 +128,17 @@ class MeasurementJobs(QObject):
 
     @Slot()
     def _on_finished(self) -> None:
-        if self._progress is not None:
-            self._progress.close()
-            self._progress.deleteLater()
+        progress = self._progress
+        self._progress = None
+        if progress is not None:
+            try:
+                progress.close()
+                progress.deleteLater()
+            except RuntimeError:
+                pass  # Closing the main window may already have deleted it.
+
+    def _forget_progress(self, progress) -> None:
+        if self._progress is progress:
             self._progress = None
 
     @Slot()
@@ -151,11 +169,23 @@ class MeasurementJobs(QObject):
             self._closing = True
 
     @Slot()
-    def shutdown(self, timeout_ms: int = 1500) -> None:
+    def _finish_before_quit(self) -> None:
+        # An application exit cannot leave an owned QThread running into
+        # interpreter teardown. Ordinary cancellation/window close never waits.
+        self.shutdown(timeout_ms=None)
+
+    def shutdown(self, timeout_ms: int | None = 1500) -> bool:
+        """Cancel and drain, retaining ownership when a bounded wait expires."""
+
         self._closing = True
         self.cancel()
+        finished = True
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait(max(0, timeout_ms))
+            finished = (
+                self._thread.wait() if timeout_ms is None
+                else self._thread.wait(max(0, timeout_ms))
+            )
             if self._pending_result is not _NO_RESULT:
                 self._on_success(self._pending_result)
+        return bool(finished)

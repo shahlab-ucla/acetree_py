@@ -66,7 +66,7 @@ def compute_roi_measurement(
     if provider is None:
         raise RuntimeError(
             "This image source does not support background measurement. "
-            "Synchronous ROI measurement remains available through RoiMeasurementEngine.measure."
+            "Open the source as a supported TIFF dataset to measure it here."
         )
     try:
         def report(done: int, total: int) -> bool:
