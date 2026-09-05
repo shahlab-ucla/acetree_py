@@ -27,6 +27,13 @@ class TestCLIHelp:
         assert result.exit_code in (0, 2)
         assert "AceTree-Py" in result.output or "Usage" in result.output
 
+    def test_version_identifies_alpha_build(self):
+        from acetree_py import __version__
+
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert result.output.strip() == f"AceTree-Py {__version__} (alpha v2)"
+
     def test_help_flag(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0

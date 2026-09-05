@@ -18,7 +18,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 | A5 Async nuclear measurement | measurement | M | A4 | atomic files/fields/store; stale/cancel preserves previous | pending |
 | B4 Shared tracking settings | core | M | B3 | focused helpers, selected/global workflows unchanged | pending |
 | C4 Workflow workspace | UI | M | C1,C3 | Nuclei/Objects/Tracking; 1280x720; all actions reachable | pending |
-| R2 Alpha installation/docs | coordinator | S | integration | installers identify alpha-v2; docs match UI | pending |
+| R2 Alpha installation/docs | coordinator | S | integration | installers identify alpha-v2; docs match UI | installation complete; workflow docs pending |
 | Final acceptance | coordinator | M | all above | full non-MATLAB suite; live napari; memory/navigation evidence | pending |
 
 ## Checklist

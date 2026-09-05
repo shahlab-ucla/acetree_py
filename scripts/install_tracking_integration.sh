@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-EXPECTED_BRANCH="subcellular-measurements"
+EXPECTED_BRANCH="alpha-v2"
 VARIANT="gui"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 DRY_RUN=0
@@ -10,7 +10,7 @@ usage() {
     printf '%s\n' \
         "Usage: $0 [--variant core|gui|all] [--python PATH] [--dry-run]" \
         "" \
-        "Installs the subcellular-measurements AceTree-Py checkout in editable mode."
+        "Installs the alpha-v2 AceTree-Py checkout in editable mode."
 }
 
 while [ "$#" -gt 0 ]; do
@@ -82,9 +82,9 @@ fi
 "$PYTHON_BIN" -m pip install --editable "$INSTALL_TARGET"
 VERSION_OUTPUT=$("$PYTHON_BIN" -m acetree_py --version)
 case "$VERSION_OUTPUT" in
-    *"(tracking integration)"*) ;;
+    *"(alpha v2)"*) ;;
     *)
-        printf '%s\n' "The installed build did not identify itself as the tracking integration." >&2
+        printf '%s\n' "The installed build did not identify itself as alpha v2." >&2
         exit 1
         ;;
 esac

@@ -34,3 +34,9 @@ Append focused commands/results with each outcome. Reuse existing behavioral tes
 Save As now copies clean ROI state when the destination changes and retargets only after the coordinated commit. Added one clean load/copy/reopen/edit/save scenario that checks the original sidecar remains unchanged.
 
 `pytest tests/test_app_save.py tests/test_roi_save_transaction.py tests/test_roi_end_to_end.py -q`: **23 passed** in 1.41s.
+
+### R2 — alpha installation
+
+Branch guards and CLI identify alpha v2. Historical plugin proposal is explicitly deferred. Replaced brittle prose/source-string checks with existing executable installer cases and one CLI version check. Remote install instructions explicitly require branch publication.
+
+`pytest tests/test_tracking_branch_installation.py tests/test_cli.py -q`: **18 passed** in 6.52s. Workflow documentation follows UI integration.

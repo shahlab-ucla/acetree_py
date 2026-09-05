@@ -8,12 +8,12 @@ For automatic-versus-forced names and the complete correction contract, see [Nam
 
 ## 1. Installation
 
-The subcellular-measurements build is currently on
-`subcellular-measurements`, while the repository default does not yet contain
-these tools. Select the branch explicitly before using an editable install:
+Alpha v2 is developed on `alpha-v2`, starting from `subcellular-measurements`.
+Install directly from your local alpha worktree. Once the alpha branch has been
+published, select it explicitly when cloning:
 
 ```bash
-git clone --branch subcellular-measurements --single-branch https://github.com/shahlab-ucla/acetree_py.git
+git clone --branch alpha-v2 --single-branch https://github.com/shahlab-ucla/acetree_py.git
 cd acetree_py
 ```
 
@@ -44,7 +44,7 @@ python -m pip install -e ".[gui]"
 # Everything (GUI + dev tools)
 python -m pip install -e ".[all]"
 
-# Must include "(tracking integration)"
+# Must include "(alpha v2)"
 python -m acetree_py --version
 ```
 

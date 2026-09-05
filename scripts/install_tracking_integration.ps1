@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-Install AceTree-Py's subcellular-measurements checkout.
+Install AceTree-Py's alpha-v2 checkout.
 
 .DESCRIPTION
-Verifies that a Git checkout is on the subcellular-measurements branch, then
+Verifies that a Git checkout is on the alpha-v2 branch, then
 installs that checkout in editable mode. The GUI dependency set is installed
 by default.
 #>
@@ -18,7 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedBranch = "subcellular-measurements"
+$ExpectedBranch = "alpha-v2"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $GitMarker = Join-Path $RepoRoot ".git"
 
@@ -60,7 +60,7 @@ $VersionOutput = (& $Python -m acetree_py --version)
 if ($LASTEXITCODE -ne 0) {
     throw "AceTree-Py installed, but its version check failed."
 }
-if ("$VersionOutput" -notmatch "\(tracking integration\)") {
-    throw "The installed build did not identify itself as the tracking integration."
+if ("$VersionOutput" -notmatch "\(alpha v2\)") {
+    throw "The installed build did not identify itself as alpha v2."
 }
 Write-Host "$VersionOutput"

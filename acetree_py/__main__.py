@@ -38,7 +38,7 @@ def _version_callback(value: bool) -> None:
     if value:
         from acetree_py import __version__
 
-        typer.echo(f"AceTree-Py {__version__} (tracking integration)")
+        typer.echo(f"AceTree-Py {__version__} (alpha v2)")
         raise typer.Exit()
 
 

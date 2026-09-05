@@ -9,36 +9,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_BRANCH = "subcellular-measurements"
-EXPECTED_CLONE = (
-    "git clone --branch subcellular-measurements --single-branch "
-    "https://github.com/shahlab-ucla/acetree_py.git"
-)
-
-
-@pytest.mark.parametrize("document", ["README.md", "docs/user_guide.md"])
-def test_install_docs_pin_feature_branch(document: str) -> None:
-    text = (REPO_ROOT / document).read_text(encoding="utf-8")
-
-    assert EXPECTED_CLONE in text
-    assert "python -m acetree_py --version" in text
-
-
-@pytest.mark.parametrize(
-    "script",
-    [
-        "scripts/install_tracking_integration.ps1",
-        "scripts/install_tracking_integration.sh",
-    ],
-)
-def test_installers_fail_closed_on_wrong_named_branch(script: str) -> None:
-    text = (REPO_ROOT / script).read_text(encoding="utf-8")
-
-    assert EXPECTED_BRANCH in text
-    assert "branch --show-current" in text
-    assert "current branch" in text.lower()
-    assert "--editable" in text
-    assert "tracking integration" in text
+EXPECTED_BRANCH = "alpha-v2"
 
 
 @pytest.mark.parametrize("checkout_state", ["correct", "wrong", "detached"])
@@ -129,15 +100,3 @@ def test_native_installer_enforces_checkout_state(
         assert "detached checkout" in output.lower()
 
 
-def test_architecture_install_notes_branch_requirement() -> None:
-    text = (REPO_ROOT / "docs/architecture.md").read_text(encoding="utf-8")
-
-    assert "branch-pinned clone" in text
-    assert "../README.md#installation" in text
-
-
-def test_plugin_plan_keeps_tracking_as_its_upstream() -> None:
-    text = (REPO_ROOT / "PLUGIN_MIGRATION_PLAN.md").read_text(encoding="utf-8")
-
-    assert "off `tracking-integration`" in text
-    assert "off `main`" not in text

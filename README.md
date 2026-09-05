@@ -6,15 +6,16 @@ Built on [napari](https://napari.org) with full undo/redo, topology-based cell n
 
 ## Installation
 
-Requires **Python 3.10+** and Git. The subcellular-measurements build currently
-lives on the `subcellular-measurements` branch; the repository's default branch
-does not yet contain these tools.
+Requires **Python 3.10+** and Git. Alpha v2 is developed on `alpha-v2`,
+starting from `subcellular-measurements`. Install from the alpha worktree
+when testing local changes. The remote commands below apply once that branch
+has been published.
 
 ### Source install (recommended for testing)
 
 ```bash
-# Select the subcellular-measurements branch explicitly.
-git clone --branch subcellular-measurements --single-branch https://github.com/shahlab-ucla/acetree_py.git
+# Select the alpha-v2 branch explicitly.
+git clone --branch alpha-v2 --single-branch https://github.com/shahlab-ucla/acetree_py.git
 cd acetree_py
 ```
 
@@ -46,16 +47,16 @@ python -m pip install -e ".[gui]"
 # Everything (GUI + dev tools)
 python -m pip install -e ".[all]"
 
-# Confirm that this is the tracking-enabled build
+# Confirm that this is the alpha v2 build
 python -m acetree_py --version
-# AceTree-Py 0.2.0 (tracking integration)
+# AceTree-Py 0.2.0 (alpha v2)
 ```
 
 To install without keeping a source checkout, use a branch-pinned VCS
 requirement (not an unqualified PyPI install):
 
 ```bash
-python -m pip install "acetree-py[gui] @ git+https://github.com/shahlab-ucla/acetree_py.git@subcellular-measurements"
+python -m pip install "acetree-py[gui] @ git+https://github.com/shahlab-ucla/acetree_py.git@alpha-v2"
 ```
 
 ### Tested versions

@@ -1015,10 +1015,10 @@ dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.1"]
 acetree-py = "acetree_py.__main__:app"
 ```
 
-These commands install the current checkout. For the tracking-enabled build,
-first use the branch-pinned clone and guarded installer in the
-[Installation guide](../README.md#installation); a plain clone currently
-selects the non-tracking default branch. Manual installs are
+These commands install the current checkout. For alpha v2, use the `alpha-v2`
+worktree and guarded installer in the
+[Installation guide](../README.md#installation). The branch-pinned clone applies
+once the alpha branch is published. Manual installs are
 `python -m pip install -e .` (core), `python -m pip install -e ".[gui]"` (with
 GUI), or `python -m pip install -e ".[all]"` (everything).
 

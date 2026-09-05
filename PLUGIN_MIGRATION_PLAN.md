@@ -1,6 +1,9 @@
 # AceTree-Py: napari Plugin Migration Plan
 
-**Status:** Planning
+**Status:** Deferred historical proposal; not part of alpha v2.
+
+The branch names, file counts, API observations, and estimates below describe an
+earlier checkout. They are not an implementation checklist for the current app.
 **Branch:** `plugin-variant` (off `tracking-integration`)
 **Goal:** Repackage AceTree-Py as a napari npe2 plugin so it can be activated from within an existing napari session, while preserving the standalone CLI entry point and all current functionality.
 
