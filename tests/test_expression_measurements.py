@@ -950,3 +950,42 @@ def test_absolute_first_plane_measurement_and_origin_freshness(plane_start, corr
     assert not measured.dependencies_current(manager)
     assert not family.dependencies_current(manager, correction_method)
     assert not frozen.is_current(manager)
+
+
+def test_prepared_measurement_can_be_discarded_rejected_or_atomically_published(tmp_path):
+    manager = _manager()
+    provider = _provider(400, 800)
+    paths = run_measure(manager, _provider(), tmp_path, 0, correction_method="none")
+    previous_bytes = {path: path.read_bytes() for path in paths}
+    previous_store = manager.expression_measurements
+    nucleus = manager.nuclei_record[0][0]
+    previous_weight = nucleus.rweight
+
+    def prepare():
+        return measure_runner.prepare_measure_publication(
+            manager, provider, tmp_path, 1, correction_method="none",
+        )
+
+    pending = prepare()
+    assert manager.expression_measurements is previous_store
+    assert nucleus.rweight == previous_weight
+    assert {path: path.read_bytes() for path in paths} == previous_bytes
+    measure_runner.discard_measure_publication(pending)
+    assert set(tmp_path.iterdir()) == set(paths)
+
+    pending = prepare()
+    nucleus.x += 1
+    with pytest.raises(RuntimeError, match="Dataset changed"):
+        measure_runner.commit_measure_publication(manager, pending)
+    assert nucleus.x == 9 and nucleus.rweight == previous_weight
+    assert manager.expression_measurements is previous_store
+    assert {path: path.read_bytes() for path in paths} == previous_bytes
+    assert set(tmp_path.iterdir()) == set(paths)
+
+    pending = prepare()
+    written = measure_runner.commit_measure_publication(manager, pending)
+    assert manager.expression_measurements is pending.measurement_set
+    assert manager.expression_measurements.is_current(manager)
+    assert nucleus.rweight == 800 * SCALE
+    assert all(path.exists() for path in written)
+    assert not any(path.suffix in {".tmp", ".bak"} for path in tmp_path.iterdir())

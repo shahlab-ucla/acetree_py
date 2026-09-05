@@ -98,3 +98,9 @@ Decoded planes/stacks are released when sorted time/channel task groups advance 
 Agent gate: **37 passed**. Mixed 2D/3D movie regression verified one live decoded group, six plane and six stack reads across three times/two channels, unchanged values, and all decoded arrays released after completion. Plot/export scenario verifies one manifest read per operation, metadata stability, geometry invalidation/recompute and external-file rejection.
 
 Windows GUI checkpoint: **73 passed, 1 failed**. All OpenGL context failures resolved; remaining contrast test called a removed single-channel method. Updated the existing scenario to click Auto All and compare real layer limits with image percentiles, then exercise manual limits.
+
+### A5 preparation boundary (coordinator)
+
+Nuclear measurement now exposes private prepare/discard and atomic commit operations. The existing synchronous run_measure wraps them. Computation, CSV staging, and immutable store construction finish before the live manager is touched; commit rechecks the live source and retains the existing files/fields/store rollback. One workflow regression covers no publication during prepare, discard cleanup, a later edit preserved on rejection, and successful current-store publication.
+
+Numerical, transaction, expression-window and real-layer contrast gate: **74 passed** in 14.39s. GUI background integration follows A4.

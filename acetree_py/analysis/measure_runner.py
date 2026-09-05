@@ -190,6 +190,41 @@ def run_measure(
         ValueError: On invalid inputs (no tree, no nuclei, bad channel).
         RuntimeError: If the run is cancelled via progress_cb.
     """
+    prepared = prepare_measure_publication(
+        manager, image_provider, output_dir, at_channel,
+        progress_cb=progress_cb, correction_method=correction_method,
+    )
+    return commit_measure_publication(manager, prepared)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedMeasurePublication:
+    """Privately staged measurement data, ready for one publication attempt.
+
+    Preparing changes neither final CSVs nor the source manager. A background
+    caller owns this object until the GUI publishes it or discards its files.
+    The immutable measurement set is complete before publication begins.
+    """
+
+    measurement_set: ExpressionMeasurementSet
+    output_dir: Path
+    _run: _MeasurementRun
+    _staged_csvs: tuple[tuple[Path, Path], ...]
+
+
+def prepare_measure_publication(
+    manager: NucleiManager,
+    image_provider: ImageProvider,
+    output_dir: Path,
+    at_channel: int,
+    progress_cb: ProgressCallback | None = None,
+    correction_method: str | None = None,
+) -> PreparedMeasurePublication:
+    """Compute and stage privately against a caller-owned stable manager.
+
+    Worker callers must pass a detached manager snapshot and private provider.
+    The live manager is checked again by commit_measure_publication.
+    """
     measurement = _collect_measurement_run(
         manager,
         image_provider,
@@ -213,10 +248,8 @@ def run_measure(
     output_dir.mkdir(parents=True, exist_ok=True)
     measurements = measurement.measurements
     method = measurement.method
-    use_blot = method == "blot"
     n_timepoints = measurement.n_timepoints
     source_revision = measurement.source_revision
-    source_fingerprint = measurement.source_fingerprint
     source_dependency_fingerprint = measurement.source_dependency_fingerprint
     source_calibration = measurement.source_calibration
     source_plane_start = measurement.source_plane_start
@@ -231,6 +264,70 @@ def run_measure(
     )
     final_csv_paths = [final_path for _staged_path, final_path in staged_csvs]
 
+    try:
+        # Non-GUI callers may mutate the manager from another thread while
+        # files are being staged. Validate before constructing the result.
+        if not _measurement_source_matches(manager, measurement):
+            raise RuntimeError(
+                "Dataset changed while Measure was writing results; no "
+                "measurements were applied. Run Measure again."
+            )
+
+        pending_store = _build_expression_measurement_set(
+            manager,
+            measurements,
+            method=method,
+            at_channel=at_channel,
+            csv_paths=final_csv_paths,
+            source_revision=source_revision,
+            source_dependency_fingerprint=source_dependency_fingerprint,
+            source_calibration=source_calibration,
+            source_plane_start=source_plane_start,
+        )
+
+        # Building a large store can take long enough for a background caller
+        # to mutate the source. This is the last boundary before publication.
+        if not _measurement_source_matches(manager, measurement):
+            raise RuntimeError(
+                "Dataset changed while Measure was preparing results; no "
+                "measurements were applied. Run Measure again."
+            )
+
+        return PreparedMeasurePublication(
+            measurement_set=pending_store,
+            output_dir=output_dir,
+            _run=measurement,
+            _staged_csvs=tuple(staged_csvs),
+        )
+    except BaseException:
+        _discard_staged_csvs(staged_csvs)
+        raise
+
+
+def discard_measure_publication(prepared: PreparedMeasurePublication) -> None:
+    """Release staged files after cancellation, stale-source rejection or close."""
+
+    _discard_staged_csvs(list(prepared._staged_csvs))
+
+
+def commit_measure_publication(
+    manager: NucleiManager,
+    prepared: PreparedMeasurePublication,
+) -> list[Path]:
+    """Validate the live source and atomically publish prepared files and data.
+
+    Call on the GUI thread for interactive use. Source-provider identity,
+    external image freshness and job cancellation are the caller's boundary;
+    document revision, calibration and record changes are checked here.
+    Staging files are discarded on failure and final files roll back together.
+    """
+
+    measurement = prepared._run
+    measurements = measurement.measurements
+    method = measurement.method
+    at_channel = measurement.at_channel
+    use_blot = method == "blot"
+    staged_csvs = list(prepared._staged_csvs)
     # CSV replacement, the one legacy AT slot, and the all-channel snapshot
     # form one publication transaction.  Old files remain as rollback copies
     # until every in-memory step succeeds.
@@ -260,45 +357,13 @@ def run_measure(
     csv_backups: dict[Path, Path] = {}
     publication_started = False
     try:
-        # Non-GUI callers may mutate the manager from another thread while
-        # files are being staged. Validate before constructing the result.
-        if (
-            int(getattr(manager, "data_revision", 0)) != source_revision
-            or expression_document_fingerprint(manager) != source_fingerprint
-        ):
-            raise RuntimeError(
-                "Dataset changed while Measure was writing results; no "
-                "measurements were applied. Run Measure again."
-            )
-
-        pending_store = _build_expression_measurement_set(
-            manager,
-            measurements,
-            method=method,
-            at_channel=at_channel,
-            csv_paths=final_csv_paths,
-            source_revision=source_revision,
-            source_dependency_fingerprint=source_dependency_fingerprint,
-            source_calibration=source_calibration,
-            source_plane_start=source_plane_start,
-        )
-
-        # Building a large store can take long enough for a background caller
-        # to mutate the source. This is the last boundary before publication.
-        if (
-            int(getattr(manager, "data_revision", 0)) != source_revision
-            or expression_document_fingerprint(manager) != source_fingerprint
-        ):
+        if not _measurement_source_matches(manager, measurement):
             raise RuntimeError(
                 "Dataset changed while Measure was preparing results; no "
                 "measurements were applied. Run Measure again."
             )
-
         written, csv_backups = _install_staged_csvs(staged_csvs)
-        if (
-            int(getattr(manager, "data_revision", 0)) != source_revision
-            or expression_document_fingerprint(manager) != source_fingerprint
-        ):
+        if not _measurement_source_matches(manager, measurement):
             raise RuntimeError(
                 "Dataset changed immediately before Measure publication; no "
                 "measurements were applied. Run Measure again."
@@ -320,7 +385,7 @@ def run_measure(
             manager, measurements[at_channel], at_channel, use_blot=use_blot,
         )
         _set_measured_at_weights(manager, measurements[at_channel], method)
-        manager.expression_measurements = pending_store
+        manager.expression_measurements = prepared.measurement_set
         manager.expression_measurement_freshness_known = True
     except BaseException:
         # A source mismatch detected before publication may be the result of
@@ -359,7 +424,7 @@ def run_measure(
     else:
         _finalize_installed_csvs(csv_backups)
 
-    logger.info("Measure complete: wrote %d CSV(s) to %s", len(written), output_dir)
+    logger.info("Measure complete: wrote %d CSV(s) to %s", len(written), prepared.output_dir)
     return written
 
 
