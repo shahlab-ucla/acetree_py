@@ -7,7 +7,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 | A1 Correct nuclear Z and provenance | measurement | M | baseline | origins 1/7 raw/blot; historical cache compatibility | pending |
 | B1 Editing/lineage integrity | core | M | baseline | same-parent no-op; duplicate canonical roots; do/undo/redo links | pending |
 | C1 ROI selection/scope/visibility | UI | M | baseline | hidden target cleared; class scope correct; dialog fits | pending |
-| R1 Clean ROI Save As | coordinator | S | baseline | new ZIP reopens clean ROI; next save preserves source | pending |
+| R1 Clean ROI Save As | coordinator | S | baseline | new ZIP reopens clean ROI; next save preserves source | complete; 23 save tests passed |
 | A2 Channel identity | measurement | S | A1 | missing-first channel rejected without renumbering | pending |
 | B2 Tracking request preservation | core | M | B1 | branch policies round-trip; nested inputs detached | pending |
 | A3 ROI bounded memory/freshness | measurement | M | A2 | images bounded per group; manifest once per plot/export | pending |
@@ -27,7 +27,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 - [ ] A1
 - [ ] B1
 - [ ] C1
-- [ ] R1
+- [x] R1
 - [ ] A2
 - [ ] B2
 - [ ] A3

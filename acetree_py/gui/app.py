@@ -1374,7 +1374,23 @@ class AceTreeApp:
 
                     final_commit = commit_config
 
-            if include_roi and self.roi_manager.is_dirty:
+            # A clean sidecar still belongs to the old dataset until Save As
+            # publishes it at the new destination. Do not create optional empty
+            # sidecars for datasets that have never contained ROI state.
+            roi_retarget = (
+                roi_destination is not None
+                and (
+                    self.roi_manager.sidecar_path is None
+                    or roi_destination.resolve(strict=False)
+                    != self.roi_manager.sidecar_path.resolve(strict=False)
+                )
+                and bool(
+                    self.roi_manager.sidecar_path
+                    or self.roi_manager.objects
+                    or self.roi_manager.classes
+                )
+            )
+            if include_roi and (self.roi_manager.is_dirty or roi_retarget):
                 if roi_destination is None:
                     roi_destination = self.roi_manager.sidecar_path
                 if roi_destination is None:

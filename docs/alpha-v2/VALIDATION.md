@@ -28,3 +28,9 @@ Append focused commands/results with each outcome. Reuse existing behavioral tes
 - Live napari workflow smoke at 1280x720: editing, ROI creation/filter/review, measurement/cancel, plots/export, save/reopen, tracking launchers, independent 3D/expression windows.
 - Memory evidence for ROI task groups and tracking affected-only snapshots; navigation evidence on 200 tracks x 400 frames.
 - Inspect final worktree status and commits; preserve source/untracked reports.
+
+### R1 — clean ROI Save As
+
+Save As now copies clean ROI state when the destination changes and retargets only after the coordinated commit. Added one clean load/copy/reopen/edit/save scenario that checks the original sidecar remains unchanged.
+
+`pytest tests/test_app_save.py tests/test_roi_save_transaction.py tests/test_roi_end_to_end.py -q`: **23 passed** in 1.41s.

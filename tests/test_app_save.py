@@ -258,6 +258,45 @@ class TestSaveMethod:
         assert app.save() == target
         assert target.exists()
 
+    def test_save_as_copies_clean_roi_and_future_saves_leave_source_unchanged(
+        self, tmp_path, monkeypatch
+    ):
+        from acetree_py.core.roi_manager import RoiManager
+        from acetree_py.core.subcellular_roi import Polygon2D
+        from acetree_py.io.roi_sidecar import read_roi_sidecar
+
+        qt_widgets = pytest.importorskip("qtpy.QtWidgets")
+        original = tmp_path / "original.zip"
+        target = tmp_path / "new-location.zip"
+        source_sidecar = original.with_suffix(".subcellular-rois.json")
+        target_sidecar = target.with_suffix(".subcellular-rois.json")
+        app = _make_app(zip_path=original)
+        object_class = app.roi_manager.create_class("Golgi", (1, 0.5, 0, 1))
+        track = app.roi_manager.create_object(object_class.class_id)
+        geometry = Polygon2D(1, ((1, 1), (4, 1), (1, 4)))
+        app.roi_manager.update_frame_geometry(track.object_id, 1, geometry)
+        assert app.save() == original
+        source_bytes = source_sidecar.read_bytes()
+        app.roi_manager = RoiManager.from_load(read_roi_sidecar(source_sidecar))
+        assert not app.roi_manager.is_dirty
+        app.viewer = SimpleNamespace(window=SimpleNamespace(_qt_window=None))
+        monkeypatch.setattr(
+            qt_widgets.QFileDialog, "getSaveFileName",
+            lambda *args: (str(target), "ZIP archives (*.zip)"),
+        )
+
+        assert app.save_as() == target
+        assert app.roi_manager.sidecar_path == target_sidecar
+        reopened = RoiManager.from_config(app.manager.config)
+        assert reopened.get_object(track.object_id).frames[1].geometry == geometry
+
+        changed = Polygon2D(1, ((2, 2), (5, 2), (2, 5)))
+        app.roi_manager.update_frame_geometry(track.object_id, 1, changed)
+        assert app.save() == target
+        assert source_sidecar.read_bytes() == source_bytes
+        reopened = RoiManager.from_config(app.manager.config)
+        assert reopened.get_object(track.object_id).frames[1].geometry == changed
+
     def test_save_as_persists_retarget_in_source_config(self, tmp_path, monkeypatch):
         qt_widgets = pytest.importorskip("qtpy.QtWidgets")
         config_path = tmp_path / "embryo.xml"
