@@ -66,7 +66,7 @@ def _manager(*, protected=False):
 
 
 def test_rows_include_identity_state_association_and_filters():
-    manager, object_class, track = _manager()
+    manager, object_class, _track = _manager()
     rows = object_browser_rows(manager, 42)
     assert len(rows) == 1
     assert rows[0].label == "Membrane #3"
@@ -197,3 +197,35 @@ def test_filters_clear_hidden_targets_and_drive_measurement_scope(qtbot):
     assert not panel._btn_edit.isEnabled()
     assert cancelled_edits == [True]
     assert panel.mode is RoiInteractionMode.INSPECT
+
+
+def test_navigation_preserves_browser_items_on_z_and_scroll_on_time(qtbot):
+    from acetree_py.core.roi_manager import RoiManager
+
+    manager = RoiManager()
+    object_class = manager.create_class("Golgi", (0.2, 0.8, 1.0, 1.0))
+    for _ in range(40):
+        manager.create_object(object_class.class_id)
+    app = SimpleNamespace(
+        roi_manager=manager, current_time=1, current_plane=1, current_cell_name="",
+    )
+    panel = SubcellularObjectsPanel(app, browse_only=False)
+    qtbot.addWidget(panel)
+    panel.resize(700, 680)
+    panel.show()
+    qtbot.wait(1)
+    first_item = panel._track_list.item(0)
+    scrollbar = panel._track_list.verticalScrollBar()
+    scrollbar.setValue(scrollbar.maximum())
+    position = scrollbar.value()
+    assert position > 0
+    app.current_plane = 2
+    panel.refresh()
+    assert panel._track_list.item(0) is first_item
+    assert scrollbar.value() == position
+    app.current_time = 2
+    panel.refresh()
+    assert scrollbar.value() == position
+    manager.update_class(object_class.class_id, name="Membrane")
+    panel.refresh()
+    assert "Membrane" in panel._track_list.item(0).text()

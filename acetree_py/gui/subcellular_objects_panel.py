@@ -9,9 +9,10 @@ accepted when it cannot be saved.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .app import AceTreeApp
@@ -40,12 +41,14 @@ class ObjectBrowserRow:
     needs_review: bool
     current_state: str
     current_time: int
+    reviewed_decision_count: int = 0
+    expected_count: int = 0
 
     @property
     def status_text(self) -> str:
         if self.needs_review:
             return "Needs review"
-        if self.segmented_count and self.segmented_count == self.reviewed_count:
+        if self.expected_count and self.reviewed_decision_count == self.expected_count:
             return "Complete"
         return "In progress"
 
@@ -61,7 +64,7 @@ class ObjectBrowserRow:
             span = f"t{self.first_time}–{self.last_time}"
         return (
             f"{glyph} {self.label}{association}  {span}  "
-            f"{self.reviewed_count}/{self.segmented_count} reviewed"
+            f"{self.reviewed_decision_count}/{self.expected_count} reviewed"
         )
 
 
@@ -88,7 +91,7 @@ def object_browser_rows(manager: Any, current_time: int) -> tuple[ObjectBrowserR
     }
     rows: list[ObjectBrowserRow] = []
     for track in _items(manager, "objects", "objects"):
-        frames = dict(getattr(track, "frames", {}) or {})
+        frames = getattr(track, "frames", {}) or {}
         object_class = classes.get(getattr(track, "class_id", None))
         class_name = getattr(object_class, "name", "Unknown class")
         index = getattr(track, "instance_index", "?")
@@ -107,40 +110,92 @@ def object_browser_rows(manager: Any, current_time: int) -> tuple[ObjectBrowserR
             for frame in frames.values()
         )
         current = frames.get(current_time)
-        if current is None:
-            current_state = "missing"
-        elif _enum_value(getattr(current, "presence", "")) == "absent":
-            current_state = "absent"
-        else:
-            current_state = _enum_value(getattr(current, "review_state", "draft"))
-        association = ""
-        if current is not None:
-            cell_ref = getattr(current, "cell_ref", None)
-            association = getattr(cell_ref, "name_snapshot", "") or ""
-            if not association and cell_ref is not None:
-                anchor = getattr(cell_ref, "nucleus_anchor", None)
-                nucleus_index = getattr(anchor, "index", None)
-                if nucleus_index is not None:
-                    association = f"Nucleus {nucleus_index}"
         times = sorted(int(timepoint) for timepoint in frames)
+        expected_start = getattr(track, "expected_start_time", None)
+        expected_end = getattr(track, "expected_end_time", None)
+        span_start = expected_start if expected_start is not None else (times[0] if times else None)
+        span_end = expected_end if expected_end is not None else (times[-1] if times else None)
+        expected_count = (
+            max(0, span_end - span_start + 1)
+            if span_start is not None and span_end is not None else 0
+        )
         rows.append(
             ObjectBrowserRow(
                 object_id=getattr(track, "object_id", None),
                 class_id=getattr(track, "class_id", None),
                 label=f"{class_name} #{index}",
-                association=association,
+                association=_frame_association(current),
                 first_time=times[0] if times else None,
                 last_time=times[-1] if times else None,
-                expected_start_time=getattr(track, "expected_start_time", None),
-                expected_end_time=getattr(track, "expected_end_time", None),
+                expected_start_time=expected_start,
+                expected_end_time=expected_end,
                 segmented_count=len(segmented),
                 reviewed_count=len(reviewed),
                 needs_review=needs_review,
-                current_state=current_state,
+                current_state=_frame_state(current),
                 current_time=current_time,
+                reviewed_decision_count=sum(
+                    _enum_value(getattr(frame, "review_state", "")) == "reviewed"
+                    for frame in frames.values()
+                ),
+                expected_count=expected_count,
             )
         )
     return tuple(sorted(rows, key=lambda row: (row.label.casefold(), str(row.object_id))))
+
+
+def _frame_state(frame: Any) -> str:
+    if frame is None:
+        return "missing"
+    if _enum_value(getattr(frame, "presence", "")) == "absent":
+        return "absent"
+    return _enum_value(getattr(frame, "review_state", "draft"))
+
+
+def _frame_association(frame: Any) -> str:
+    cell_ref = getattr(frame, "cell_ref", None)
+    name = getattr(cell_ref, "name_snapshot", "") or ""
+    if name:
+        return name
+    anchor = getattr(cell_ref, "nucleus_anchor", None)
+    index = getattr(anchor, "index", None)
+    return "" if index is None else f"Nucleus {index}"
+
+
+class ObjectBrowserModel:
+    """Reuse immutable document summaries while projecting the current time."""
+
+    def __init__(self) -> None:
+        self._document: Any = None
+        self._revision: Any = None
+        self._time: int | None = None
+        self._rows: tuple[ObjectBrowserRow, ...] = ()
+        self._tracks: dict[Any, Any] = {}
+
+    def rows(self, manager: Any, current_time: int) -> tuple[ObjectBrowserRow, ...]:
+        document = getattr(manager, "document", None)
+        revision = getattr(manager, "roi_revision", None)
+        if document is None or document is not self._document or revision != self._revision:
+            self._rows = object_browser_rows(manager, current_time)
+            self._tracks = {
+                track.object_id: track for track in _items(manager, "objects", "objects")
+            }
+            self._document = document
+            self._revision = revision
+        elif current_time != self._time:
+            self._rows = tuple(
+                replace(
+                    row,
+                    current_time=current_time,
+                    current_state=_frame_state(self._tracks[row.object_id].frames.get(current_time)),
+                    association=_frame_association(
+                        self._tracks[row.object_id].frames.get(current_time)
+                    ),
+                )
+                for row in self._rows
+            )
+        self._time = current_time
+        return self._rows
 
 
 def filter_object_rows(
@@ -220,6 +275,10 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         self._requested_browse_only = bool(browse_only)
         self._rows: dict[Any, ObjectBrowserRow] = {}
         self._visible_object_ids: frozenset[Any] = frozenset()
+        self._browser_model = ObjectBrowserModel()
+        self._rows_snapshot: tuple[ObjectBrowserRow, ...] | None = None
+        self._class_snapshot: tuple[Any, ...] | None = None
+        self._filtered_cell_name = ""
         self._build_ui()
         self.refresh()
 
@@ -337,7 +396,11 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         selected_form.addRow("Identity", self._identity_label)
         selected_form.addRow("Geometry", self._geometry_label)
         selected_form.addRow("Association", self._association_label)
-        selected_form.addRow("Expected span", self._span_label)
+        span_row = QHBoxLayout()
+        span_row.addWidget(self._span_label, 1)
+        self._btn_span = self._button("Set span…", "Set expected object time span")
+        span_row.addWidget(self._btn_span)
+        selected_form.addRow("Expected span", span_row)
         selected_form.addRow("Frame state", self._frame_state_label)
         layout.addWidget(selected)
 
@@ -406,6 +469,7 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
             "pick_cell": self._btn_pick_cell,
             "clear_association": self._btn_clear_cell,
             "manage_classes": self._btn_manage_classes,
+            "set_span": self._btn_span,
             "mark_reviewed": self._btn_review,
             "previous": self._btn_previous,
             "next": self._btn_next,
@@ -468,10 +532,16 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         self._context_label.setText(
             f"t={current_time}  z={current_plane}  Selected cell: {selected_cell}"
         )
-        self._refresh_classes()
-        rows = object_browser_rows(self.manager, current_time)
-        self._rows = {row.object_id: row for row in rows}
-        self._apply_filters()
+        classes = _items(self.manager, "classes", "object_classes")
+        if classes != self._class_snapshot:
+            self._refresh_classes()
+            self._class_snapshot = classes
+        rows = self._browser_model.rows(self.manager, current_time)
+        cell_name = str(getattr(self.app, "current_cell_name", "") or "")
+        if rows is not self._rows_snapshot or cell_name != self._filtered_cell_name:
+            self._rows_snapshot = rows
+            self._rows = {row.object_id: row for row in rows}
+            self._apply_filters()
         path = getattr(self.manager, "sidecar_path", None)
         state = "Unsaved" if bool(getattr(self.manager, "is_dirty", False)) else "Saved"
         if getattr(self.manager, "load_error", None):
@@ -502,6 +572,8 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
 
     def _apply_filters(self) -> None:
         selected = self.current_object_id
+        scroll_position = self._track_list.verticalScrollBar().value()
+        self._filtered_cell_name = str(getattr(self.app, "current_cell_name", "") or "")
         visible = filter_object_rows(
             self._rows.values(),
             class_id=self._class_combo.currentData(),
@@ -522,6 +594,7 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
                 self._track_list.setCurrentItem(item)
         self._track_list.blockSignals(False)
         self.select_object(selected)
+        self._track_list.verticalScrollBar().setValue(scroll_position)
         no_cell = (
             self._cell_combo.currentData() == "current"
             and not getattr(self.app, "current_cell_name", "")
@@ -580,7 +653,7 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
             return
         self._identity_label.setText(row.label)
         self._association_label.setText(row.association or "Unassociated")
-        self._frame_state_label.setText(row.current_state.replace("_", " ").title())
+        state_text = row.current_state.replace("_", " ").title()
         start = row.expected_start_time
         end = row.expected_end_time
         self._span_label.setText(
@@ -594,6 +667,10 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
             geometry = getattr(frame, "geometry", None)
             if geometry is not None:
                 geometry_name = type(geometry).__name__
+            if row.current_state == "absent":
+                review = _enum_value(getattr(frame, "review_state", "draft"))
+                state_text += f" ({review.replace('_', ' ')})"
+        self._frame_state_label.setText(state_text)
         self._geometry_label.setText(geometry_name)
         self._apply_editability()
 
@@ -613,6 +690,7 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
             self._btn_absent,
             self._btn_edit,
             self._btn_delete,
+            self._btn_span,
         )
         for button in mutation_buttons:
             button.setEnabled(not protected and (has_selection or button in (
@@ -650,6 +728,7 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
 
 
 __all__ = [
+    "ObjectBrowserModel",
     "ObjectBrowserRow",
     "RoiInteractionMode",
     "SubcellularObjectsPanel",

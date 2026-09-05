@@ -3617,7 +3617,7 @@ class AceTreeApp:
                 self._exit_roi_mode()
                 return
             if action == "manage_classes":
-                self._create_roi_class_from_dialog()
+                self._manage_roi_classes()
                 return
             if action == "set_visibility":
                 return
@@ -3626,6 +3626,19 @@ class AceTreeApp:
             track = self.roi_manager.get_object(object_id)
             if track is None:
                 raise ValueError("The selected ROI object no longer exists")
+            if action == "set_span":
+                from qtpy.QtWidgets import QDialog
+                from ..editing.roi_commands import UpdateRoiObjectSpan
+                from .roi_object_dialogs import RoiSpanDialog
+
+                parent = self.viewer.window._qt_window if self.viewer is not None else None
+                dialog = RoiSpanDialog(track, parent=parent)
+                if dialog.exec_() == QDialog.Accepted:
+                    self._run_edit_action(
+                        self.edit_history.do,
+                        UpdateRoiObjectSpan(self.roi_manager, object_id, **dialog.get_values()),
+                    )
+                return
             if action == "pick_cell":
                 picked_time = timepoint
 
@@ -3805,42 +3818,22 @@ class AceTreeApp:
             except Exception:  # noqa: BLE001 - measurement remains successful
                 logger.exception("Failed to refresh ROI scalar plot window")
 
-    def _create_roi_class_from_dialog(self) -> None:
-        """Create one class through the minimum safe class-management flow."""
+    def _manage_roi_classes(self) -> None:
+        """Edit class metadata through the same undo history as ROI geometry."""
+        from .roi_object_dialogs import RoiClassDialog
 
-        if self.viewer is None:
-            raise RuntimeError("Object classes can be created after the GUI opens")
-        from qtpy.QtGui import QColor
-        from qtpy.QtWidgets import QColorDialog, QInputDialog
-
-        from ..editing.roi_commands import CreateObjectClass
-
-        parent = self.viewer.window._qt_window
-        name, accepted = QInputDialog.getText(
-            parent,
-            "New Subcellular Object Class",
-            "Class name:",
-        )
-        name = str(name).strip()
-        if not accepted or not name:
-            return
-        color = QColorDialog.getColor(
-            QColor("#2ec4b6"),
-            parent,
-            "Class color",
-        )
-        if not color.isValid():
-            return
-        red, green, blue, alpha = color.getRgbF()
-        command = CreateObjectClass(
+        panel = self._subcellular_objects_panel
+        parent = self.viewer.window._qt_window if self.viewer is not None else None
+        dialog = RoiClassDialog(
             self.roi_manager,
-            name,
-            (float(red), float(green), float(blue), float(alpha)),
+            lambda command: self._run_edit_action(self.edit_history.do, command),
+            selected_class_id=None if panel is None else panel.selected_class_id,
+            parent=parent,
         )
-        self._run_edit_action(self.edit_history.do, command)
-        if self._subcellular_objects_panel is not None:
-            self._subcellular_objects_panel.refresh()
-            self._subcellular_objects_panel.select_class(command.created_class_id)
+        dialog.exec_()
+        if panel is not None:
+            panel.refresh()
+            panel.select_class(dialog.selected_class_id)
 
     def get_cell_info_text(self) -> str:
         """Build the cell info display text for the currently selected cell.
