@@ -1021,22 +1021,16 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
         if validation_error:
             raise ValueError(validation_error)
 
-        from ..tracking.api import ComponentSpec, TrackingRequest, TrackingScope
+        from ..tracking.api import TrackingRequest, TrackingScope
         from ..tracking.registry import get_default_registry
+        from ..tracking.settings import build_detector_spec, build_tracker_spec
 
-        max_distance = self._tracking_link_distance_spin.value()
-        gap_frames = self._tracking_gap_spin.value()
         registry = get_default_registry()
         detector_id = str(self._tracking_detector_combo.currentData())
         tracker_id = str(self._tracking_tracker_combo.currentData())
-        detector_settings = registry.default_settings(detector_id)
-        tracker_settings = registry.default_settings(tracker_id)
+        profile = None
         if self._tracking_workflow_combo.currentData() == "modern_starrynite":
-            from ..tracking.starrynite import (
-                bundled_parameter_preset,
-                load_tuning_profile,
-                native_detector_settings,
-            )
+            from ..tracking.starrynite import bundled_parameter_preset, load_tuning_profile
 
             preset = bundled_parameter_preset(
                 str(self._tracking_starrynite_preset_combo.currentData())
@@ -1045,47 +1039,22 @@ class DatasetCreationDialog(QDialog):  # type: ignore[misc]
                 preset.parameter_file,
                 fallback_radius_um=self._tracking_radius_spin.value(),
             )
-            detector_settings.update(
-                native_detector_settings(profile.detector_settings)
-            )
-            tracker_settings.update(profile.tracker_settings)
-        detector_common = {
-            "TARGET_CHANNEL": self._tracking_channel_spin.value(),
-            "RADIUS": self._tracking_radius_spin.value(),
-            "THRESHOLD": self._tracking_threshold_spin.value(),
-            "DO_MEDIAN_FILTERING": False,
-        }
-        if detector_id == "acetree.starrynite_detector":
-            detector_common["THRESHOLD"] = 0.0
-            detector_common["INTENSITY_THRESHOLD"] = (
-                self._tracking_threshold_spin.value()
-            )
-        tracker_common = {
-            "LINKING_MAX_DISTANCE": max_distance,
-            "ALLOW_GAP_CLOSING": gap_frames > 0,
-            "GAP_CLOSING_MAX_DISTANCE": max_distance,
-            "MAX_FRAME_GAP": gap_frames + 1 if gap_frames > 0 else 1,
-            "ALLOW_TRACK_SPLITTING": self._tracking_division_check.isChecked(),
-            "ALLOW_TRACK_MERGING": False,
-        }
-        detector_schema = registry.get_descriptor(detector_id).settings_schema
-        tracker_schema = registry.get_descriptor(tracker_id).settings_schema
-        detector_settings.update(
-            (key, value) for key, value in detector_common.items()
-            if key in detector_schema
-        )
-        tracker_settings.update(
-            (key, value) for key, value in tracker_common.items()
-            if key in tracker_schema
-        )
         return TrackingRequest(
-            detector=ComponentSpec(
-                plugin_id=detector_id,
-                settings=detector_settings,
+            detector=build_detector_spec(
+                registry,
+                detector_id,
+                channel=self._tracking_channel_spin.value(),
+                radius_um=self._tracking_radius_spin.value(),
+                threshold=self._tracking_threshold_spin.value(),
+                source_settings=None if profile is None else profile.detector_settings,
             ),
-            tracker=ComponentSpec(
-                plugin_id=tracker_id,
-                settings=tracker_settings,
+            tracker=build_tracker_spec(
+                registry,
+                tracker_id,
+                max_distance_um=self._tracking_link_distance_spin.value(),
+                missing_frames=self._tracking_gap_spin.value(),
+                allow_splitting=self._tracking_division_check.isChecked(),
+                source_settings=None if profile is None else profile.tracker_settings,
             ),
             scope=TrackingScope(
                 kind="global",

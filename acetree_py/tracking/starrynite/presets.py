@@ -90,6 +90,53 @@ class StarryNiteTuningProfile:
             object.__setattr__(self, "model_path", Path(self.model_path))
 
 
+def tuning_identity_changed(
+    previous_detector: Mapping[str, Any],
+    previous_tracker: Mapping[str, Any],
+    profile: StarryNiteTuningProfile,
+) -> bool:
+    """Whether a refreshed preset replaces previously recorded source identity."""
+    identity_keys = (
+        (previous_detector, profile.detector_settings, "STARRYNITE_PARAMETER_SHA256"),
+        (previous_detector, profile.detector_settings, "STARRYNITE_STAGE_INDEX"),
+        (previous_detector, profile.detector_settings, "STARRYNITE_CELL_COUNT"),
+        (previous_tracker, profile.tracker_settings, "STARRYNITE_MODEL_SHA256"),
+        (previous_tracker, profile.tracker_settings, "STARRYNITE_MODEL_FILE"),
+    )
+    return any(
+        old.get(key) not in (None, "") and old.get(key) != fresh.get(key)
+        for old, fresh, key in identity_keys
+    )
+
+
+def tuning_calibration_warnings(
+    profile: StarryNiteTuningProfile,
+    *,
+    xy_um: float | None,
+    z_um: float | None,
+) -> tuple[str, ...]:
+    """Explain preset/dataset calibration differences using one shared tolerance."""
+    warnings: list[str] = []
+    pairs = (
+        ("xyres", profile.xy_um, xy_um, "pixel"),
+        ("zres", profile.z_um, z_um, "plane"),
+    )
+    for name, parameter_value, dataset_value, unit in pairs:
+        if parameter_value is None or dataset_value is None:
+            continue
+        parameter_number = float(parameter_value)
+        dataset_number = float(dataset_value)
+        tolerance = max(1e-9, 1e-6 * max(abs(parameter_number), abs(dataset_number)))
+        if abs(parameter_number - dataset_number) <= tolerance:
+            continue
+        warnings.append(
+            f"Parameter {name} is {parameter_number:g} µm/{unit}, but this "
+            f"dataset uses {dataset_number:g}; physical sizes come from the "
+            "parameter file while image sampling follows the dataset calibration."
+        )
+    return tuple(warnings)
+
+
 @dataclass(frozen=True, slots=True)
 class StarryNiteTuningSavePlan:
     """Lossless legacy overrides produced by the basic tuning controls."""
@@ -471,4 +518,6 @@ __all__ = [
     "load_tuning_profile",
     "select_stage_value",
     "tuning_profile_from_parameters",
+    "tuning_identity_changed",
+    "tuning_calibration_warnings",
 ]

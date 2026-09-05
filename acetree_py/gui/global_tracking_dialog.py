@@ -909,38 +909,9 @@ class GlobalTrackingDialog(QDialog):
                 self._starrynite_file_label.show()
             else:
                 loaded_fresh_profile = True
-                identity_keys = (
-                    (
-                        detector,
-                        self._starrynite_detector_settings,
-                        "STARRYNITE_PARAMETER_SHA256",
-                    ),
-                    (
-                        detector,
-                        self._starrynite_detector_settings,
-                        "STARRYNITE_STAGE_INDEX",
-                    ),
-                    (
-                        detector,
-                        self._starrynite_detector_settings,
-                        "STARRYNITE_CELL_COUNT",
-                    ),
-                    (
-                        tracker,
-                        self._starrynite_tracker_settings,
-                        "STARRYNITE_MODEL_SHA256",
-                    ),
-                    (
-                        tracker,
-                        self._starrynite_tracker_settings,
-                        "STARRYNITE_MODEL_FILE",
-                    ),
-                )
-                if any(
-                    old.get(key) not in (None, "")
-                    and old.get(key) != fresh.get(key)
-                    for old, fresh, key in identity_keys
-                ):
+                from ..tracking.starrynite.presets import tuning_identity_changed
+
+                if tuning_identity_changed(detector, tracker, self._starrynite_profile):
                     self._starrynite_session_note_html = (
                         "<b>Source/model changed:</b> staged preset metadata was "
                         "refreshed; visible tuning edits were kept."
@@ -1451,28 +1422,11 @@ class GlobalTrackingDialog(QDialog):
         calibration = self._calibration
         if calibration is None:
             return ()
-        warnings: list[str] = []
-        pairs = (
-            ("xyres", profile.xy_um, calibration.xy_um, "pixel"),
-            ("zres", profile.z_um, calibration.z_um, "plane"),
+        from ..tracking.starrynite.presets import tuning_calibration_warnings
+
+        return tuning_calibration_warnings(
+            profile, xy_um=calibration.xy_um, z_um=calibration.z_um
         )
-        for name, parameter_value, dataset_value, unit in pairs:
-            if parameter_value is None:
-                continue
-            parameter_number = float(parameter_value)
-            dataset_number = float(dataset_value)
-            tolerance = max(
-                1e-9,
-                1e-6 * max(abs(parameter_number), abs(dataset_number)),
-            )
-            if abs(parameter_number - dataset_number) <= tolerance:
-                continue
-            warnings.append(
-                f"Parameter {name} is {parameter_number:g} µm/{unit}, but this "
-                f"dataset uses {dataset_number:g}; physical sizes come from the "
-                "parameter file while image sampling follows the dataset calibration."
-            )
-        return tuple(warnings)
 
     def _choose_starrynite_neutral_classifier(self) -> None:
         profile = self._starrynite_profile
@@ -1821,34 +1775,23 @@ class GlobalTrackingDialog(QDialog):
         if error:
             raise ValueError(error)
 
-        from ..tracking.api import ComponentSpec
+        from ..tracking.settings import build_detector_spec
 
         detector_id = str(self._detector_combo.currentData())
-        detector_settings = self._registry.default_settings(detector_id)
-        if detector_id == _STARRYNITE_DETECTOR_ID:
-            source_settings = self._starrynite_detector_settings
-            if not self._exact_starrynite_selected():
-                from ..tracking.starrynite import native_detector_settings
-
-                source_settings = native_detector_settings(source_settings)
-            detector_settings.update(source_settings)
-        detector_common = {
-            "TARGET_CHANNEL": self._channel_spin.value(),
-            "RADIUS": self._radius_spin.value(),
-            "THRESHOLD": self._threshold_spin.value(),
-            "DO_SUBPIXEL_LOCALIZATION": self._subpixel_check.isChecked(),
-            "DO_MEDIAN_FILTERING": self._median_check.isChecked(),
-        }
-        if detector_id == _STARRYNITE_DETECTOR_ID:
-            detector_common["THRESHOLD"] = 0.0
-            detector_common["INTENSITY_THRESHOLD"] = self._threshold_spin.value()
-        detector_schema = self._registry.get_descriptor(detector_id).settings_schema
-        detector_settings.update(
-            (key, value)
-            for key, value in detector_common.items()
-            if key in detector_schema
+        return build_detector_spec(
+            self._registry,
+            detector_id,
+            channel=self._channel_spin.value(),
+            radius_um=self._radius_spin.value(),
+            threshold=self._threshold_spin.value(),
+            subpixel=self._subpixel_check.isChecked(),
+            median_filter=self._median_check.isChecked(),
+            source_settings=(
+                self._starrynite_detector_settings
+                if detector_id == _STARRYNITE_DETECTOR_ID else None
+            ),
+            exact_starrynite=self._exact_starrynite_selected(),
         )
-        return ComponentSpec(detector_id, detector_settings)
 
     def get_request(self) -> TrackingRequest:
         """Build the immutable global request represented by the form."""
@@ -1858,11 +1801,12 @@ class GlobalTrackingDialog(QDialog):
         if error:
             raise ValueError(error)
 
-        from ..tracking.api import ComponentSpec, TrackingRequest, TrackingScope
+        from ..tracking.api import TrackingRequest, TrackingScope
+        from ..tracking.settings import build_tracker_spec
 
         detector_spec = self.get_detector_spec()
         tracker_id = str(self._tracker_combo.currentData())
-        tracker_settings = self._registry.default_settings(tracker_id)
+        tracker_settings: dict[str, Any] = {}
         if tracker_id == _STARRYNITE_NATIVE_TRACKER_ID:
             tracker_settings.update(self._starrynite_tracker_settings)
         elif tracker_id == _STARRYNITE_EXACT_TRACKER_ID:
@@ -1896,23 +1840,17 @@ class GlobalTrackingDialog(QDialog):
             ):
                 if key in self._starrynite_tracker_settings:
                     tracker_settings[key] = self._starrynite_tracker_settings[key]
-        gap_frames = self._gap_spin.value()
-        max_distance = self._distance_spin.value()
-        tracker_common = {
-            "LINKING_MAX_DISTANCE": max_distance,
-            "ALLOW_GAP_CLOSING": gap_frames > 0,
-            "GAP_CLOSING_MAX_DISTANCE": max_distance,
-            "MAX_FRAME_GAP": gap_frames + 1 if gap_frames > 0 else 1,
-            "ALLOW_TRACK_SPLITTING": self._division_check.isChecked(),
-            "ALLOW_TRACK_MERGING": False,
-        }
-        tracker_schema = self._registry.get_descriptor(tracker_id).settings_schema
-        tracker_settings.update(
-            (key, value) for key, value in tracker_common.items() if key in tracker_schema
+        tracker = build_tracker_spec(
+            self._registry,
+            tracker_id,
+            max_distance_um=self._distance_spin.value(),
+            missing_frames=self._gap_spin.value(),
+            allow_splitting=self._division_check.isChecked(),
+            source_settings=tracker_settings,
         )
         return TrackingRequest(
             detector=detector_spec,
-            tracker=ComponentSpec(tracker_id, tracker_settings),
+            tracker=tracker,
             scope=TrackingScope(
                 "global",
                 self._start_spin.value(),

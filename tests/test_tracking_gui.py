@@ -51,10 +51,11 @@ def test_dataset_wizard_defaults_to_manual_and_has_tracking_page(qtbot):
     assert dialog._radio_tracking_manual.isChecked()
 
 
-def test_dataset_wizard_builds_trackmate_keyed_global_request(qtbot):
+def test_tracking_forms_preserve_tuned_preset_settings(qtbot):
     dialog = DatasetCreationDialog()
     qtbot.addWidget(dialog)
     dialog._radio_tracking_auto.setChecked(True)
+    dialog._timepoints_spin.setValue(3)
     dialog._tracking_gap_spin.setValue(1)
     dialog._tracking_radius_spin.setValue(6.25)
     dialog._tracking_threshold_spin.setValue(17.5)
@@ -75,6 +76,24 @@ def test_dataset_wizard_builds_trackmate_keyed_global_request(qtbot):
     # The UI speaks in missed frames; TrackMate MAX_FRAME_GAP is the frame delta.
     assert request.tracker.settings["MAX_FRAME_GAP"] == 2
     assert request.tracker.settings["ALLOW_TRACK_SPLITTING"] is True
+
+    # Reopening the same tuning in either workbench preserves preset metadata
+    # and lets the visible radius/threshold/gap controls override preset values.
+    from acetree_py.gui.global_tracking_dialog import GlobalTrackingDialog
+
+    global_dialog = GlobalTrackingDialog(1, 3, initial_request=request)
+    qtbot.addWidget(global_dialog)
+    selected_dialog = AutoTrackForwardDialog(
+        1, 3,
+        initial_settings={
+            **global_dialog.export_settings(),
+            "branch_policy": "follow_both",
+        },
+    )
+    qtbot.addWidget(selected_dialog)
+    for restored in (global_dialog.get_request(), selected_dialog.get_request((1, 1))):
+        assert restored.detector == request.detector
+        assert restored.tracker == request.tracker
 
 
 def test_dataset_wizard_enables_reviewed_divisions_for_starrynite(qtbot):
