@@ -3,6 +3,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+pytest.importorskip("qtpy.QtWidgets")
+
 from acetree_py.analysis import roi_measurements
 from acetree_py.analysis.roi_measurements import RoiMeasurementEngine
 from acetree_py.core.roi_manager import RoiManager

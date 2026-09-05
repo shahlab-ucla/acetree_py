@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 try:
-    from qtpy.QtCore import QTimer, Qt
+    from qtpy.QtCore import Qt, QTimer
     from qtpy.QtWidgets import (
         QHBoxLayout,
         QLabel,
@@ -113,6 +113,7 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         )
 
         self._time_spin = QSpinBox()
+        self._time_spin.setFixedWidth(110)
         self._time_spin.setRange(1, max(1, self.app.manager.num_timepoints))
         self._time_spin.setValue(self.app.current_time)
         self._time_spin.setPrefix("t=")
@@ -126,18 +127,16 @@ class PlayerControls(QWidget):  # type: ignore[misc]
             time_row.addWidget(w)
         time_row.addWidget(self._time_spin)
         time_row.addWidget(self._time_label)
-        time_row.addStretch()
-
         layout.addLayout(time_row)
 
-        # ── Row 2: Time slider ──
+        # Time slider shares the transport row
         self._time_slider = QSlider(Qt.Horizontal)
         self._time_slider.setRange(1, max(1, self.app.manager.num_timepoints))
         self._time_slider.setValue(self.app.current_time)
         self._time_slider.valueChanged.connect(self.app.set_time)
-        layout.addWidget(self._time_slider)
+        time_row.addWidget(self._time_slider, 1)
 
-        # ── Row 3: Plane navigation ──
+        # ── Row 2: Plane navigation ──
         plane_row = QHBoxLayout()
 
         self._btn_plane_up = QPushButton("▲")
@@ -161,6 +160,7 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         else:
             max_plane = min_plane + 29
         self._plane_spin = QSpinBox()
+        self._plane_spin.setFixedWidth(110)
         self._plane_spin.setRange(min_plane, max(min_plane, max_plane))
         self._plane_spin.setValue(self.app.current_plane)
         self._plane_spin.setPrefix("z=")
@@ -172,7 +172,6 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         plane_row.addWidget(self._btn_plane_down)
         plane_row.addWidget(self._plane_spin)
         plane_row.addWidget(self._plane_label)
-        plane_row.addStretch()
 
         # Label visibility controls
         self._btn_toggle_labels = QPushButton("Labels: ON")
@@ -210,6 +209,7 @@ class PlayerControls(QWidget):  # type: ignore[misc]
         self._btn_3d_window.clicked.connect(self._on_open_3d_window)
         plane_row.addWidget(self._btn_3d_window)
 
+        plane_row.addStretch()
         layout.addLayout(plane_row)
 
     def refresh(self) -> None:

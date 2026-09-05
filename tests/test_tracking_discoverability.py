@@ -146,7 +146,7 @@ def test_tracking_menu_has_plain_language_callable_entry_points(qtbot):
         "selected_forward": "Track Selected Cell Forward",
         "whole_movie": "Track Whole Movie",
         "relink": "Relink Selected Cells",
-        "show_panel": "Show Edit & Tracking Tools",
+        "show_panel": "Show Tracking",
     }
     for action_id, label in expected_labels.items():
         action = actions[action_id]

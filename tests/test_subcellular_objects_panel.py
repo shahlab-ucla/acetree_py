@@ -16,6 +16,7 @@ from acetree_py.core.subcellular_roi import (
     SubcellularRoiDocument,
 )
 from acetree_py.gui.subcellular_objects_panel import (
+    _QT_AVAILABLE,
     RoiInteractionMode,
     SubcellularObjectsPanel,
     filter_object_rows,
@@ -83,8 +84,8 @@ def test_rows_include_identity_state_association_and_filters():
     ) == rows
 
 
+@pytest.mark.skipif(not _QT_AVAILABLE, reason="Qt is not installed")
 def test_panel_is_browse_only_and_accessible(qtbot):
-    pytest.importorskip("qtpy")
     manager, object_class, track = _manager(protected=True)
     app = SimpleNamespace(
         roi_manager=manager,
@@ -106,8 +107,8 @@ def test_panel_is_browse_only_and_accessible(qtbot):
     assert panel.current_object_id == track.object_id
 
 
+@pytest.mark.skipif(not _QT_AVAILABLE, reason="Qt is not installed")
 def test_plot_track_and_spatial_profiles_are_separate_actions(qtbot):
-    pytest.importorskip("qtpy")
     manager, _object_class, track = _manager()
     app = SimpleNamespace(
         roi_manager=manager,
@@ -134,6 +135,7 @@ def test_plot_track_and_spatial_profiles_are_separate_actions(qtbot):
     assert "spatial" in panel._btn_profiles.accessibleName().lower()
 
 
+@pytest.mark.skipif(not _QT_AVAILABLE, reason="Qt is not installed")
 def test_filters_clear_hidden_targets_and_drive_measurement_scope(qtbot):
     from acetree_py.core.roi_manager import RoiManager
     from acetree_py.gui.roi_measure_dialog import RoiMeasureDialog
@@ -199,6 +201,7 @@ def test_filters_clear_hidden_targets_and_drive_measurement_scope(qtbot):
     assert panel.mode is RoiInteractionMode.INSPECT
 
 
+@pytest.mark.skipif(not _QT_AVAILABLE, reason="Qt is not installed")
 def test_navigation_preserves_browser_items_on_z_and_scroll_on_time(qtbot):
     from acetree_py.core.roi_manager import RoiManager
 

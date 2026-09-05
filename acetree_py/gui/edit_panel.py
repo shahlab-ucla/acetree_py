@@ -442,6 +442,17 @@ class EditPanel(QWidget):  # type: ignore[misc]
         layout.addWidget(self._btn_history)
 
         layout.addStretch()
+        # The workspace reparents these existing controls; callbacks and dialog
+        # ownership remain here, including standalone EditPanel support.
+        self._document_actions = (
+            self._btn_save, self._btn_save_as, self._btn_undo, self._btn_redo,
+        )
+        self._document_group = file_group
+        self._undo_redo_row = undo_redo_row
+        self._tracking_groups = (link_group, axis_group)
+        self._heading = title
+        self._nucleus_group = nuc_group
+        self._cell_group = cell_group
 
     def _build_move_controls(self, parent_layout: QVBoxLayout) -> None:
         """Build D-pad style move/resize controls."""

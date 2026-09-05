@@ -55,6 +55,8 @@ class _ChannelControls:
         self.max_spin = QSpinBox()
         self.max_spin.setRange(0, max_val)
         self.max_spin.setValue(max_val)
+        for spin in (self.min_spin, self.max_spin):
+            spin.setFixedWidth(110)
 
 
 class ContrastTools(QWidget):  # type: ignore[misc]
@@ -82,7 +84,7 @@ class ContrastTools(QWidget):  # type: ignore[misc]
         self._layout.setContentsMargins(4, 4, 4, 4)
         self._layout.setSpacing(4)
 
-        title = QLabel("Contrast")
+        title = QLabel("Channels and contrast")
         self._layout.addWidget(title)
 
         self._channels_container = QVBoxLayout()

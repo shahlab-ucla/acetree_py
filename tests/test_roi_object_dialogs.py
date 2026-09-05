@@ -1,5 +1,9 @@
 from dataclasses import replace
 
+import pytest
+
+pytest.importorskip("qtpy.QtWidgets")
+
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import QDialog
 

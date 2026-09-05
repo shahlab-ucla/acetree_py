@@ -228,11 +228,11 @@ def filter_object_rows(
 
 try:
     from qtpy.QtCore import Qt, Signal
-    from qtpy.QtGui import QFont
     from qtpy.QtWidgets import (
         QCheckBox,
         QComboBox,
         QFormLayout,
+        QGridLayout,
         QGroupBox,
         QHBoxLayout,
         QLabel,
@@ -240,6 +240,8 @@ try:
         QListWidget,
         QListWidgetItem,
         QPushButton,
+        QScrollArea,
+        QSizePolicy,
         QVBoxLayout,
         QWidget,
     )
@@ -295,148 +297,158 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         self._apply_editability(reason)
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll_area.setAccessibleName("Object tools and details")
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
-
-        title = QLabel("Subcellular Objects")
-        title.setFont(QFont("Sans Serif", 12, QFont.Bold))
-        layout.addWidget(title)
+        self._scroll_area.setWidget(content)
+        outer.addWidget(self._scroll_area, 1)
 
         self._context_label = QLabel()
+        self._context_label.setWordWrap(True)
         self._context_label.setAccessibleName("Current ROI view context")
         layout.addWidget(self._context_label)
-
-        association_row = QHBoxLayout()
-        self._btn_use_cell = self._button("Use selected cell", "Associate with selected cell")
-        self._btn_pick_cell = self._button("Pick cell", "Pick cell association from image")
-        self._btn_clear_cell = self._button("Clear association", "Clear cell association")
-        for button in (self._btn_use_cell, self._btn_pick_cell, self._btn_clear_cell):
-            association_row.addWidget(button)
-        layout.addLayout(association_row)
 
         class_row = QHBoxLayout()
         class_row.addWidget(QLabel("Class"))
         self._class_combo = QComboBox()
+        self._class_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._class_combo.setMinimumContentsLength(10)
         self._class_combo.setAccessibleName("Object class filter and authoring class")
         class_row.addWidget(self._class_combo, 1)
-        self._btn_manage_classes = self._button("Manage classes…", "Manage object classes")
+        self._btn_manage_classes = self._button("Manage...", "Manage object classes")
         class_row.addWidget(self._btn_manage_classes)
         layout.addLayout(class_row)
 
         draw_row = QHBoxLayout()
-        self._btn_polygon = self._button("2D Polygon", "Draw a two-dimensional polygon")
-        self._btn_polyline = self._button("Thick Line", "Draw a thick polyline")
-        self._btn_contours = self._button("3D Contour Stack", "Draw a contour stack")
+        self._btn_polygon = self._button("Polygon", "Draw a two-dimensional polygon")
+        self._btn_polyline = self._button("Thick line", "Draw a thick polyline")
+        self._btn_contours = self._button("3D contours", "Draw a contour stack")
         for button in (self._btn_polygon, self._btn_polyline, self._btn_contours):
             draw_row.addWidget(button)
         layout.addLayout(draw_row)
 
         self._mode_label = QLabel("MODE: INSPECT")
+        self._mode_label.setWordWrap(True)
         self._mode_label.setAccessibleName("ROI interaction mode")
         layout.addWidget(self._mode_label)
-        mode_actions = QHBoxLayout()
+        self._drawing_actions = QWidget()
+        mode_actions = QHBoxLayout(self._drawing_actions)
+        mode_actions.setContentsMargins(0, 0, 0, 0)
         self._btn_finish_drawing = self._button(
-            "Finish",
-            "Finish and commit the active ROI drawing",
+            "Finish", "Finish and commit the active ROI drawing",
         )
         self._btn_cancel_drawing = self._button(
-            "Cancel",
-            "Cancel the active ROI drawing without changing annotations",
+            "Cancel", "Cancel the active ROI drawing without changing annotations",
         )
         mode_actions.addWidget(self._btn_finish_drawing)
         mode_actions.addWidget(self._btn_cancel_drawing)
-        layout.addLayout(mode_actions)
+        layout.addWidget(self._drawing_actions)
+        self._drawing_actions.hide()
 
-        filters = QGroupBox("Filters")
-        filter_form = QFormLayout(filters)
         self._show_checkbox = QCheckBox("Show ROIs")
         self._show_checkbox.setChecked(True)
         self._show_checkbox.setAccessibleName("Show subcellular ROI overlay")
-        filter_form.addRow(self._show_checkbox)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(self._show_checkbox)
         self._cell_combo = QComboBox()
-        self._cell_combo.addItem("All", userData="all")
-        self._cell_combo.addItem("Current", userData="current")
+        self._cell_combo.addItem("All cells", userData="all")
+        self._cell_combo.addItem("Current cell", userData="current")
         self._cell_combo.setAccessibleName("Cell association filter")
-        filter_form.addRow("Cell", self._cell_combo)
+        filter_row.addWidget(self._cell_combo, 1)
         self._state_combo = QComboBox()
         for label, value in (
-            ("All", "all"),
-            ("Missing", "missing"),
-            ("Draft", "draft"),
-            ("Reviewed", "reviewed"),
-            ("Needs review", "needs_review"),
-            ("Absent", "absent"),
+            ("All states", "all"), ("Missing", "missing"), ("Draft", "draft"),
+            ("Reviewed", "reviewed"), ("Needs review", "needs_review"), ("Absent", "absent"),
         ):
             self._state_combo.addItem(label, userData=value)
         self._state_combo.setAccessibleName("Frame state filter")
-        filter_form.addRow("State", self._state_combo)
+        filter_row.addWidget(self._state_combo, 1)
+        layout.addLayout(filter_row)
         self._search_edit = QLineEdit()
-        self._search_edit.setPlaceholderText("Class, index, or associated cell")
+        self._search_edit.setPlaceholderText("Search class, index, or associated cell")
         self._search_edit.setAccessibleName("Search subcellular objects")
-        filter_form.addRow("Search", self._search_edit)
-        layout.addWidget(filters)
-
-        layout.addWidget(QLabel("Tracks"))
+        layout.addWidget(self._search_edit)
         self._track_list = QListWidget()
         self._track_list.setAccessibleName("Subcellular object tracks")
-        layout.addWidget(self._track_list, 1)
+        self._track_list.setMinimumHeight(100)
+        self._track_list.setMaximumHeight(130)
+        layout.addWidget(self._track_list)
         self._empty_label = QLabel()
         self._empty_label.setWordWrap(True)
         self._empty_label.setAccessibleName("Object filter status")
         layout.addWidget(self._empty_label)
 
+        # Primary actions remain visible while the secondary inspector scrolls.
+        action_grid = QGridLayout()
+        self._btn_edit = self._button("Edit geometry", "Edit selected ROI geometry")
+        self._btn_measure = self._button("Measure", "Measure selected ROI")
+        self._btn_plot = self._button("Plot track", "Plot selected ROI scalar track")
+        self._btn_profiles = self._button("Plot profiles", "Plot selected ROI spatial profiles")
+        for index, button in enumerate((
+            self._btn_edit, self._btn_measure, self._btn_plot, self._btn_profiles,
+        )):
+            action_grid.addWidget(button, index // 2, index % 2)
+        outer.addLayout(action_grid)
+
         selected = QGroupBox("Selected object")
         selected_form = QFormLayout(selected)
         self._identity_label = QLabel("None")
-        self._geometry_label = QLabel("—")
-        self._association_label = QLabel("—")
-        self._span_label = QLabel("—")
-        self._frame_state_label = QLabel("—")
+        self._geometry_label = QLabel("-")
+        self._association_label = QLabel("-")
+        self._span_label = QLabel("-")
+        self._frame_state_label = QLabel("-")
+        for label in (self._identity_label, self._geometry_label, self._association_label,
+                      self._span_label, self._frame_state_label):
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         selected_form.addRow("Identity", self._identity_label)
         selected_form.addRow("Geometry", self._geometry_label)
         selected_form.addRow("Association", self._association_label)
         span_row = QHBoxLayout()
         span_row.addWidget(self._span_label, 1)
-        self._btn_span = self._button("Set span…", "Set expected object time span")
+        self._btn_span = self._button("Set span...", "Set expected object time span")
         span_row.addWidget(self._btn_span)
         selected_form.addRow("Expected span", span_row)
         selected_form.addRow("Frame state", self._frame_state_label)
         layout.addWidget(selected)
 
+        association_row = QHBoxLayout()
+        self._btn_use_cell = self._button("Use selected cell", "Associate with selected cell")
+        self._btn_pick_cell = self._button("Pick cell", "Pick cell association from image")
+        self._btn_clear_cell = self._button("Clear", "Clear cell association")
+        for button in (self._btn_use_cell, self._btn_pick_cell, self._btn_clear_cell):
+            association_row.addWidget(button)
+        layout.addLayout(association_row)
+
+        review_row = QHBoxLayout()
         self._btn_review = self._button("Mark reviewed", "Mark selected ROI frame reviewed")
-        layout.addWidget(self._btn_review)
+        self._btn_absent = self._button("Mark absent", "Mark ROI explicitly absent")
+        review_row.addWidget(self._btn_review)
+        review_row.addWidget(self._btn_absent)
+        layout.addLayout(review_row)
         temporal_row = QHBoxLayout()
         self._btn_previous = self._button("Previous", "Previous segmented ROI frame")
         self._btn_next = self._button("Next", "Next segmented ROI frame")
         self._btn_copy = self._button("Copy previous", "Copy previous geometry as draft")
-        self._btn_absent = self._button("Mark absent", "Mark ROI explicitly absent")
-        for button in (self._btn_previous, self._btn_next, self._btn_copy, self._btn_absent):
+        for button in (self._btn_previous, self._btn_next, self._btn_copy):
             temporal_row.addWidget(button)
         layout.addLayout(temporal_row)
-
-        action_row = QHBoxLayout()
-        self._btn_edit = self._button("Edit", "Edit selected ROI geometry")
-        self._btn_measure = self._button("Measure", "Measure selected ROI")
-        self._btn_plot = self._button("Plot track", "Plot selected ROI scalar track")
-        self._btn_profiles = self._button(
-            "Plot profiles",
-            "Plot selected ROI spatial profiles",
-        )
-        self._btn_delete = self._button("Delete frame…", "Delete selected ROI frame")
-        for button in (
-            self._btn_edit,
-            self._btn_measure,
-            self._btn_plot,
-            self._btn_profiles,
-            self._btn_delete,
-        ):
-            action_row.addWidget(button)
-        layout.addLayout(action_row)
-
+        self._btn_delete = self._button("Delete frame...", "Delete selected ROI frame")
+        layout.addWidget(self._btn_delete)
         self._file_status_label = QLabel()
+        self._file_status_label.setWordWrap(True)
+        self._file_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._file_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._file_status_label.setAccessibleName("ROI file status")
         layout.addWidget(self._file_status_label)
+        layout.addStretch(1)
 
         self._class_combo.currentIndexChanged.connect(self._apply_filters)
         self._cell_combo.currentIndexChanged.connect(self._apply_filters)
@@ -503,6 +515,7 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         if self.browse_only and mode is not RoiInteractionMode.INSPECT:
             return False
         self.mode = mode
+        self._drawing_actions.setVisible(mode is not RoiInteractionMode.INSPECT)
         self._mode_label.setText(f"MODE: {mode.value.replace('_', ' ').upper()}")
         self._apply_editability()
         self.modeChanged.emit(mode.value)

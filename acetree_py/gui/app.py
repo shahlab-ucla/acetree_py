@@ -230,6 +230,7 @@ class AceTreeApp:
         self._cell_info_panel = None
         self._contrast_tools = None
         self._edit_panel = None
+        self._workspace = None
         self._subcellular_objects_panel = None
         self._roi_viewer_integration = None
         self._tracking_menu = None
@@ -480,6 +481,12 @@ class AceTreeApp:
         from .roi_viewer_integration import RoiViewerIntegration
         from .subcellular_objects_panel import SubcellularObjectsPanel
         from .viewer_integration import ViewerIntegration
+        from .workspace import (
+            BrowseChannelsWorkspace,
+            WorkflowWorkspace,
+            arrange_workspace,
+            hide_default_layer_docks,
+        )
 
         self.viewer = napari.Viewer(title="AceTree")
         if not self._tracking_shutdown_connected:
@@ -503,15 +510,8 @@ class AceTreeApp:
         except (AttributeError, TypeError):
             logger.debug("napari does not expose an ndisplay change event")
 
-        # Hide napari's default layer list and layer controls — they're
-        # rarely needed and consume valuable dock space.  Still accessible
-        # via the Window menu toggle actions.
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", FutureWarning)
-            for dw in list(self.viewer.window._dock_widgets.values()):
-                if dw.objectName() in ("layer list", "layer controls"):
-                    dw.setVisible(False)
+        # Native layer controls remain available through napari's Window menu.
+        hide_default_layer_docks(self.viewer)
 
         # Set up image layer
         self._load_image()
@@ -523,36 +523,23 @@ class AceTreeApp:
         self._roi_viewer_integration.setup_layers()
 
         # ── Dock widgets ──────────────────────────────────────────
-        # Bottom: Player Controls, then Lineage Tree
+        # Top: compact, always available time and plane navigation
         self._player_controls = PlayerControls(self)
         self.viewer.window.add_dock_widget(
             self._player_controls,
             name="Player Controls",
-            area="bottom",
+            area="top",
         )
 
-        # Left: Contrast (compact), then Lineage List
         self._contrast_tools = ContrastTools(self)
-        self.viewer.window.add_dock_widget(
-            self._contrast_tools,
-            name="Contrast",
-            area="left",
-        )
-
         self._lineage_list = LineageListWidget(self)
-        self.viewer.window.add_dock_widget(
-            self._lineage_list,
-            name="Lineage List",
-            area="left",
+        self._browse_workspace = BrowseChannelsWorkspace(
+            self._lineage_list, self._contrast_tools,
         )
-
-        # Right: Edit & Tracking Tools (scrollable; D-pad/history are popups)
+        self.viewer.window.add_dock_widget(
+            self._browse_workspace, name="Browse & Channels", area="left",
+        )
         self._edit_panel = EditPanel(self)
-        self.viewer.window.add_dock_widget(
-            self._edit_panel,
-            name="Edit & Tracking Tools",
-            area="right",
-        )
 
         self._subcellular_objects_panel = SubcellularObjectsPanel(
             self,
@@ -567,14 +554,17 @@ class AceTreeApp:
         self._subcellular_objects_panel.actionRequested.connect(
             self._on_roi_action_requested
         )
-        self.viewer.window.add_dock_widget(
-            self._subcellular_objects_panel,
-            name="Subcellular Objects",
-            area="right",
+        self._workspace = WorkflowWorkspace(
+            self, self._edit_panel, self._subcellular_objects_panel,
         )
+        self._workspace.attach(self.viewer)
 
         # Bottom: Lineage tree view (graphical Sulston tree)
         self.add_lineage_panel()
+        arrange_workspace(
+            self.viewer, self._browse_workspace, self._workspace,
+            self._player_controls, self._lineage_widgets[0],
+        )
 
         # Cell Info is now a hover tooltip, not a dock widget.
         # Keep a reference for the tooltip builder but don't dock it.
@@ -1989,12 +1979,16 @@ class AceTreeApp:
             self._edit_panel._btn_add.setChecked(False)
             self._edit_panel._btn_track.setChecked(False)
         self._relink_pick_mode = True
+        if getattr(self, "_workspace", None) is not None:
+            self._workspace.refresh()
         self._relink_pick_callback = callback
         self._focus_viewer_canvas()
 
     def exit_relink_pick_mode(self) -> None:
         """Exit pick mode without choosing a target."""
         self._relink_pick_mode = False
+        if getattr(self, "_workspace", None) is not None:
+            self._workspace.refresh()
         self._relink_pick_callback = None
 
     def cancel_relink_pick_mode(self) -> None:
@@ -2035,6 +2029,8 @@ class AceTreeApp:
         if self._edit_panel is not None:
             self._edit_panel._btn_track.setChecked(False)
         self._add_mode = True
+        if getattr(self, "_workspace", None) is not None:
+            self._workspace.refresh()
         if switch_from_3d:
             # A 3D camera ray does not supply an unambiguous Z placement.
             # Arm Add before switching so the toolbar remains checked when
@@ -2046,6 +2042,8 @@ class AceTreeApp:
     def exit_add_mode(self) -> None:
         """Exit click-to-add mode."""
         self._add_mode = False
+        if getattr(self, "_workspace", None) is not None:
+            self._workspace.refresh()
 
     def _focus_viewer_canvas(self) -> None:
         """Return keyboard focus to the napari canvas.
@@ -2607,6 +2605,8 @@ class AceTreeApp:
         if self._edit_panel is not None:
             self._edit_panel._btn_add.setChecked(False)
         self._placement_mode = True
+        if getattr(self, "_workspace", None) is not None:
+            self._workspace.refresh()
         self._placement_parent_name = parent_name
         self._placement_parent_anchor = None
         if parent_name is not None:
@@ -2625,6 +2625,8 @@ class AceTreeApp:
     def exit_placement_mode(self) -> None:
         """Exit click-to-place mode."""
         self._placement_mode = False
+        if getattr(self, "_workspace", None) is not None:
+            self._workspace.refresh()
         self._placement_parent_name = None
         self._placement_parent_anchor = None
 
@@ -3431,6 +3433,9 @@ class AceTreeApp:
 
         if self._subcellular_objects_panel:
             self._subcellular_objects_panel.refresh()
+
+        if getattr(self, "_workspace", None):
+            self._workspace.refresh()
 
         if self._global_tracking_dialog is not None:
             try:
@@ -4434,6 +4439,15 @@ class AceTreeApp:
             toggle.setText(dock_widget.name)
             window_menu.addAction(toggle)
 
+        # Tabs replace separate editing docks; launchers reveal their workflow.
+        workspace = getattr(self, "_workspace", None)
+        if workspace is not None:
+            for name in workspace.TAB_NAMES:
+                action = window_menu.addAction(f"Show {name}")
+                action.triggered.connect(
+                    lambda _checked=False, tab=name: workspace.show_tab(tab)
+                )
+
         # Add independent visualization-window actions.
         window_menu.addSeparator()
         from qtpy.QtWidgets import QAction
@@ -4545,9 +4559,9 @@ class AceTreeApp:
         relink_action.triggered.connect(
             lambda _checked=False: self._edit_panel._btn_relink.click()
         )
-        show_panel_action = QAction("Show Edit & Tracking Tools", qt_window)
+        show_panel_action = QAction("Show Tracking", qt_window)
         show_panel_action.setStatusTip(
-            "Reveal the scrollable dock containing all manual and automated tools"
+            "Reveal the Tracking tab with manual, automated, and body orientation tools"
         )
         show_panel_action.triggered.connect(
             lambda _checked=False: self._show_edit_tracking_panel()
@@ -4570,8 +4584,12 @@ class AceTreeApp:
         }
 
     def _show_edit_tracking_panel(self) -> None:
-        """Reveal the Edit & Tracking dock without relying on the Window menu."""
+        """Reveal Tracking, retaining support for standalone legacy panels."""
 
+        workspace = getattr(self, "_workspace", None)
+        if workspace is not None:
+            workspace.show_tab("Tracking")
+            return
         if self.viewer is None or self._edit_panel is None:
             return
         try:
@@ -4651,6 +4669,10 @@ class AceTreeApp:
         objects_menu.addAction(show_action)
 
     def _show_subcellular_objects_panel(self) -> None:
+        workspace = getattr(self, "_workspace", None)
+        if workspace is not None:
+            workspace.show_tab("Objects")
+            return
         if self.viewer is None or self._subcellular_objects_panel is None:
             return
         try:
