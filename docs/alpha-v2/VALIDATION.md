@@ -116,3 +116,17 @@ Agent gate: **26 passed**, including edit -> visible stale state in both windows
 One component-settings builder applies registry defaults, source/preset settings, then advertised form controls across selected-cell, whole-movie and creation workflows. Shared helpers retain preset identity rebasing and calibration warnings. Native/exact source bindings and wizard localization defaults retain their existing semantics.
 
 Agent gate: **118 passed** in 11.65s. Extended one existing workflow to transfer a tuned wizard request through both workbenches and compare full component specifications. Reviewed helper and caller changes before integration.
+
+### Integrated ROI worker and settings checkpoint
+
+ROI jobs compute with private providers and private result stores, then validate source identity/revision/calibration/manifest on the GUI thread before publishing. One job slot rejects duplicate starts and supports cancellation. Focused combined ROI lifecycle, profiles, scalar plots, cache, tracking GUI and discoverability gate: **54 passed** in 10.32s. Independent review found deleted-progress-dialog teardown after WA_DeleteOnClose; follow-up is required before A4 is complete.
+
+C2 source-identity follow-up 104a559 rejects image-provider removal/replacement and replacement ROI managers even with identical fingerprints. Agent reused the same 26-test gate. Nuclear prepare/commit split received an independent atomicity/cleanup review with no concrete regression found.
+
+### ROI memory comparison
+
+Fresh-process tracemalloc with two synthetic objects (2D polygon and 3D contours), two channels, four 256x256 float32 planes; warmup excluded. All scalar means match their time/channel input values. Source e31b61f: **15.079 MiB** peak at six times, **60.287 MiB** at 24. Alpha: **1.325 MiB** and **1.517 MiB** respectively. Retained result/cache data remains proportional to sample count; decoded movie image retention is bounded.
+
+### Differential functional lint
+
+At 101589a, production F/E9 diagnostics: **32 baseline, 32 alpha, zero introduced**. Existing style-only and unused-code cleanup outside the accepted tasks was not expanded into a formatter sweep.

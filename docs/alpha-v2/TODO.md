@@ -14,7 +14,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 | C2 ROI plot freshness | UI | M | C1,A3 contract | edit blocks all export; remeasure restores | complete; 21b01f1 (agent), 26 focused tests |
 | B3 Bounded tracking undo | core | M | B2 | affected-only snapshots; rollback and nucleus identity | complete; ec8bdb5 (agent), 125 focused tests |
 | C3 Object management/navigation | UI | M | C1 | class/span actions; true completeness; no Z list rebuild | complete; 2b9574b (agent), 33 focused tests |
-| A4 Async ROI measurement | measurement | M | A1-A3 | responsive; cancellation/stale result safe; current snapshot | pending |
+| A4 Async ROI measurement | measurement | M | A1-A3 | responsive; cancellation/stale result safe; current snapshot | implemented 4390821; close teardown follow-up pending |
 | A5 Async nuclear measurement | measurement | M | A4 | atomic files/fields/store; stale/cancel preserves previous | preparation complete 4b18613; worker integration pending |
 | B4 Shared tracking settings | core | M | B3 | focused helpers, selected/global workflows unchanged | complete; dcd47c6 (agent), 118 focused tests |
 | C4 Workflow workspace | UI | M | C1,C3 | Nuclei/Objects/Tracking; 1280x720; all actions reachable | pending |
