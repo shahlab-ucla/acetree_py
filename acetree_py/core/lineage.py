@@ -353,8 +353,9 @@ def _process_root_cell(
     hash_key = _make_hash_key(time_1based, nuc_index_1based)
     nuc.hash_key = hash_key
 
-    # Check if this matches a dummy ancestor
-    if name in dummy_cells:
+    # Populate an ancestor placeholder once. A disconnected root with the
+    # same name is a separate cell and must remain an explicit name conflict.
+    if name in dummy_cells and not dummy_cells[name].nuclei:
         cell = dummy_cells[name]
         cell.start_time = time_1based
         cell.end_time = time_1based

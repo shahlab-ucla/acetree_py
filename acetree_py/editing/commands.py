@@ -282,6 +282,11 @@ class AddNucleus(EditCommand):
     _did_add: bool = field(default=False, init=False)
 
     def execute(self, nuclei_record: NucleiRecord) -> None:
+        from .validators import validate_add_nucleus
+
+        errors = validate_add_nucleus(nuclei_record, self.time, self.predecessor)
+        if errors:
+            raise ValueError("; ".join(errors))
         for value in (self.identity, self.assigned_id):
             error = validate_storable_name(value)
             if error:
@@ -809,10 +814,22 @@ class RelinkNucleus(EditCommand):
     _new_parent_succ2: int = NILLI
     _new_parent_time: int = 0
     _new_parent_index: int = 0
+    _noop: bool = field(default=False, init=False)
 
     def execute(self, nuclei_record: NucleiRecord) -> None:
+        from .validators import validate_relink
+
+        errors = validate_relink(
+            nuclei_record, self.time, self.index, self.new_predecessor
+        )
+        if errors:
+            raise ValueError("; ".join(errors))
         nuc = _get_nucleus(nuclei_record, self.time, self.index)
         self._old_predecessor = nuc.predecessor
+        self._old_parent_index = self._new_parent_index = 0
+        self._noop = self.new_predecessor == nuc.predecessor
+        if self._noop:
+            return
 
         # Disconnect from old parent's successor list
         if nuc.predecessor != NILLI and self.time >= 2:
@@ -843,6 +860,8 @@ class RelinkNucleus(EditCommand):
                      self.time, self.index, self._old_predecessor, self.new_predecessor)
 
     def undo(self, nuclei_record: NucleiRecord) -> None:
+        if self._noop:
+            return
         nuc = _get_nucleus(nuclei_record, self.time, self.index)
         nuc.predecessor = self._old_predecessor
 
@@ -865,6 +884,10 @@ class RelinkNucleus(EditCommand):
     @property
     def description(self) -> str:
         return f"Relink nucleus at t={self.time} idx={self.index} to pred={self.new_predecessor}"
+
+    @property
+    def is_noop(self) -> bool:
+        return self._noop
 
 
 @dataclass
@@ -1020,102 +1043,52 @@ class RelinkWithInterpolation(EditCommand):
     end_time: int  # 1-based
     end_index: int  # 1-based index at end_time
 
-    # Saved state for undo
-    _added_nuclei: list = None  # type: ignore[assignment]
-    _old_end_pred: int = NILLI
-    _old_start_succ1: int = NILLI
-    _old_start_succ2: int = NILLI
-
-    def __post_init__(self) -> None:
-        if self._added_nuclei is None:
-            self._added_nuclei = []
+    _command: CompositeCommand | None = field(default=None, init=False)
 
     def execute(self, nuclei_record: NucleiRecord) -> None:
-        self._added_nuclei = []
+        from .validators import validate_relink_interpolation
 
+        errors = validate_relink_interpolation(
+            nuclei_record, self.start_time, self.start_index,
+            self.end_time, self.end_index,
+        )
+        if errors:
+            raise ValueError("; ".join(errors))
         start_nuc = _get_nucleus(nuclei_record, self.start_time, self.start_index)
         end_nuc = _get_nucleus(nuclei_record, self.end_time, self.end_index)
-
-        # Save end nucleus's old predecessor
-        self._old_end_pred = end_nuc.predecessor
-        self._old_start_succ1 = start_nuc.successor1
-        self._old_start_succ2 = start_nuc.successor2
-
-        self._mark_rollback_ready()
+        commands: list[EditCommand] = []
+        previous_index = self.start_index
         num_steps = self.end_time - self.start_time
-        if num_steps <= 1:
-            # Adjacent timepoints, just link directly
-            end_nuc.predecessor = self.start_index
-            _add_successor(start_nuc, self.end_index)
-            return
-
-        # Create interpolated nuclei for intermediate timepoints
-        prev_index = self.start_index
         for step in range(1, num_steps):
-            t_1based = self.start_time + step
-            t_idx = t_1based - 1
-            frac = step / num_steps
-
-            # Linear interpolation
-            ix = round(start_nuc.x + (end_nuc.x - start_nuc.x) * frac)
-            iy = round(start_nuc.y + (end_nuc.y - start_nuc.y) * frac)
-            iz = start_nuc.z + (end_nuc.z - start_nuc.z) * frac
-            isize = round(start_nuc.size + (end_nuc.size - start_nuc.size) * frac)
-
-            # Ensure timepoint exists
-            while t_idx >= len(nuclei_record):
-                nuclei_record.append([])
-
-            new_index = len(nuclei_record[t_idx]) + 1
-            new_nuc = Nucleus(
-                index=new_index,
-                x=ix,
-                y=iy,
-                z=iz,
-                size=isize,
-                status=1,
-                predecessor=prev_index,
+            time = self.start_time + step
+            fraction = step / num_steps
+            commands.append(AddNucleus(
+                time=time,
+                x=round(start_nuc.x + (end_nuc.x - start_nuc.x) * fraction),
+                y=round(start_nuc.y + (end_nuc.y - start_nuc.y) * fraction),
+                z=start_nuc.z + (end_nuc.z - start_nuc.z) * fraction,
+                size=round(start_nuc.size + (end_nuc.size - start_nuc.size) * fraction),
+                predecessor=previous_index,
                 identity=start_nuc.identity,
-            )
-            nuclei_record[t_idx].append(new_nuc)
-            self._added_nuclei.append((t_1based, new_index))
-
-            # Link previous to this
-            if step == 1:
-                _add_successor(start_nuc, new_index)
-            else:
-                prev_nuc = _get_nucleus(nuclei_record, t_1based - 1, prev_index)
-                prev_nuc.successor1 = new_index
-
-            prev_index = new_index
-
-        # Link last interpolated to end nucleus
-        end_nuc.predecessor = prev_index
-        last_interp = _get_nucleus(nuclei_record, self.end_time - 1, prev_index)
-        last_interp.successor1 = self.end_index
-
-        logger.info("Relinked with %d interpolated nuclei from t=%d to t=%d",
-                     len(self._added_nuclei), self.start_time, self.end_time)
+            ))
+            previous_index = len(nuclei_record[time - 1]) + 1
+        commands.append(RelinkNucleus(
+            time=self.end_time, index=self.end_index,
+            new_predecessor=previous_index,
+        ))
+        # Reuse the same reciprocal-link and rollback rules as direct edits.
+        # In particular, relinking the endpoint disconnects its previous parent.
+        self._command = CompositeCommand(commands, label=self.description)
+        self._mark_rollback_ready()
+        self._command.execute(nuclei_record)
 
     def undo(self, nuclei_record: NucleiRecord) -> None:
-        # Restore end nucleus predecessor
-        end_nuc = _get_nucleus(nuclei_record, self.end_time, self.end_index)
-        end_nuc.predecessor = self._old_end_pred
+        if self._command is not None:
+            self._command.undo(nuclei_record)
 
-        # Restore start nucleus successors
-        start_nuc = _get_nucleus(nuclei_record, self.start_time, self.start_index)
-        start_nuc.successor1 = self._old_start_succ1
-        start_nuc.successor2 = self._old_start_succ2
-
-        # Remove interpolated nuclei (in reverse order)
-        for t_1based, _ in reversed(self._added_nuclei):
-            t_idx = t_1based - 1
-            if t_idx < len(nuclei_record) and nuclei_record[t_idx]:
-                nuclei_record[t_idx].pop()
-
-        self._added_nuclei = []
-        logger.info("Undid relink interpolation from t=%d to t=%d",
-                     self.start_time, self.end_time)
+    @property
+    def is_noop(self) -> bool:
+        return self._command is not None and self._command.is_noop
 
     @property
     def description(self) -> str:

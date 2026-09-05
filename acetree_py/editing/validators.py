@@ -84,6 +84,8 @@ def validate_add_nucleus(
     if time < 1:
         errors.append(f"Timepoint must be >= 1, got {time}")
 
+    if predecessor != NILLI and time == 1:
+        errors.append("Cannot set predecessor for timepoint 1")
     if predecessor != NILLI and time >= 2:
         t_idx = time - 2  # Previous timepoint
         if t_idx < 0 or t_idx >= len(nuclei_record):
@@ -95,6 +97,8 @@ def validate_add_nucleus(
                 errors.append(f"Predecessor index {predecessor} out of range at t={time - 1}")
             else:
                 parent = nuclei[p_idx]
+                if not parent.is_alive:
+                    errors.append(f"Predecessor at t={time - 1} idx={predecessor} is dead")
                 if parent.successor1 != NILLI and parent.successor2 != NILLI:
                     errors.append(
                         f"Predecessor at t={time - 1} idx={predecessor} "
@@ -167,6 +171,11 @@ def validate_relink(
         errors.append(f"Nucleus index {index} out of range at t={time}")
         return errors
 
+    if not nuclei[n_idx].is_alive:
+        return [f"Cannot relink a dead nucleus at t={time} idx={index}"]
+    if new_predecessor == nuclei[n_idx].predecessor:
+        return []  # An unchanged link cannot introduce a topology/name conflict.
+
     # Check new predecessor exists
     if new_predecessor != NILLI:
         if time < 2:
@@ -182,6 +191,10 @@ def validate_relink(
                     errors.append(f"New predecessor index {new_predecessor} out of range at t={time - 1}")
                 else:
                     parent = prev_nuclei[p_idx]
+                    if not parent.is_alive:
+                        errors.append(
+                            f"New predecessor at t={time - 1} idx={new_predecessor} is dead"
+                        )
                     if parent.successor1 != NILLI and parent.successor2 != NILLI:
                         # Check if one of the successors is the current nucleus
                         if parent.successor1 != index and parent.successor2 != index:
@@ -402,6 +415,9 @@ def validate_relink_interpolation(
         errors.append(f"End time ({end_time}) must be after start time ({start_time})")
         return errors
 
+    if end_time == start_time + 1:
+        return validate_relink(nuclei_record, end_time, end_index, start_index)
+
     # Check start nucleus exists
     st_idx = start_time - 1
     if st_idx < 0 or st_idx >= len(nuclei_record):
@@ -412,6 +428,8 @@ def validate_relink_interpolation(
             errors.append(f"Start index {start_index} out of range at t={start_time}")
         else:
             start_nuc = nuclei[si]
+            if not start_nuc.is_alive:
+                errors.append(f"Start nucleus at t={start_time} idx={start_index} is dead")
             if start_nuc.successor1 != NILLI and start_nuc.successor2 != NILLI:
                 errors.append(f"Start nucleus at t={start_time} idx={start_index} already has 2 successors")
 
@@ -425,6 +443,8 @@ def validate_relink_interpolation(
             errors.append(f"End index {end_index} out of range at t={end_time}")
         else:
             end_nuc = nuclei[ei]
+            if not end_nuc.is_alive:
+                errors.append(f"End nucleus at t={end_time} idx={end_index} is dead")
 
     if start_nuc is not None and end_nuc is not None:
         successors = {
@@ -432,8 +452,6 @@ def validate_relink_interpolation(
             for successor in (start_nuc.successor1, start_nuc.successor2)
             if successor != NILLI
         }
-        if end_time == start_time + 1:
-            successors.discard(end_index)
         if not successors:
             errors.extend(_validate_forced_id_merge(
                 nuclei_record,

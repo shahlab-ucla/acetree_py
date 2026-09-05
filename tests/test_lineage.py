@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 from acetree_py.core.cell import Cell, CellFate
 from acetree_py.core.lineage import (
@@ -195,18 +197,22 @@ class TestBuildLineageTree:
         assert cell is not None
         assert cell.name == "AB"
 
-    def test_duplicate_real_names_remain_explicit_conflicts(self):
+    @pytest.mark.parametrize("name", ["Duplicate", "AB", "P0"])
+    def test_duplicate_real_names_remain_explicit_conflicts(self, name):
         nuclei = [[
-            _nuc(1, identity="Duplicate"),
-            _nuc(2, x=400, identity="Duplicate"),
+            _nuc(1, identity=name),
+            _nuc(2, x=400, identity=name),
         ]]
 
-        tree = build_lineage_tree(nuclei, create_dummy_ancestors=False)
+        tree = build_lineage_tree(nuclei)
 
-        duplicate_cells = [cell for cell in tree.all_cells() if cell.name == "Duplicate"]
+        duplicate_cells = [cell for cell in tree.all_cells() if cell.name == name]
         assert len(duplicate_cells) == 2
-        assert tree.name_collisions["Duplicate"] == duplicate_cells
-        assert all(not cell.name.endswith("_2") for cell in duplicate_cells)
+        assert tree.name_collisions[name] == duplicate_cells
+        assert [cell.nuclei for cell in duplicate_cells] == [
+            [(1, nuclei[0][0])], [(1, nuclei[0][1])],
+        ]
+        assert nuclei[0][0].hash_key != nuclei[0][1].hash_key
 
 
 class TestDummyAncestorMerging:

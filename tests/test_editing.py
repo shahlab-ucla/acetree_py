@@ -790,6 +790,29 @@ class TestValidateLockCellName:
 
 
 class TestRelinkNucleus:
+    @pytest.mark.parametrize("interpolate", [False, True])
+    def test_existing_parent_is_a_noop_preserving_redo(self, interpolate):
+        record = _simple_record()
+        history = EditHistory(record)
+        history.do(MoveNucleus(time=1, index=1, new_x=150))
+        history.undo()
+        command = (
+            RelinkWithInterpolation(1, 1, 2, 1)
+            if interpolate else RelinkNucleus(2, 1, 1)
+        )
+        before = [[n.copy() for n in frame] for frame in record]
+        revision = history.revision
+        history.do(command)
+        assert command.is_noop
+        assert record == before
+        assert history.revision == revision
+        assert history.can_redo and not history.can_undo
+        command.undo(record)
+        assert record == before
+        history.redo()
+        assert record[0][0].x == 150
+        assert record[0][0].successor1 == record[1][0].predecessor == 1
+
     def test_relink_basic(self):
         record = _simple_record()
         # T2 nucleus A2 has pred=1 (linked to A1)
@@ -990,6 +1013,37 @@ class TestSetBodyAxes:
 
 
 class TestRelinkWithInterpolation:
+    @pytest.mark.parametrize("end_time", [2, 4])
+    def test_reparenting_preserves_reciprocal_links_through_undo_redo(self, end_time):
+        record = [[_make_nucleus(1, identity="A")]]
+        record.extend([] for _ in range(end_time - 1))
+        old_parent = _make_nucleus(2 if end_time == 2 else 1, successor1=1)
+        record[end_time - 2].append(old_parent)
+        endpoint = _make_nucleus(1, predecessor=old_parent.index)
+        record[-1].append(endpoint)
+        before = [[n.copy() for n in frame] for frame in record]
+        originals = [n for frame in record for n in frame]
+        history = EditHistory(record)
+        history.do(RelinkWithInterpolation(1, 1, end_time, 1))
+        after = [[n.copy() for n in frame] for frame in record]
+
+        for operation in (None, history.redo):
+            if operation:
+                operation()
+            assert old_parent.successor1 == NILLI
+            previous = record[0][0]
+            for frame in record[1:]:
+                child = frame[previous.successor1 - 1]
+                assert child.predecessor == previous.index
+                previous = child
+            assert previous is endpoint
+            assert record == after
+            history.undo()
+            assert record == before
+            assert all(a is b for a, b in zip(
+                originals, [n for frame in record for n in frame], strict=True
+            ))
+
     def test_adjacent_timepoints(self):
         """Adjacent timepoints: no interpolation needed, just link."""
         record = [
@@ -1612,8 +1666,9 @@ class TestValidators:
 
     def test_validate_relink_interpolation_full_start(self):
         record = _dividing_record()
-        # P0 at T1 already has 2 successors
-        errors = validate_relink_interpolation(record, 1, 1, 2, 1)
+        # A new gap link would add a third daughter to P0 at T1.
+        record.append([_make_nucleus(1)])
+        errors = validate_relink_interpolation(record, 1, 1, 3, 1)
         assert any("2 successors" in e for e in errors)
 
     def test_validate_interpolation_blocks_conflicting_forced_continuation(self):
@@ -1626,3 +1681,30 @@ class TestValidators:
         errors = validate_relink_interpolation(record, 1, 1, 3, 1)
 
         assert any("different forced" in error for error in errors)
+
+
+@pytest.mark.parametrize("command", [
+    AddNucleus(time=0, x=10, y=10, z=1),
+    AddNucleus(time=1, x=10, y=10, z=1, predecessor=1),
+    AddNucleus(time=2, x=10, y=10, z=1, predecessor=1),
+    AddNucleus(time=2, x=10, y=10, z=1, predecessor=2),
+    RelinkNucleus(time=2, index=1, new_predecessor=99),
+    RelinkNucleus(time=2, index=1, new_predecessor=2),
+    RelinkNucleus(time=1, index=2, new_predecessor=NILLI),
+    RelinkWithInterpolation(2, 1, 1, 1),
+    RelinkWithInterpolation(1, 2, 3, 1),
+    RelinkWithInterpolation(1, 1, 3, 1),
+])
+def test_invalid_topology_edits_leave_the_document_and_history_unchanged(command):
+    record = _dividing_record()
+    record[0].append(_make_nucleus(2, status=-1))
+    record.append([_make_nucleus(1)])
+    before = [[n.copy() for n in frame] for frame in record]
+    history = EditHistory(record)
+
+    with pytest.raises(ValueError):
+        history.do(command)
+
+    assert record == before
+    assert history.revision == 0
+    assert not history.can_undo and not history.modified
