@@ -5,7 +5,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 | Task | Owner | Size | Depends on | Acceptance | Status / commit |
 |---|---|---|---|---|---|
 | A1 Correct nuclear Z and provenance | measurement | M | baseline | origins 1/7 raw/blot; historical cache compatibility | pending |
-| B1 Editing/lineage integrity | core | M | baseline | same-parent no-op; duplicate canonical roots; do/undo/redo links | pending |
+| B1 Editing/lineage integrity | core | M | baseline | same-parent no-op; duplicate canonical roots; do/undo/redo links | complete; bf6d30a (agent), 346 focused tests |
 | C1 ROI selection/scope/visibility | UI | M | baseline | hidden target cleared; class scope correct; dialog fits | pending |
 | R1 Clean ROI Save As | coordinator | S | baseline | new ZIP reopens clean ROI; next save preserves source | complete; 23 save tests passed |
 | A2 Channel identity | measurement | S | A1 | missing-first channel rejected without renumbering | pending |
@@ -25,7 +25,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 
 - [x] Audit and baseline recorded; isolated alpha-v2 worktree created.
 - [ ] A1
-- [ ] B1
+- [x] B1
 - [ ] C1
 - [x] R1
 - [ ] A2

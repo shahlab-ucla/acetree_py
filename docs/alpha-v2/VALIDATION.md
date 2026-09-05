@@ -40,3 +40,9 @@ Save As now copies clean ROI state when the destination changes and retargets on
 Branch guards and CLI identify alpha v2. Historical plugin proposal is explicitly deferred. Replaced brittle prose/source-string checks with existing executable installer cases and one CLI version check. Remote install instructions explicitly require branch publication.
 
 `pytest tests/test_tracking_branch_installation.py tests/test_cli.py -q`: **18 passed** in 6.52s. Workflow documentation follows UI integration.
+
+### B1 — editing and lineage integrity
+
+Distinct canonical roots remain explicit conflicts; same-parent relinks are no-ops; Add/Relink/Interpolation validate before mutation. Interpolation now composes existing commands instead of duplicating mutation/undo logic.
+
+Agent gate: editing, lineage, nuclei_manager, edit_panel, post_commit_ui, identity, tracking_integration: **346 passed** in 5.33s. Reviewed diff before integration.
