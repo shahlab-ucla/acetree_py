@@ -152,6 +152,8 @@ class RoiProfileWindow(QWidget):  # type: ignore[misc]
             profiles = () if app_or_profiles is None else app_or_profiles
         else:
             self.app = app_or_profiles
+        self._bound_manager = getattr(self.app, "roi_manager", None)
+        self._bound_provider = getattr(self.app, "image_provider", None)
         engine = getattr(self.app, "roi_measurement_engine", None)
         self._snapshot = snapshot if snapshot is not None else getattr(engine, "latest_snapshot", None)
         provided = None if profiles is None else tuple(profiles)
@@ -283,7 +285,11 @@ class RoiProfileWindow(QWidget):  # type: ignore[misc]
     def _stale_profiles(self) -> int:
         if self.app is None:
             return 0
-        if self._snapshot is None:
+        if (
+            self._snapshot is None or self._bound_provider is None
+            or getattr(self.app, "roi_manager", None) is not self._bound_manager
+            or getattr(self.app, "image_provider", None) is not self._bound_provider
+        ):
             return len(self._profiles)
         context = self._snapshot.prepare_read(
             self.app.roi_manager,

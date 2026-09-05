@@ -127,6 +127,28 @@ def test_live_plots_block_all_stale_exports_and_recover_after_measurement(qtbot,
         profile.export_csv(tmp_path / "changed-source.csv")
     assert not (tmp_path / "changed-source.csv").exists()
 
+    # An open plot stays bound to its original dataset and image provider,
+    # even when a replacement carries identical document/manifest metadata.
+    manager, provider = app.roi_manager, app.image_provider
+    provider.manifest_token = "profile-images-v1"
+    for replacement_manager, replacement_provider in (
+        (manager, None), (manager, _ProfileProvider()),
+        (RoiManager(manager.document), provider),
+    ):
+        app.roi_manager = replacement_manager
+        app.image_provider = replacement_provider
+        for window in (profile, scalar):
+            window.on_document_edited()
+            assert not window._export_button.isEnabled()
+            assert not window._toolbar._save_action.isEnabled()
+            with pytest.raises(RuntimeError, match="stale"):
+                window.export_csv(tmp_path / "replacement.csv")
+            with pytest.raises(RuntimeError, match="stale"):
+                window.export_svg(tmp_path / "replacement.svg")
+    assert not (tmp_path / "replacement.csv").exists()
+    assert not (tmp_path / "replacement.svg").exists()
+    app.roi_manager, app.image_provider = manager, provider
+
 
 def test_plot_and_export_validate_profile_dependencies_once_per_operation(qtbot, tmp_path, monkeypatch):
     app, _track = _profile_app()

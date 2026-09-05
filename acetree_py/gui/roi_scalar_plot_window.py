@@ -338,6 +338,8 @@ class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
             parent=parent,
         )
         window.app = app
+        if not window._source_matches_app():
+            window.refresh_plot()
         return window
 
     @property
@@ -515,12 +517,15 @@ class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
         if data.series:
             self._axes.legend(loc="best")
         stale = self.controller.stale_samples(data)
-        export_enabled = stale == 0 and bool(data.series)
+        source_matches = self._source_matches_app()
+        export_enabled = stale == 0 and bool(data.series) and source_matches
         self._export_button.setEnabled(export_enabled)
         self._export_svg_button.setEnabled(export_enabled)
         self._toolbar.set_save_enabled(export_enabled)
         detail = f"{len(data.series)} object track(s); {missing} missing sample(s)"
-        if stale:
+        if not source_matches:
+            detail += "; stale - dataset or image source changed; reopen this plot"
+        elif stale:
             detail += f"; {stale} stale — remeasure before export"
         self._status.setText(detail)
         self._canvas.draw_idle()
@@ -545,7 +550,22 @@ class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
             raise RuntimeError("No ROI measurement snapshot is available")
         self.update_snapshot(snapshot)
 
+    def _source_matches_app(self) -> bool:
+        return self.app is None or (
+            self.controller.image_provider is not None
+            and getattr(self.app, "roi_manager", None) is self.controller.roi_manager
+            and getattr(self.app, "image_provider", None) is self.controller.image_provider
+        )
+
+    def _assert_source_matches(self) -> None:
+        if not self._source_matches_app():
+            raise RuntimeError(
+                "ROI measurements are stale; dataset or image source changed. "
+                "Reopen this plot after measuring the current dataset."
+            )
+
     def export_csv(self, path: str | Path) -> Path:
+        self._assert_source_matches()
         return self.controller.export_csv(path)
 
     def export_svg(self, path: str | Path) -> Path:
@@ -566,6 +586,7 @@ class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
         return destination
 
     def _assert_exportable(self, data: ExpressionPlotData | None = None) -> ExpressionPlotData:
+        self._assert_source_matches()
         if data is None:
             data = self.controller.build()
         if not data.series:
