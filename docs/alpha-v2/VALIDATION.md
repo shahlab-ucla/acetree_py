@@ -46,3 +46,13 @@ Branch guards and CLI identify alpha v2. Historical plugin proposal is explicitl
 Distinct canonical roots remain explicit conflicts; same-parent relinks are no-ops; Add/Relink/Interpolation validate before mutation. Interpolation now composes existing commands instead of duplicating mutation/undo logic.
 
 Agent gate: editing, lineage, nuclei_manager, edit_panel, post_commit_ui, identity, tracking_integration: **346 passed** in 5.33s. Reviewed diff before integration.
+
+### C1 — ROI selection, scope, visibility
+
+Filtered-out objects no longer remain mutation targets; class measurement uses visible class; missing-cell filter has an empty state; image overlays share filter IDs and retain explicit visibility across 3D. Invalid measurement requests stay in a wrapped, scrollable dialog.
+
+Agent gate: ROI UI models, viewer integration, and Objects panel: **24 passed**. ROI Measure now opens at **560 x 650**, down from minimum width 1414. Reviewed diff before integration.
+
+### GUI environment
+
+Installed tested napari 0.6.6 in isolated workspace .alpha-v2-venv. Hidden Windows-backend real-OpenGL canvas probe succeeded (nonuniform synthetic image, RGB standard deviation 82.3). Offscreen plugin alone cannot render OpenGL.
