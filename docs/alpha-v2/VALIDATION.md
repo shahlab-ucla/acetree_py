@@ -62,3 +62,15 @@ Installed tested napari 0.6.6 in isolated workspace .alpha-v2-venv. Hidden Windo
 Explicit channel sets reject missing paths, gaps, unreadable samples, or unparseable time patterns instead of renumbering survivors. The app can still open nuclei and reports the source error. One missing-first-channel/recovery scenario checks both scientific identities.
 
 `pytest tests/test_image_split.py tests/test_image_provider.py tests/test_interleaved_tiff.py tests/test_gui_app.py tests/test_cli.py -q`: **214 passed**, 14 existing TIFF warnings in 6.13s.
+
+### A1 — nuclear coordinates and historical provenance
+
+Absolute Z origin now reaches raw/blot reducers. Algorithm 2 includes origin freshness; algorithm1 captures open as historical without relabeling, and incompatible numerical comparisons request recompute/exclusion. Recomputing older measurements intentionally changes values affected by the original shifted sampling.
+
+Agent measurement/repository/comparison gate: **219 passed** in 43.74s. Reviewed implementation and compatibility changes before integration.
+
+### B2 — reproducible tracking requests
+
+Scope serialization includes branch_policy (missing old fields default stop). Nested JSON inputs are frozen; mutable public exports detach nested values. Immutable tuples retain sharing for existing exact-tracker provenance deduplication.
+
+Agent tracking/global/StarryNite gate: **226 passed, 2 skipped**; graph provenance export follow-up: **53 passed, 1 skipped**. Reviewed diff before integration.

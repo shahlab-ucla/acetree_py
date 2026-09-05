@@ -4,12 +4,12 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 
 | Task | Owner | Size | Depends on | Acceptance | Status / commit |
 |---|---|---|---|---|---|
-| A1 Correct nuclear Z and provenance | measurement | M | baseline | origins 1/7 raw/blot; historical cache compatibility | pending |
+| A1 Correct nuclear Z and provenance | measurement | M | baseline | origins 1/7 raw/blot; historical cache compatibility | complete; 70661fe (agent), 219 focused tests |
 | B1 Editing/lineage integrity | core | M | baseline | same-parent no-op; duplicate canonical roots; do/undo/redo links | complete; bf6d30a (agent), 346 focused tests |
 | C1 ROI selection/scope/visibility | UI | M | baseline | hidden target cleared; class scope correct; dialog fits | complete; fb9c869 (agent), 24 focused tests |
 | R1 Clean ROI Save As | coordinator | S | baseline | new ZIP reopens clean ROI; next save preserves source | complete; 23 save tests passed |
 | A2 Channel identity | coordinator | S | baseline (independent of A1) | missing-first channel rejected without renumbering | complete; 214 focused tests |
-| B2 Tracking request preservation | core | M | B1 | branch policies round-trip; nested inputs detached | pending |
+| B2 Tracking request preservation | core | M | B1 | branch policies round-trip; nested inputs detached | complete; 3ee0990 (agent), 226 passed/2 skipped |
 | A3 ROI bounded memory/freshness | measurement | M | A2 | images bounded per group; manifest once per plot/export | pending |
 | C2 ROI plot freshness | UI | M | C1,A3 contract | edit blocks all export; remeasure restores | pending |
 | B3 Bounded tracking undo | core | M | B2 | affected-only snapshots; rollback and nucleus identity | pending |
@@ -24,12 +24,12 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 ## Checklist
 
 - [x] Audit and baseline recorded; isolated alpha-v2 worktree created.
-- [ ] A1
+- [x] A1
 - [x] B1
 - [x] C1
 - [x] R1
 - [x] A2
-- [ ] B2
+- [x] B2
 - [ ] A3
 - [ ] C2
 - [ ] B3
