@@ -204,13 +204,13 @@ def test_global_and_forward_workflow_selectors_expose_the_right_boundaries(qtbot
         assert button.isVisibleTo(global_dialog)
 
 
-def test_cli_identifies_tracking_build_and_documents_starrynite_presets():
+def test_cli_identifies_alpha_build_and_documents_starrynite_presets():
     runner = CliRunner()
 
     version = runner.invoke(cli_app, ["--version"])
     assert version.exit_code == 0
     assert "AceTree-Py 0.2.0" in version.output
-    assert "tracking integration" in version.output
+    assert "alpha v2" in version.output
 
     create_help = runner.invoke(cli_app, ["create", "--help"])
     assert create_help.exit_code == 0

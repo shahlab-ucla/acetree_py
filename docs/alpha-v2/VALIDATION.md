@@ -74,3 +74,19 @@ Agent measurement/repository/comparison gate: **219 passed** in 43.74s. Reviewed
 Scope serialization includes branch_policy (missing old fields default stop). Nested JSON inputs are frozen; mutable public exports detach nested values. Immutable tuples retain sharing for existing exact-tracker provenance deduplication.
 
 Agent tracking/global/StarryNite gate: **226 passed, 2 skipped**; graph provenance export follow-up: **53 passed, 1 skipped**. Reviewed diff before integration.
+
+### C3 — object management and navigation
+
+Class name/color management and expected-span editing use undoable commands. Completeness requires reviewed decisions throughout the expected interval, including reviewed absence. History rows cache immutable document revisions; Z-only navigation does not rebuild the object list.
+
+Agent gate: **33 passed**; touched-file lint clean. Same-process 200 objects x 400 frames benchmark: full history rebuild **66.8 ms**, cached time change **0.973 ms**, full-panel Z change **0.012 ms** (medians). Reviewed new dialog and panel code before integration.
+
+### B3 — bounded tracking acceptance memory
+
+Acceptance stores only changed existing successor fields and appended-frame lengths; global tracking submission no longer copies unused nuclei. Failure after partial installation, tombstones, empty records, undo and redo retain exact results and nucleus identity.
+
+Agent gate: **125 passed**. Sparse continuation across 100,000 existing nuclei/200 frames: command peak allocation **30,497.43 KiB -> 6.89 KiB**; retained **30,480.60 KiB -> 4.13 KiB**. Measured ApplyTrackingProposal itself, excluding EditHistory naming snapshots. Identical accepted geometry, indices, links and undo were verified.
+
+### Integrated checkpoint
+
+At ca96488, venv/offscreen run: **1889 passed, 8 skipped, 19 deselected, 8 failed**. Seven failures were OpenGL context creation under Qt offscreen; real Windows-backend rendering works. One old build-label assertion was corrected to alpha v2. Final gate uses the functioning renderer.

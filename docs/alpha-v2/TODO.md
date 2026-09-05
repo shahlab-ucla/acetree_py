@@ -12,8 +12,8 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 | B2 Tracking request preservation | core | M | B1 | branch policies round-trip; nested inputs detached | complete; 3ee0990 (agent), 226 passed/2 skipped |
 | A3 ROI bounded memory/freshness | measurement | M | A2 | images bounded per group; manifest once per plot/export | pending |
 | C2 ROI plot freshness | UI | M | C1,A3 contract | edit blocks all export; remeasure restores | pending |
-| B3 Bounded tracking undo | core | M | B2 | affected-only snapshots; rollback and nucleus identity | pending |
-| C3 Object management/navigation | UI | M | C1 | class/span actions; true completeness; no Z list rebuild | pending |
+| B3 Bounded tracking undo | core | M | B2 | affected-only snapshots; rollback and nucleus identity | complete; ec8bdb5 (agent), 125 focused tests |
+| C3 Object management/navigation | UI | M | C1 | class/span actions; true completeness; no Z list rebuild | complete; 2b9574b (agent), 33 focused tests |
 | A4 Async ROI measurement | measurement | M | A1-A3 | responsive; cancellation/stale result safe; current snapshot | pending |
 | A5 Async nuclear measurement | measurement | M | A4 | atomic files/fields/store; stale/cancel preserves previous | pending |
 | B4 Shared tracking settings | core | M | B3 | focused helpers, selected/global workflows unchanged | pending |
@@ -32,8 +32,8 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 - [x] B2
 - [ ] A3
 - [ ] C2
-- [ ] B3
-- [ ] C3
+- [x] B3
+- [x] C3
 - [ ] A4
 - [ ] A5
 - [ ] B4
