@@ -110,3 +110,9 @@ Numerical, transaction, expression-window and real-layer contrast gate: **74 pas
 App-derived profile windows now bind selected objects and measured profiles to their source snapshot. Scalar and profile windows refresh after edits; CSV/SVG/toolbar exports reject stale measurements and recover after remeasurement. Metadata-only edits retain valid image measurements. Existing standalone profile APIs remain usable for caller-owned data.
 
 Agent gate: **26 passed**, including edit -> visible stale state in both windows -> all exports blocked -> remeasure -> exports restored. One prepared context per profile refresh/CSV/SVG and scalar SVG; external image/calibration changes rejected. Reviewed before integration; provider/dataset replacement follow-up assigned during C4.
+
+### B4 — shared tracking settings
+
+One component-settings builder applies registry defaults, source/preset settings, then advertised form controls across selected-cell, whole-movie and creation workflows. Shared helpers retain preset identity rebasing and calibration warnings. Native/exact source bindings and wizard localization defaults retain their existing semantics.
+
+Agent gate: **118 passed** in 11.65s. Extended one existing workflow to transfer a tuned wizard request through both workbenches and compare full component specifications. Reviewed helper and caller changes before integration.

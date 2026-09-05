@@ -16,7 +16,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 | C3 Object management/navigation | UI | M | C1 | class/span actions; true completeness; no Z list rebuild | complete; 2b9574b (agent), 33 focused tests |
 | A4 Async ROI measurement | measurement | M | A1-A3 | responsive; cancellation/stale result safe; current snapshot | pending |
 | A5 Async nuclear measurement | measurement | M | A4 | atomic files/fields/store; stale/cancel preserves previous | preparation complete 4b18613; worker integration pending |
-| B4 Shared tracking settings | core | M | B3 | focused helpers, selected/global workflows unchanged | pending |
+| B4 Shared tracking settings | core | M | B3 | focused helpers, selected/global workflows unchanged | complete; dcd47c6 (agent), 118 focused tests |
 | C4 Workflow workspace | UI | M | C1,C3 | Nuclei/Objects/Tracking; 1280x720; all actions reachable | pending |
 | R2 Alpha installation/docs | coordinator | S | integration | installers identify alpha-v2; docs match UI | installation complete; workflow docs pending |
 | Final acceptance | coordinator | M | all above | full non-MATLAB suite; live napari; memory/navigation evidence | pending |
@@ -36,7 +36,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 - [x] C3
 - [ ] A4
 - [ ] A5
-- [ ] B4
+- [x] B4
 - [ ] C4
 - [ ] R2
 - [ ] Final acceptance
