@@ -1,4 +1,5 @@
 from dataclasses import replace
+import weakref
 from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
@@ -16,6 +17,8 @@ from acetree_py.analysis.roi_measurements import (
 from acetree_py.analysis.expression_plot import TemporalSeriesService
 from acetree_py.core.subcellular_roi import (
     CoordinateSpaceSnapshot,
+    ContourSlice,
+    ContourStack3D,
     ObjectClass,
     Polygon2D,
     Presence,
@@ -230,3 +233,127 @@ def test_engine_consumes_the_frozen_domain_model_directly():
     assert subject.sample_times == (1, 2, 3)
     assert series.y_values == (1.0, None, None)
     assert series.missing_reasons == (None, "not_measured", "not_measured")
+
+
+def _mixed_movie_document():
+    object_class = ObjectClass("Golgi", (0.2, 0.4, 0.8, 1.0), next_instance_index=5)
+    tracks = []
+    for index in range(4):
+        ring = polygon(index % 2).exterior_xy_px
+        geometry = (
+            Polygon2D(z_plane=1, exterior_xy_px=ring)
+            if index < 2
+            else ContourStack3D(tuple(ContourSlice(z, ring) for z in (1, 2)))
+        )
+        tracks.append(RoiObjectTrack(
+            class_id=object_class.class_id,
+            instance_index=index + 1,
+            frames={time: RoiFrameRecord(
+                timepoint=time,
+                presence=Presence.SEGMENTED,
+                review_state=ReviewState.REVIEWED,
+                geometry=geometry,
+            ) for time in (1, 2, 3)},
+        ))
+    return SubcellularRoiDocument(
+        coordinate_space=CoordinateSpaceSnapshot(
+            xy_res=1, z_res=2, image_width_px=8, image_height_px=8,
+            plane_count=2, time_end=3,
+        ),
+        object_classes=(object_class,),
+        objects=tuple(tracks),
+    )
+
+
+def test_movie_reuses_images_within_groups_and_releases_completed_groups():
+    class LifetimeProvider(CountingProvider):
+        num_timepoints = 3
+
+        def __init__(self):
+            super().__init__()
+            self.image_refs = []
+            self.retained_groups = []
+
+        def record(self, image, time, channel):
+            self.retained_groups.append({
+                group for group, reference in self.image_refs if reference() is not None
+            } | {(time, channel)})
+            self.image_refs.append(((time, channel), weakref.ref(image)))
+            return image
+
+        def get_plane(self, time, plane, channel=0):
+            return self.record(super().get_plane(time, plane, channel), time, channel)
+
+        def get_stack(self, time, channel=0):
+            return self.record(super().get_stack(time, channel), time, channel)
+
+    provider = LifetimeProvider()
+    source = _mixed_movie_document()
+    snapshot = RoiMeasurementEngine(provider).measure(source)
+
+    assert all(len(groups) == 1 for groups in provider.retained_groups)
+    assert all(reference() is None for _, reference in provider.image_refs)
+    assert len(provider.plane_reads) == len(provider.stack_reads) == 6
+    for track in source.objects:
+        for time in (1, 2, 3):
+            for channel in (0, 1):
+                assert snapshot.value(track.object_id, time, channel, "intensity.mean") == time + channel
+
+
+def test_plot_and_export_validate_images_once_and_reject_later_changes(tmp_path):
+    from acetree_py.core.roi_manager import RoiManager
+    from acetree_py.gui.roi_scalar_plot_window import RoiScalarPlotController
+
+    image_file = tmp_path / "movie.tif"
+    image_file.write_bytes(b"original source")
+
+    class ManifestProvider(CountingProvider):
+        num_timepoints = 3
+
+        def __init__(self):
+            super().__init__()
+            self.manifest_reads = 0
+
+        def image_source_files(self, *, timepoints, planes):
+            self.manifest_reads += 1
+            return (image_file,)
+
+    provider = ManifestProvider()
+    manager = RoiManager(_mixed_movie_document())
+    engine = RoiMeasurementEngine(provider)
+    snapshot = engine.measure(manager)
+    controller = RoiScalarPlotController(manager, snapshot, image_provider=provider)
+    provider.manifest_reads = 0
+
+    original = controller.build()
+    assert provider.manifest_reads == 1
+    assert all(series.y_values == (1.0, 2.0, 3.0) for series in original.series)
+    controller.export_csv(tmp_path / "current.csv")
+    assert provider.manifest_reads == 2
+    manager.update_class(manager.classes[0].class_id, name="Renamed Golgi")
+    assert controller.build().source_token == original.source_token
+    assert provider.manifest_reads == 3
+
+    context = snapshot.prepare_read(manager, image_provider=provider)
+    track = manager.objects[0]
+    assert context.sample_is_current(track.object_id, 1)
+    manager.update_frame_geometry(track.object_id, 1, Polygon2D(
+        z_plane=1, exterior_xy_px=polygon(2).exterior_xy_px,
+    ))
+    assert not context.sample_is_current(track.object_id, 1)
+    changed = controller.build()
+    assert changed.source_token != original.source_token
+    assert controller.stale_samples(changed) == 1
+    controller.update_snapshot(engine.measure(manager))
+    controller.export_csv(tmp_path / "remeasured.csv")
+
+    image_file.write_bytes(b"changed external image with a different size")
+    provider.manifest_reads = 0
+    with pytest.raises(RuntimeError, match="stale"):
+        controller.export_csv(tmp_path / "stale.csv")
+    assert provider.manifest_reads == 1
+    assert not (tmp_path / "stale.csv").exists()
+    # Direct readers still perform their own freshness check outside a build.
+    direct = RoiScalarSeriesChannel(snapshot, 0, "intensity.mean", source=manager,
+                                    image_provider=provider)
+    assert direct.read_with_reason(track.object_id, 2).reason == "stale"

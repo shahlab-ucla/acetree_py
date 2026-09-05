@@ -321,31 +321,33 @@ class RoiMeasurementSnapshot:
             current_fingerprint = geometry_fingerprint(_field(frame, "geometry"))
         return self.frame_fingerprints.get((str(object_id), int(timepoint))) == current_fingerprint
 
-    def current_source_token(
+    def prepare_read(
         self,
         source: Any,
         *,
         image_provider: ImageProvider | None = None,
         calibration: Any | None = None,
-    ) -> str:
-        """Return a precise token for the dependencies covered by this snapshot.
+    ) -> RoiMeasurementReadContext:
+        """Validate image dependencies once for one plot or export operation.
 
-        Association, class-name, and display-index edits intentionally do not
-        affect the token. Geometry, calibration acknowledgement, selected
-        image files, and algorithm inputs do.
+        The returned context must not be retained across operations. It indexes
+        the current document while preserving cheap per-frame geometry checks.
         """
 
         document = _source_document(source)
+        objects = _field(document, "objects", ())
+        tracks = objects.values() if isinstance(objects, Mapping) else objects
+        objects_by_id = {
+            str(_field(track, "object_id")): track for track in tracks
+        }
         current_calibration = _source_calibration(source, document, calibration)
+        normalization_blocked = _source_physical_normalization_blocked(source)
         current_fingerprints: list[tuple[tuple[str, int], str | None]] = []
         for frame_key in self.frame_fingerprints:
-            frame = _find_frame(document, frame_key[0], frame_key[1])
+            frame = _track_frame(objects_by_id.get(frame_key[0]), frame_key[1])
             geometry = None if frame is None else _field(frame, "geometry", None)
             current_fingerprints.append(
-                (
-                    frame_key,
-                    None if geometry is None else geometry_fingerprint(geometry),
-                )
+                (frame_key, None if geometry is None else geometry_fingerprint(geometry))
             )
         image_token = self.source_image_manifest_token
         if image_provider is not None:
@@ -355,17 +357,85 @@ class RoiMeasurementSnapshot:
                 self.selected_planes,
                 plane_start=current_calibration.plane_start,
             )
+        document_id = str(_field(document, "document_id", ""))
         payload = (
-            str(_field(document, "document_id", "")),
+            document_id,
             current_calibration.cache_key(),
-            _source_physical_normalization_blocked(source),
+            normalization_blocked,
             image_token,
             self.algorithm_version,
             self.parameters_token,
             self.channels,
             tuple(sorted(current_fingerprints)),
         )
-        return hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()
+        return RoiMeasurementReadContext(
+            source_token=hashlib.sha256(repr(payload).encode("utf-8")).hexdigest(),
+            _snapshot=self,
+            _source=source,
+            _document=document,
+            _revision=_source_revision(source, document),
+            _objects=objects,
+            _objects_by_id=MappingProxyType(objects_by_id),
+            _calibration=calibration,
+            _dependencies_current=(
+                document_id == self.source_document_id
+                and current_calibration == self.source_calibration
+                and normalization_blocked == self.source_physical_normalization_blocked
+                and image_token == self.source_image_manifest_token
+            ),
+        )
+
+    def current_source_token(
+        self,
+        source: Any,
+        *,
+        image_provider: ImageProvider | None = None,
+        calibration: Any | None = None,
+    ) -> str:
+        """Return the current geometry, calibration, and selected image token.
+
+        Association, class-name, and display-index edits intentionally do not
+        affect the token.
+        """
+
+        return self.prepare_read(
+            source, image_provider=image_provider, calibration=calibration
+        ).source_token
+
+
+@dataclass(frozen=True, slots=True)
+class RoiMeasurementReadContext:
+    """Operation-scoped image validation and indexed ROI sample freshness."""
+
+    source_token: str
+    _snapshot: RoiMeasurementSnapshot
+    _source: Any
+    _document: Any
+    _revision: int
+    _objects: Any
+    _objects_by_id: Mapping[str, Any]
+    _calibration: Any
+    _dependencies_current: bool
+
+    def sample_is_current(self, object_id: Any, timepoint: int) -> bool:
+        if not self._dependencies_current:
+            return False
+        document = _source_document(self._source)
+        if (
+            document is not self._document
+            or _source_revision(self._source, document) != self._revision
+            or _field(document, "objects", ()) is not self._objects
+            or _source_calibration(self._source, document, self._calibration)
+            != self._snapshot.source_calibration
+            or _source_physical_normalization_blocked(self._source)
+            != self._snapshot.source_physical_normalization_blocked
+        ):
+            return False
+        key = (str(object_id), int(timepoint))
+        frame = _track_frame(self._objects_by_id.get(key[0]), key[1])
+        geometry = None if frame is None else _field(frame, "geometry", None)
+        fingerprint = None if geometry is None else geometry_fingerprint(geometry)
+        return self._snapshot.frame_fingerprints.get(key) == fingerprint
 
 
 class RoiMeasurementStore:
@@ -712,7 +782,15 @@ class RoiMeasurementEngine:
         ]
         tasks.sort(key=lambda item: (item[2], item[3], str(_field(item[0], "object_id"))))
         total_tasks = len(tasks)
+        active_image_group: tuple[int, int] | None = None
         for completed, (track, frame, timepoint, channel) in enumerate(tasks, start=1):
+            image_group = (timepoint, channel)
+            if image_group != active_image_group:
+                # Tasks are grouped by time/channel, so all objects reuse these
+                # images without retaining decoded data from the whole movie.
+                plane_cache.clear()
+                stack_cache.clear()
+                active_image_group = image_group
             object_id = str(_field(track, "object_id"))
             frame_id = str(_field(frame, "frame_id", f"{object_id}:{timepoint}"))
             frame_key = (object_id, timepoint)
@@ -1019,20 +1097,50 @@ class RoiScalarSeriesChannel:
         )
 
     def validate_coverage(self, subjects: Iterable[Any]) -> tuple[str, ...]:
+        return self._validate_coverage(subjects, self.read_with_reason)
+
+    @staticmethod
+    def _validate_coverage(
+        subjects: Iterable[Any], reader: Callable[[Any, int], RoiMetricValue]
+    ) -> tuple[str, ...]:
         missing: list[str] = []
         for subject in subjects:
             object_id = _subject_object_id(subject)
             sample_times = tuple(_field(subject, "sample_times", ()))
             has_valid = any(
-                self.read_with_reason(subject, int(timepoint)).is_valid
+                reader(subject, int(timepoint)).is_valid
                 for timepoint in sample_times
             )
             if not has_valid:
                 missing.append(object_id)
         return tuple(missing)
 
+    def _prepare_scalar_series_channel(self):
+        channel = self.as_scalar_series_channel()
+        if self.source is None:
+            return dataclasses.replace(channel, prepare=None)
+        context = self.snapshot.prepare_read(
+            self.source, image_provider=self.image_provider
+        )
+
+        def read(subject: Any, timepoint: int) -> RoiMetricValue:
+            object_id = _subject_object_id(subject)
+            if not context.sample_is_current(object_id, timepoint):
+                return RoiMetricValue(None, "stale")
+            return self.snapshot.metric(
+                object_id, timepoint, self.image_channel, self.metric_key
+            )
+
+        return dataclasses.replace(
+            channel,
+            reader=read,
+            source_token=lambda: context.source_token,
+            validate_coverage=lambda subjects: self._validate_coverage(subjects, read),
+            prepare=None,
+        )
+
     def as_scalar_series_channel(self):
-        """Adapt this ROI reader to the generic temporal-series contract."""
+        """Adapt this reader, preparing fresh image validation for each build."""
 
         from .expression_plot import ScalarSeriesChannel
 
@@ -1043,6 +1151,7 @@ class RoiScalarSeriesChannel:
             reader=self.read_with_reason,
             source_token=self.source_token,
             validate_coverage=self.validate_coverage,
+            prepare=self._prepare_scalar_series_channel,
             measurement_key=lambda subject: self.measurement_key(
                 _subject_object_id(subject)
             ),
@@ -1236,19 +1345,25 @@ def _select_frames(
     return selected
 
 
+def _track_frame(track: Any | None, timepoint: int) -> Any | None:
+    if track is None:
+        return None
+    frames = _field(track, "frames", {})
+    if isinstance(frames, Mapping):
+        return frames.get(timepoint)
+    return next(
+        (frame for frame in frames if int(_field(frame, "timepoint")) == timepoint),
+        None,
+    )
+
+
 def _find_frame(document: Any, object_id: str, timepoint: int) -> Any | None:
     objects = _field(document, "objects", ())
     if isinstance(objects, Mapping):
         objects = objects.values()
     for track in objects:
-        if str(_field(track, "object_id")) != object_id:
-            continue
-        frames = _field(track, "frames", {})
-        if isinstance(frames, Mapping):
-            return frames.get(timepoint)
-        for frame in frames:
-            if int(_field(frame, "timepoint")) == timepoint:
-                return frame
+        if str(_field(track, "object_id")) == object_id:
+            return _track_frame(track, timepoint)
     return None
 
 
@@ -1427,6 +1542,7 @@ __all__ = [
     "RoiMeasurementCancelled",
     "RoiMeasurementEngine",
     "RoiMeasurementRequest",
+    "RoiMeasurementReadContext",
     "RoiMeasurementSample",
     "RoiMeasurementSnapshot",
     "RoiMeasurementStore",

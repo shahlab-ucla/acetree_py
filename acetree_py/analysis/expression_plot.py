@@ -112,6 +112,7 @@ class ScalarSeriesChannel:
     validate_coverage: Callable[[tuple[TemporalSeriesSubject, ...]], object] | None = None
     measurement_key: ScalarSeriesMeasurementKey | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
+    prepare: Callable[[], ScalarSeriesChannel] | None = None
 
     def __post_init__(self) -> None:
         if not self.key.strip():
@@ -126,6 +127,8 @@ class ScalarSeriesChannel:
             raise TypeError("validate_coverage must be callable")
         if self.measurement_key is not None and not callable(self.measurement_key):
             raise TypeError("measurement_key must be callable")
+        if self.prepare is not None and not callable(self.prepare):
+            raise TypeError("prepare must be callable")
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
@@ -387,6 +390,10 @@ class TemporalSeriesService:
         smoothing_sigma = float(smoothing_sigma)
         gaussian_smooth_missing((), smoothing_sigma)
         styles = styles or {}
+        if channel.prepare is not None:
+            channel = channel.prepare()
+            if not isinstance(channel, ScalarSeriesChannel):
+                raise TypeError("prepare must return a ScalarSeriesChannel")
         if channel.validate_coverage is not None:
             channel.validate_coverage(selected)
         source_token = channel.source_token() if channel.source_token is not None else None
