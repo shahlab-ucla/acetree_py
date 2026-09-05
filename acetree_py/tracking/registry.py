@@ -6,19 +6,14 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import metadata
-from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
-from .api import TRACKING_API_MAJOR, TRACKING_API_VERSION
+from .api import TRACKING_API_MAJOR, TRACKING_API_VERSION, _immutable_mapping, _mutable_value
 
 
 DETECTOR_ENTRY_POINT_GROUP = "acetree_py.tracking.detectors"
 TRACKER_ENTRY_POINT_GROUP = "acetree_py.tracking.trackers"
 _VALID_PLUGIN_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
-
-
-def _freeze_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    return MappingProxyType(dict(value or {}))
 
 
 def _api_major(version: str) -> int:
@@ -55,7 +50,7 @@ class ComponentDescriptor:
                 f"Plugin {self.plugin_id!r} targets tracking API {self.api_version}; "
                 f"this package supports API major {TRACKING_API_MAJOR}"
             )
-        object.__setattr__(self, "settings_schema", _freeze_mapping(self.settings_schema))
+        object.__setattr__(self, "settings_schema", _immutable_mapping(self.settings_schema))
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
 
 
@@ -133,8 +128,7 @@ class TrackingRegistry:
         defaults: dict[str, Any] = {}
         for key, schema in descriptor.settings_schema.items():
             if isinstance(schema, Mapping) and "default" in schema:
-                value = schema["default"]
-                defaults[key] = dict(value) if isinstance(value, Mapping) else value
+                defaults[key] = _mutable_value(schema["default"])
         return defaults
 
     def create_detector(self, plugin_id: str):

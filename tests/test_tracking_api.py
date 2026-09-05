@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import json
 
 import pytest
 
@@ -10,6 +11,7 @@ from acetree_py.tracking.api import (
     Calibration,
     ComponentSpec,
     Detection,
+    TrackEdge,
     TrackingOutcome,
     TrackingRequest,
     TrackingResult,
@@ -218,3 +220,37 @@ def test_result_rejects_outcome_inconsistent_with_scope(
 
     with pytest.raises(ValueError, match=message):
         TrackingResult(_request(), detections, (), outcome=outcome)
+
+
+def test_proposal_nested_inputs_are_immutable_and_export_as_detached_json():
+    nested = {"weights": {"values": [0.1, 0.2]}}
+    request = TrackingRequest(
+        ComponentSpec("test.detector", nested),
+        ComponentSpec("test.tracker", nested),
+        TrackingScope("global", 1, 2),
+    )
+    first = Detection("first", 1, 1, 2, 3, 1, 1, nested)
+    second = Detection("second", 2, 1, 2, 3, 1, 1)
+    edge = TrackEdge("first", "second", 1, features=nested)
+    result = TrackingResult(request, (first, second), (edge,), provenance=nested)
+    nested["weights"]["values"].append(99)
+    nested["weights"]["extra"] = True
+
+    for value in (request.detector.settings, request.tracker.settings,
+                  first.features, edge.features, result.provenance):
+        assert value["weights"]["values"] == (0.1, 0.2)
+        assert "extra" not in value["weights"]
+        with pytest.raises(TypeError):
+            value["weights"]["extra"] = True
+        with pytest.raises(TypeError):
+            value["weights"]["values"][0] = 99
+
+    payload = result.to_dict()
+    assert TrackingResult.from_dict(json.loads(json.dumps(payload))) == result
+    payload["request"]["detector"]["settings"]["weights"]["values"].append(99)
+    payload["detections"][0]["features"]["weights"]["values"].clear()
+    payload["edges"][0]["features"]["weights"].clear()
+    payload["provenance"]["weights"]["values"].clear()
+    assert result.to_dict()["provenance"] == {"weights": {"values": [0.1, 0.2]}}
+    assert request.detector.settings["weights"]["values"] == (0.1, 0.2)
+    assert first.features["weights"]["values"] == edge.features["weights"]["values"]

@@ -29,7 +29,7 @@ from acetree_py.tracking.persistence import (
 )
 
 
-def _result(*, settings: dict | None = None) -> TrackingResult:
+def _result(*, settings: dict | None = None, branch_policy: str = "stop") -> TrackingResult:
     request = TrackingRequest(
         detector=ComponentSpec(
             "org.acetree.detector.dog",
@@ -51,6 +51,7 @@ def _result(*, settings: dict | None = None) -> TrackingResult:
             seed_anchors=((3, 7),),
             roi_radius_um=12.5,
             ambiguity_ratio=1.4,
+            branch_policy=branch_policy,
         ),
     )
     detections = (
@@ -92,9 +93,10 @@ def _result(*, settings: dict | None = None) -> TrackingResult:
     )
 
 
-def test_tracking_proposal_round_trip_is_lossless(tmp_path: Path):
+@pytest.mark.parametrize("branch_policy", ["stop", "follow_best", "follow_both"])
+def test_tracking_proposal_round_trip_is_lossless(tmp_path: Path, branch_policy):
     path = tmp_path / "embryo.tracking.json"
-    original = _result()
+    original = _result(branch_policy=branch_policy)
 
     assert write_tracking_proposal(path, original) == path
     loaded = read_tracking_proposal(path)
@@ -127,10 +129,12 @@ def test_tracking_proposal_round_trip_is_lossless(tmp_path: Path):
 def test_v1_sidecar_without_outcome_remains_readable():
     payload = tracking_result_to_dict(_result())
     payload["result"].pop("outcome")
+    payload["request"]["scope"].pop("branch_policy")
 
     loaded = tracking_result_from_dict(payload)
 
     assert loaded.outcome is None
+    assert loaded.request.scope.branch_policy == "stop"
 
 
 def test_tracking_sidecar_path_uses_dataset_stem(tmp_path: Path):

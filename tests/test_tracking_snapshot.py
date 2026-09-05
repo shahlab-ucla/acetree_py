@@ -22,12 +22,15 @@ def test_prepared_tracking_is_invalid_after_edit_then_undo() -> None:
     )
     provider = NumpyProvider(np.zeros((1, 3, 8, 8), dtype=np.float32))
     app = AceTreeApp(manager, provider)
+    penalties = {"quality": 0.25}
     request = TrackingRequest(
         detector=ComponentSpec("acetree.dog3d", {"TARGET_CHANNEL": 1}),
-        tracker=ComponentSpec("acetree.simple_lap", {}),
+        tracker=ComponentSpec("acetree.simple_lap", {"LINKING_FEATURE_PENALTIES": penalties}),
         scope=TrackingScope("global", 1, 1),
     )
     snapshot = app.prepare_tracking_analysis(request)
+    penalties["quality"] = 99
+    assert snapshot.request.tracker.settings["LINKING_FEATURE_PENALTIES"]["quality"] == 0.25
 
     app.edit_history.do(AddNucleus(time=1, x=3, y=4, z=2.0, size=4))
     app.edit_history.undo()

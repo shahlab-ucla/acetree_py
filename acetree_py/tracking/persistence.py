@@ -115,15 +115,12 @@ def tracking_result_to_dict(result: TrackingResult) -> dict[str, Any]:
             "detector": _component_to_dict(request.detector),
             "tracker": _component_to_dict(request.tracker),
             "scope": {
-                "kind": request.scope.kind,
-                "start_frame": request.scope.start_frame,
-                "end_frame": request.scope.end_frame,
+                **request.scope.to_dict(),
+                # Retain the v1 sidecar anchor shape while sharing scope fields.
                 "seed_anchors": [
                     {"time": time, "index": index}
                     for time, index in request.scope.seed_anchors
                 ],
-                "roi_radius_um": request.scope.roi_radius_um,
-                "ambiguity_ratio": request.scope.ambiguity_ratio,
             },
         },
         "result": {
@@ -205,6 +202,10 @@ def tracking_result_from_dict(payload: Any) -> TrackingResult:
             ambiguity_ratio=_number(
                 scope_data.get("ambiguity_ratio"),
                 "request.scope.ambiguity_ratio",
+            ),
+            branch_policy=_string(
+                scope_data.get("branch_policy", "stop"),
+                "request.scope.branch_policy",
             ),
         )
         request = TrackingRequest(

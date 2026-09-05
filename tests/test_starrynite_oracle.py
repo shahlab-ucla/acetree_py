@@ -10,7 +10,7 @@ import pytest
 
 import acetree_py.tracking.starrynite.oracle.matlab_backend as matlab_backend
 from acetree_py.tracking.api import Calibration
-from acetree_py.tracking.api import Detection, TrackEdge
+from acetree_py.tracking.api import Detection, TrackEdge, TrackerGraphResult
 from acetree_py.tracking.starrynite.detector import legacy_dog_response
 from acetree_py.tracking.starrynite.oracle.metrics import (
     compare_detections,
@@ -474,10 +474,15 @@ def test_matlab_python_lineage_snapshots_round_trip_and_compare_cleanup(tmp_path
         Detection("c", 2, 5.5, 5.0, 3.0, 2.0, 100.0),
         Detection("artifact", 2, 10.0, 10.0, 3.0, 1.0, 20.0),
     )
+    graph = TrackerGraphResult(
+        raw[:2], (TrackEdge("p", "c", 0.0),),
+        provenance={"cleanup": {"rejected_ids": ["artifact"]}},
+    )
     candidate = python_lineage_snapshot(
         raw,
         {"p", "c"},
-        (TrackEdge("p", "c", 0.0),),
+        graph.edges,
+        provenance=graph.provenance,
     )
 
     comparison = compare_lineage_snapshots(
@@ -491,6 +496,8 @@ def test_matlab_python_lineage_snapshots_round_trip_and_compare_cleanup(tmp_path
     assert comparison.retained_f1 == 1.0
     assert comparison.edge_similarity.f1 == 1.0
     assert read_lineage_snapshot(destination) == reference
+    write_lineage_snapshot(destination, candidate)
+    assert read_lineage_snapshot(destination) == candidate
 
 
 def test_python_lineage_snapshot_requires_explicit_raw_retention_accounting():

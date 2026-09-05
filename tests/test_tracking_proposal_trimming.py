@@ -97,7 +97,7 @@ def test_trim_narrows_result_and_preserves_anchor_without_mutating_source():
         "Detector used a calibrated threshold",
     )
     assert trimmed.provenance["run_id"] == "original"
-    assert trimmed.provenance["review_trim"] == {
+    assert trimmed.to_dict()["provenance"]["review_trim"] == {
         "inclusive_end_frame": 3,
         "original_end_frame": 5,
         "original_outcome": source.outcome.to_dict(),

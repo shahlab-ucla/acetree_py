@@ -165,3 +165,20 @@ def test_tracking_result_round_trip_preserves_existing_seed_boundary():
     assert restored.new_detections == (found,)
     with pytest.raises(TypeError):
         result.existing_anchors["other"] = (1, 1)
+
+
+def test_nested_schema_defaults_are_detached_for_each_caller():
+    registry = TrackingRegistry()
+    defaults = {"weights": [0.1, 0.2]}
+    descriptor = ComponentDescriptor(
+        "test.nested", "detector", "Nested defaults",
+        settings_schema={"options": {"default": defaults}},
+    )
+    registry.register_detector(descriptor, lambda: None)
+    defaults["weights"].append(99)
+    first = registry.default_settings("test.nested")
+    first["options"]["weights"].clear()
+
+    assert registry.default_settings("test.nested") == {
+        "options": {"weights": [0.1, 0.2]},
+    }

@@ -8,7 +8,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence, TYPE_CHECKING
 
-from ...api import Calibration, Detection, TrackEdge
+from ...api import Calibration, Detection, TrackEdge, _mutable_value
 from .metrics import LineageGraphSimilarity, LineageNodeState, compare_lineage_graphs
 
 if TYPE_CHECKING:
@@ -151,7 +151,7 @@ def python_lineage_snapshot(
     normalized_edges = tuple(
         (item.source_id, item.target_id, item.kind) for item in edges
     )
-    return LineageSnapshot(nodes, normalized_edges, dict(provenance or {}))
+    return LineageSnapshot(nodes, normalized_edges, _mutable_value(provenance or {}))
 
 
 def compare_lineage_snapshots(

@@ -21,8 +21,32 @@ TRACKING_OUTCOME_CODES = frozenset(
 TRACKING_BRANCH_POLICIES = frozenset({"stop", "follow_best", "follow_both"})
 
 
+def _immutable_value(value: Any) -> Any:
+    """Detach JSON containers recursively; immutable sequences use tuples."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _immutable_value(child) for key, child in value.items()})
+    if isinstance(value, (list, tuple)):
+        children = tuple(_immutable_value(child) for child in value)
+        if isinstance(value, tuple) and all(
+            frozen is original for frozen, original in zip(children, value)
+        ):
+            # Detector rows intentionally share immutable frame metadata.
+            return value
+        return children
+    return value
+
+
 def _immutable_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    return MappingProxyType(dict(value or {}))
+    return _immutable_value(value or {})
+
+
+def _mutable_value(value: Any) -> Any:
+    """Return detached dictionaries/lists for public serialization and editing."""
+    if isinstance(value, Mapping):
+        return {key: _mutable_value(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_mutable_value(child) for child in value]
+    return value
 
 
 def _require_finite(name: str, value: float) -> None:
@@ -170,7 +194,7 @@ class Detection:
             "z_um": self.z_um,
             "radius_um": self.radius_um,
             "quality": self.quality,
-            "features": dict(self.features),
+            "features": _mutable_value(self.features),
         }
 
     @classmethod
@@ -350,7 +374,7 @@ class TrackEdge:
             "target_id": self.target_id,
             "cost": self.cost,
             "kind": self.kind,
-            "features": dict(self.features),
+            "features": _mutable_value(self.features),
         }
 
     @classmethod
@@ -427,7 +451,11 @@ class TrackingScope:
 
 @dataclass(frozen=True, slots=True)
 class ComponentSpec:
-    """A selected detector/tracker plugin and its JSON-safe settings."""
+    """A selected detector/tracker plugin and its JSON-safe settings.
+
+    Nested mappings are read-only and JSON arrays become tuples. ``to_dict``
+    returns detached, mutable JSON containers for editing and serialization.
+    """
 
     plugin_id: str
     settings: Mapping[str, Any] = field(default_factory=dict)
@@ -438,7 +466,7 @@ class ComponentSpec:
         object.__setattr__(self, "settings", _immutable_mapping(self.settings))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"plugin_id": self.plugin_id, "settings": dict(self.settings)}
+        return {"plugin_id": self.plugin_id, "settings": _mutable_value(self.settings)}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ComponentSpec:
@@ -661,7 +689,7 @@ class TrackingResult:
                 key: list(anchor) for key, anchor in self.existing_anchors.items()
             },
             "warnings": list(self.warnings),
-            "provenance": dict(self.provenance),
+            "provenance": _mutable_value(self.provenance),
             "outcome": None if self.outcome is None else self.outcome.to_dict(),
         }
 
