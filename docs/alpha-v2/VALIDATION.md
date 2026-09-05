@@ -75,13 +75,13 @@ Scope serialization includes branch_policy (missing old fields default stop). Ne
 
 Agent tracking/global/StarryNite gate: **226 passed, 2 skipped**; graph provenance export follow-up: **53 passed, 1 skipped**. Reviewed diff before integration.
 
-### C3 — object management and navigation
+### C3 â€” object management and navigation
 
 Class name/color management and expected-span editing use undoable commands. Completeness requires reviewed decisions throughout the expected interval, including reviewed absence. History rows cache immutable document revisions; Z-only navigation does not rebuild the object list.
 
 Agent gate: **33 passed**; touched-file lint clean. Same-process 200 objects x 400 frames benchmark: full history rebuild **66.8 ms**, cached time change **0.973 ms**, full-panel Z change **0.012 ms** (medians). Reviewed new dialog and panel code before integration.
 
-### B3 — bounded tracking acceptance memory
+### B3 â€” bounded tracking acceptance memory
 
 Acceptance stores only changed existing successor fields and appended-frame lengths; global tracking submission no longer copies unused nuclei. Failure after partial installation, tombstones, empty records, undo and redo retain exact results and nucleus identity.
 
@@ -91,7 +91,7 @@ Agent gate: **125 passed**. Sparse continuation across 100,000 existing nuclei/2
 
 At ca96488, venv/offscreen run: **1889 passed, 8 skipped, 19 deselected, 8 failed**. Seven failures were OpenGL context creation under Qt offscreen; real Windows-backend rendering works. One old build-label assertion was corrected to alpha v2. Final gate uses the functioning renderer.
 
-### A3 — bounded ROI image memory and operation freshness
+### A3 â€” bounded ROI image memory and operation freshness
 
 Decoded planes/stacks are released when sorted time/channel task groups advance and reused by objects within each group. Prepared read contexts validate image manifests once per plot/export and index the immutable document for sample checks. Direct readers continue to validate their own dependencies.
 
@@ -105,13 +105,13 @@ Nuclear measurement now exposes private prepare/discard and atomic commit operat
 
 Numerical, transaction, expression-window and real-layer contrast gate: **74 passed** in 14.39s. GUI background integration follows A4.
 
-### C2 — live ROI plot provenance
+### C2 â€” live ROI plot provenance
 
 App-derived profile windows now bind selected objects and measured profiles to their source snapshot. Scalar and profile windows refresh after edits; CSV/SVG/toolbar exports reject stale measurements and recover after remeasurement. Metadata-only edits retain valid image measurements. Existing standalone profile APIs remain usable for caller-owned data.
 
 Agent gate: **26 passed**, including edit -> visible stale state in both windows -> all exports blocked -> remeasure -> exports restored. One prepared context per profile refresh/CSV/SVG and scalar SVG; external image/calibration changes rejected. Reviewed before integration; provider/dataset replacement follow-up assigned during C4.
 
-### B4 — shared tracking settings
+### B4 â€” shared tracking settings
 
 One component-settings builder applies registry defaults, source/preset settings, then advertised form controls across selected-cell, whole-movie and creation workflows. Shared helpers retain preset identity rebasing and calibration warnings. Native/exact source bindings and wizard localization defaults retain their existing semantics.
 
@@ -131,7 +131,7 @@ Fresh-process tracemalloc with two synthetic objects (2D polygon and 3D contours
 
 At 101589a, production F/E9 diagnostics: **32 baseline, 32 alpha, zero introduced**. Existing style-only and unused-code cleanup outside the accepted tasks was not expanded into a formatter sweep.
 
-### A4/A5 — background measurement completed
+### A4/A5 â€” background measurement completed
 
 Nuclear snapshots copy nuclei and movie/config settings plus flat CSV cell rows; naming/parent/daughter graphs remain on the GUI side. ROI/nuclear jobs share a single active slot. GUI completion validates manager/provider identities, source manifests and edit freshness before publication; expression channel changes only after success. Cancelled, edited, replaced-source and closed-window runs preserve prior results and discard staged files.
 
@@ -141,12 +141,27 @@ Agent gate: **65 passed**, including 11 worker lifecycle cases and existing expr
 
 At 586a8b0 with Windows Qt/OpenGL and synthetic two-channel images, absolute planeStart=7: edit/undo/redo, real napari polygon drawing, review, filtering/overlay clearing, ROI async measure -> scalar CSV/SVG -> vertex edit/export rejection -> remeasure/export recovery, nuclear async measure/channel selection, clean ZIP Save As/ROI reopen/source preservation, 3D visibility restoration, detached 3D and expression windows all passed. The old layout after saving a long path still grew to 1280x1125; C4 addresses that before final fit acceptance. Harness and screenshots are workspace scratch artifacts.
 
-### R3 — measurement save state
+### R3 â€” measurement save state
 
 Successful nuclear publication marks the archive fields unsaved independently of undo history. A complete Save/Save As clears that state; cancellation, failed saves, failed retarget and intermediate copies preserve it. The workspace consumes the flag. Extended existing async/save workflows: **28 passed**; functional lint passed. Reviewed before integration.
 
-### C4/R2 — compact workspace and matching documentation
+### C4/R2 â€” compact workspace and matching documentation
 
 Workflow now holds shared save/undo/target/status controls around Nuclei, Objects and Tracking tabs. Browse & Channels combines the lineage list and channel controls, Player Controls occupies two compact top rows, and independent lineage panels remain below the canvas. Menu launchers reveal the relevant tab. Objects retains persistent edit/measure/plot actions with scrollable review and metadata controls; long paths wrap.
 
 Agent Windows gate: **127 passed**, final context-ordering/Qt-guard gate **10 passed**. Real napari stays **1280x720**, minimum hint **811x425**; a sidecar path over 300 characters cannot enlarge it. Reviewed actual screenshots and code before integration. User guide, README and architecture now describe the final workspace and background workflows. Final combined gate follows.
+
+
+## Final integrated acceptance (648a27e)
+
+Full non-MATLAB suite with Python 3.12.14, napari 0.6.6, PySide6/Qt 6.11.1 and the Windows Qt/OpenGL backend: **1921 passed, 8 skipped, 19 deselected**, 140.18 seconds, process exit 0. The original quiet invocation was then repeated with diagnostics and also passed: **1921 passed, 8 skipped, 19 deselected**, 138.45 seconds, process exit 0. The eight skips are six POSIX permission cases and two optional external naming fixtures; the nineteen MATLAB oracle cases were intentionally excluded. The 1020/1022 warnings are retained in the run logs; neither run had functional test failures or 30-second traceback timeouts.
+
+Command: `python -m pytest tests -q -ra -m "not matlab_oracle" -p no:cacheprovider -o faulthandler_timeout=30 --basetemp <new workspace temp path> --durations=10` (the first diagnostic run used `-v` instead of `-q`). Runtime dependencies came from the isolated `.alpha-v2-venv` and existing `.test_deps`; `QT_API=pyside6`, `QT_QPA_PLATFORM=windows`, `MPLBACKEND=Agg`, bytecode writes disabled.
+
+An earlier quiet full-suite invocation stopped making visible progress near the measurement tests and was terminated. No stack was captured from that invocation, so its cause is unconfirmed. Both subsequent full runs passed. Independent review and six repeated worker-lifecycle sessions in one persistent Qt process also passed (**66 cases**, forced garbage collection between sessions, clean process exit). No speculative production fix or additional permanent test cases were added for that observation.
+
+The final combined real-window workflow passed at **1280x720**, including all three workspace tabs, with a minimum size hint of **818x425**. It exercised actual napari polygon editing, review/filter visibility, asynchronous ROI and nuclear measurement, stale export rejection and remeasurement recovery, unsaved/saved state, clean ZIP Save As/reopen with source preservation, and independent 3D/expression windows. Screenshots of Nuclei, Objects and Tracking were inspected. Workspace scratch artifacts: `.tmp/alpha-v2-visual/smoke-04eed3ec/acceptance.json` and `workspace-{nuclei,objects,tracking}.png`; the reusable smoke harness is `.tmp/alpha_visual_smoke.py`.
+
+The wheel `acetree_py-0.2.0-py3-none-any.whl` built successfully (3,543,408 bytes). Installation into a fresh temporary target outside the checkout passed; all six preset files and required model/runtime resources were included, `validate_bundled_assets()` returned no missing assets, and `python -m acetree_py --version` reported `AceTree-Py 0.2.0 (alpha v2)`. No branch publication was performed.
+
+Final production F/E9 lint remains **32 baseline, 32 alpha, zero introduced**. Memory/navigation evidence is recorded above, including its measurement boundaries. Git ancestry confirms alpha-v2 descends from the audited subcellular-measurements commit. The source branch and its untracked reports/graph artifacts remain unchanged.

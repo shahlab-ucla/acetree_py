@@ -20,7 +20,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 | C4 Workflow workspace | UI | M | C1,C3 | Nuclei/Objects/Tracking; 1280x720; all actions reachable | complete; 7db48a6, 127 broader + 10 final checks |
 | R3 Measurement save state | core/coordinator | S | A5,C4 | successful measurement remains unsaved until Save; cancel/failure preserves state | complete; a52fde4, 28 focused tests |
 | R2 Alpha installation/docs | coordinator | S | integration | installers identify alpha-v2; docs match UI | complete; installers and CLI identify alpha v2; workflow docs match tabs |
-| Final acceptance | coordinator | M | all above | full non-MATLAB suite; live napari; memory/navigation evidence | pending |
+| Final acceptance | coordinator | M | all above | full non-MATLAB suite; live napari; memory/navigation evidence | complete; 1921 passed twice, 1280x720 workflows, installed wheel, performance evidence |
 
 ## Checklist
 
@@ -41,7 +41,7 @@ Each checkbox is an outcome, not a coverage target. Specialists work in isolated
 - [x] C4
 - [x] R3
 - [x] R2
-- [ ] Final acceptance
+- [x] Final acceptance
 
 ## Interface decisions
 
