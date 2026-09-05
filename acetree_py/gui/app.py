@@ -3770,27 +3770,10 @@ class AceTreeApp:
                 self._roi_scalar_plot_windows.append(window)
                 window.show()
             elif action == "plot_profiles":
-                snapshot = self.roi_measurement_engine.latest_snapshot
-                if snapshot is None:
-                    raise ValueError("Measure this object with spatial profiles first")
-                from .roi_profile_window import RoiProfileSeries, RoiProfileWindow
+                from .roi_profile_window import RoiProfileWindow
 
-                profiles = tuple(
-                    RoiProfileSeries(
-                        label=f"t={sample.timepoint}, channel {sample.image_channel + 1}",
-                        profile=sample.profile,
-                        object_id=sample.object_id,
-                        timepoint=sample.timepoint,
-                        image_channel=sample.image_channel,
-                    )
-                    for sample in snapshot.samples.values()
-                    if sample.object_id == str(object_id) and sample.profile is not None
-                )
-                if not profiles:
-                    raise ValueError(
-                        "No line profiles are available; remeasure with Profiles enabled"
-                    )
-                window = RoiProfileWindow(profiles)
+                parent = self.viewer.window._qt_window if self.viewer is not None else None
+                window = RoiProfileWindow.from_app(self, object_ids=(object_id,), parent=parent)
                 window.destroyed.connect(
                     lambda *_args, item=window: (
                         self._roi_profile_windows.remove(item)
@@ -3804,21 +3787,30 @@ class AceTreeApp:
             self._say(str(error))
 
     def _refresh_roi_scalar_plot_windows(self, snapshot=None) -> None:
-        """Refresh live scalar plots only after a measurement snapshot publishes."""
+        """Refresh scalar and profile windows after a complete measurement publishes."""
+        self._notify_roi_plot_windows(snapshot=snapshot)
 
-        for window in tuple(self._roi_scalar_plot_windows):
-            try:
-                window.on_measurements_updated(snapshot)
-            except RuntimeError as error:
-                if "deleted" in str(error).lower():
-                    try:
-                        self._roi_scalar_plot_windows.remove(window)
-                    except ValueError:
-                        pass
-                else:
-                    logger.exception("Failed to refresh ROI scalar plot window")
-            except Exception:  # noqa: BLE001 - measurement remains successful
-                logger.exception("Failed to refresh ROI scalar plot window")
+    def _notify_roi_plot_windows(self, *, snapshot=None, edited=False, command=None) -> None:
+        for windows in (self._roi_scalar_plot_windows, self._roi_profile_windows):
+            for window in tuple(windows):
+                try:
+                    if not edited:
+                        window.on_measurements_updated(snapshot)
+                    else:
+                        window.on_document_edited()
+                except RuntimeError as error:
+                    if "deleted" in str(error).lower():
+                        if window in windows:
+                            windows.remove(window)
+                    elif edited:
+                        self._report_committed_refresh_failure(command, error)
+                    else:
+                        logger.exception("Failed to refresh ROI plot window")
+                except Exception as error:  # noqa: BLE001 - optional plot observer
+                    if edited:
+                        self._report_committed_refresh_failure(command, error)
+                    else:
+                        logger.exception("Failed to refresh ROI plot window")
 
     def _manage_roi_classes(self) -> None:
         """Edit class metadata through the same undo history as ROI geometry."""
@@ -4266,6 +4258,13 @@ class AceTreeApp:
                         self._report_committed_refresh_failure(cmd, error)
                 except Exception as error:  # noqa: BLE001 - optional observer
                     self._report_committed_refresh_failure(cmd, error)
+        if effects & {
+            EditEffect.ROI_GEOMETRY,
+            EditEffect.ROI_ASSOCIATION,
+            EditEffect.ROI_METADATA,
+            EditEffect.CONFIG,
+        } or is_structural:
+            self._notify_roi_plot_windows(edited=True, command=cmd)
         try:
             self.update_display()
         except Exception as error:

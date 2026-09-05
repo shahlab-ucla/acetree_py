@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..analysis.expression_plot import (
     ExpressionPlotData,
@@ -17,7 +18,6 @@ from ..analysis.roi_measurements import (
     RoiScalarSeriesChannel,
     roi_temporal_subjects,
 )
-
 
 ROI_SCALAR_METRIC_LABELS: dict[str, str] = {
     "intensity.sum": "Integrated intensity",
@@ -64,7 +64,7 @@ class RoiScalarPlotController:
 
     @property
     def available_channels(self) -> tuple[int, ...]:
-        return tuple(sorted(set(int(value) for value in self.snapshot.channels)))
+        return tuple(sorted({int(value) for value in self.snapshot.channels}))
 
     @property
     def available_metric_keys(self) -> tuple[str, ...]:
@@ -223,6 +223,8 @@ class RoiScalarPlotController:
 try:
     from matplotlib.backends.backend_qtagg import (
         FigureCanvasQTAgg as FigureCanvas,
+    )
+    from matplotlib.backends.backend_qtagg import (
         NavigationToolbar2QT as NavigationToolbar,
     )
     from matplotlib.figure import Figure
@@ -270,13 +272,7 @@ if _GUI_AVAILABLE:
                 self._save_action.setEnabled(enabled)
 
         def save_figure(self, *_args) -> None:
-            owner = self._roi_plot_owner
-            try:
-                owner._assert_exportable()
-            except RuntimeError as error:
-                QMessageBox.warning(owner, "Cannot export ROI plot", str(error))
-                return
-            owner._choose_svg()
+            self._roi_plot_owner._choose_svg()
 
 
 class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
@@ -325,7 +321,7 @@ class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
         image_channel: int | None = None,
         metric_key: str = "intensity.mean",
         parent=None,
-    ) -> "RoiScalarPlotWindow":
+    ) -> RoiScalarPlotWindow:
         snapshot = app.roi_measurement_engine.latest_snapshot
         if snapshot is None:
             raise RuntimeError("Measure subcellular objects before plotting a track")
@@ -483,7 +479,7 @@ class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
             self._building_controls = False
         self.refresh_plot()
 
-    def refresh_plot(self, *_args) -> None:
+    def refresh_plot(self, *_args) -> ExpressionPlotData | None:
         if self._building_controls:
             return
         object_ids = tuple(
@@ -528,9 +524,14 @@ class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
             detail += f"; {stale} stale — remeasure before export"
         self._status.setText(detail)
         self._canvas.draw_idle()
+        return data
 
     def update_snapshot(self, snapshot: RoiMeasurementSnapshot) -> None:
         self.controller.update_snapshot(snapshot)
+        self._refresh_controls()
+        self.refresh_plot()
+
+    def on_document_edited(self) -> None:
         self._refresh_controls()
         self.refresh_plot()
 
@@ -550,8 +551,10 @@ class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
     def export_svg(self, path: str | Path) -> Path:
         """Export the current fresh plot through the same guarded UI path."""
 
-        self.refresh_plot()
-        self._assert_exportable()
+        data = self.refresh_plot()
+        if data is None:
+            raise RuntimeError("Plot controls are updating; try exporting again")
+        self._assert_exportable(data)
         destination = _with_suffix(path, ".svg")
         destination.parent.mkdir(parents=True, exist_ok=True)
         self._figure.savefig(
@@ -562,8 +565,9 @@ class RoiScalarPlotWindow(QWidget):  # type: ignore[misc]
         )
         return destination
 
-    def _assert_exportable(self) -> ExpressionPlotData:
-        data = self.controller.build()
+    def _assert_exportable(self, data: ExpressionPlotData | None = None) -> ExpressionPlotData:
+        if data is None:
+            data = self.controller.build()
         if not data.series:
             raise RuntimeError("Select at least one ROI object before exporting")
         if self.controller.stale_samples(data):
