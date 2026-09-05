@@ -176,6 +176,7 @@ class AceTreeApp:
         self.roi_manager = roi_manager if roi_manager is not None else RoiManager()
         self.roi_measurement_engine = RoiMeasurementEngine(image_provider)
         self._measurement_jobs = None
+        self._nuclear_measurement_unsaved = False
         self.edit_history = EditHistory(
             manager.nuclei_record,
             on_edit=self._on_edit,
@@ -1223,6 +1224,17 @@ class AceTreeApp:
         if self._edit_panel is not None:
             self._edit_panel._status_label.setText(message)
 
+    def _set_nuclear_measurement_unsaved(self, unsaved: bool) -> None:
+        """Track measured archive fields separately from undoable nucleus edits."""
+        self._nuclear_measurement_unsaved = unsaved
+        workspace = getattr(self, "_workspace", None)
+        if workspace is not None:
+            try:
+                workspace.refresh()
+            except Exception:
+                # Presentation cannot change a completed publication/save outcome.
+                logger.exception("Could not refresh workspace measurement save status")
+
     # ── Save ──────────────────────────────────────────────────────
 
     @property
@@ -1364,6 +1376,7 @@ class AceTreeApp:
         self.manager._config_dirty = False
         self._save_path_override = saved_path
         self.edit_history.mark_saved()
+        self._set_nuclear_measurement_unsaved(False)
         return saved_path
 
     def _do_save(
@@ -1497,6 +1510,7 @@ class AceTreeApp:
                     )
             if mark_saved:
                 self.edit_history.mark_saved()
+                self._set_nuclear_measurement_unsaved(False)
             logger.info("Saved nuclei to %s", path)
             return path
         except Exception:
@@ -4739,6 +4753,7 @@ class AceTreeApp:
             written = publish_nuclear_measurement(
                 prepared, result, self.manager, self.image_provider,
             )
+            self._set_nuclear_measurement_unsaved(True)
             self.current_expression_channel = at_channel
             self._refresh_nuclear_measurement_windows(written, output_dir)
 

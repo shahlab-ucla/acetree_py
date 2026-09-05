@@ -123,6 +123,10 @@ def test_nuclear_job_stages_privately_and_commits_only_current_outputs(qtbot, tm
     nucleus = manager.nuclei_record[0][0]
     previous_fields = (nucleus.rwraw, nucleus.rweight)
     app = AceTreeApp(manager, _provider(220, 440))
+    assert not app._nuclear_measurement_unsaved
+    # A cancelled/stale job must also preserve an earlier unsaved publication.
+    previous_unsaved = outcome != "success"
+    app._nuclear_measurement_unsaved = previous_unsaved
     app.current_expression_channel = 1
     window = QWidget()
     if outcome != "close":
@@ -155,6 +159,7 @@ def test_nuclear_job_stages_privately_and_commits_only_current_outputs(qtbot, tm
         assert {path: path.read_bytes() for path in written} == previous_files
         assert list(output.glob("*.tmp"))
         assert app.current_expression_channel == 1
+        assert app._nuclear_measurement_unsaved is previous_unsaved
 
         if outcome == "cancel":
             jobs.cancel()
@@ -178,12 +183,34 @@ def test_nuclear_job_stages_privately_and_commits_only_current_outputs(qtbot, tm
             assert app.current_expression_channel == 0
             assert b"220000" in written[0].read_bytes()
             assert b"440000" in written[1].read_bytes()
+            assert app._nuclear_measurement_unsaved
+            assert not app.edit_history.modified
+            assert not manager._config_dirty  # The correction stayed unchanged.
+
+            copy_path = tmp_path / "measurement-copy.zip"
+            assert app._do_save(copy_path, mark_saved=False) == copy_path
+            assert app._nuclear_measurement_unsaved
+            with monkeypatch.context() as failed_save:
+                from qtpy.QtWidgets import QMessageBox
+
+                def fail_write(*args, **kwargs):
+                    raise OSError("save unavailable")
+
+                failed_save.setattr(manager, "save", fail_write)
+                failed_save.setattr(QMessageBox, "critical", lambda *args: None)
+                assert app._do_save(tmp_path / "failed.zip") is None
+                assert app._nuclear_measurement_unsaved
+            save_path = tmp_path / "measurement-saved.zip"
+            assert app._do_save(save_path) == save_path
+            assert not app._nuclear_measurement_unsaved
+            assert not app.edit_history.modified
         else:
             assert not refreshed
             assert manager.expression_measurements is previous_store
             assert (nucleus.rwraw, nucleus.rweight) == previous_fields
             assert {path: path.read_bytes() for path in written} == previous_files
             assert app.current_expression_channel == 1
+            assert app._nuclear_measurement_unsaved is previous_unsaved
     finally:
         release.set()
         jobs.shutdown()

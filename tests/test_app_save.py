@@ -240,6 +240,7 @@ class TestSaveMethod:
         original = tmp_path / "original.zip"
         target = tmp_path / "new-location.zip"
         app = _make_app(zip_path=original)
+        app._nuclear_measurement_unsaved = True
         app.viewer = SimpleNamespace(
             window=SimpleNamespace(_qt_window=None)
         )
@@ -250,6 +251,7 @@ class TestSaveMethod:
         )
 
         assert app.save_as() == target
+        assert app._nuclear_measurement_unsaved is False
         assert app.manager.config.zip_file == target
         assert app._default_save_path == target
 
@@ -303,6 +305,7 @@ class TestSaveMethod:
         original = tmp_path / "original.zip"
         target = tmp_path / "new-location.zip"
         app = _make_app(zip_path=original)
+        app._nuclear_measurement_unsaved = True
         app.manager.config.config_file = config_path
         write_config_xml(app.manager.config, config_path)
         app.viewer = SimpleNamespace(window=SimpleNamespace(_qt_window=None))
@@ -313,6 +316,7 @@ class TestSaveMethod:
         )
 
         assert app.save_as() == target
+        assert app._nuclear_measurement_unsaved is False
 
         reopened = load_config(config_path)
         assert reopened.zip_file == target
@@ -331,6 +335,7 @@ class TestSaveMethod:
         original = tmp_path / "original.zip"
         target = tmp_path / "new-location.zip"
         app = _make_app(zip_path=original)
+        app._nuclear_measurement_unsaved = True
         app.manager.config.config_file = config_path
         write_config_xml(app.manager.config, config_path)
         app.edit_history.do(MoveNucleus(time=1, index=1, new_x=321))
@@ -348,6 +353,7 @@ class TestSaveMethod:
         )
 
         assert app.save_as() is None
+        assert app._nuclear_measurement_unsaved is True
 
         assert target.exists()  # Valid copy, but not the current dataset target.
         assert app.manager.config.zip_file == original
