@@ -44,6 +44,7 @@ from acetree_py.analysis.expression_dataset_repository import (
     NativeExpressionTrace,
 )
 from acetree_py.analysis.expression_measurements import (
+    EXPRESSION_MEASUREMENT_CACHE_VERSION,
     FrozenCellMeasurements,
     FrozenDatasetMeasurementCache,
     MeasuredExpressionAggregate,
@@ -191,6 +192,7 @@ class _FakeRepository:
                 at_channel=0,
                 channel_verified=True,
                 correction_verified=True,
+                measurement_algorithm_version=EXPRESSION_MEASUREMENT_CACHE_VERSION,
             ),
         )
 
@@ -296,7 +298,7 @@ class _FullCacheRepository(_FakeRepository):
             dataset_generation=status.generation,
             image_manifest_token=status.image_manifest_token,
             measured_at=f"2026-08-09T00:00:{self.cache_revision:02d}Z",
-            measurement_algorithm_version=1,
+            measurement_algorithm_version=EXPRESSION_MEASUREMENT_CACHE_VERSION,
             source_revision=status.generation,
             source_dependency_fingerprint="dependency",
             source_calibration=(1.0, 1.0, 3, 1.0),
@@ -1009,8 +1011,9 @@ def test_mixed_v2_preserves_fixed_row_only_for_its_captured_request(
     )
     qtbot.addWidget(window)
 
-    assert window._plot_data is not None
-    assert len(window._plot_data.aligned_traces) == 2
+    assert window._plot_data is None
+    assert "Recompute" in window._status_label.text()
+    assert not window._btn_export_csv.isEnabled()
     window._cell_combo.setEditText("ABp")
     assert window._plot_data is not None
     assert len(window._plot_data.aligned_traces) == 1
@@ -1021,8 +1024,9 @@ def test_mixed_v2_preserves_fixed_row_only_for_its_captured_request(
     )
     assert fixed_state.resolution == "acquisition_status"
     window._cell_combo.setEditText("ABa")
-    assert window._plot_data is not None
-    assert len(window._plot_data.aligned_traces) == 2
+    assert window._plot_data is None
+    assert "Recompute" in window._status_label.text()
+    assert not window._btn_export_csv.isEnabled()
     assert fixed_state.message.startswith("Fixed captured trace")
 
     window._cell_combo.setEditText("ABp")
@@ -1835,3 +1839,32 @@ def test_panel_actions_create_window_menu_when_napari_has_none(qtbot):
         for action in qt_window.menuBar().actions()
     )
     assert "new_expression_comparison" in app._panel_menu_actions
+
+
+def test_historical_measurement_cache_is_labeled_without_changing_values(qtbot, tmp_path):
+    from acetree_py.analysis.expression_comparison import ExpressionComparisonService, GridSpec
+    from acetree_py.analysis.expression_comparison_result import (
+        capture_expression_comparison_measurement_caches,
+    )
+
+    repository = _FullCacheRepository()
+    path = _xml(tmp_path, "historical-cache")
+    repository.load_dataset(path)
+    cache = replace(repository.prepare_recomputed_cache(path), measurement_algorithm_version=1)
+    dataset = cache.materialize_dataset("ABa", 0, "global")
+    spec = ExpressionComparisonService().build(
+        [dataset], cell_names=("ABa",), channel_key="measured_channel_1",
+        grid=GridSpec(step=1.0),
+    ).spec
+    result = capture_expression_comparison_measurement_caches(
+        [cache], spec,
+        cell_name="ABa", image_channel=0, correction_method="global",
+    )
+    window = ExpressionComparisonWindow(_app(), result=result)
+    qtbot.addWidget(window)
+    status = window._dataset_table.item(0, window.COL_STATUS).text()
+    assert "Historical measurements (algorithm 1)" in status
+    label = window._dataset_table.item(0, window.COL_CACHE).text()
+    assert "Historical cache (algorithm 1)" in label
+    assert window._plot_data.native_traces[0].values == result.datasets[0].traces[0].values
+    assert window._btn_export_csv.isEnabled()

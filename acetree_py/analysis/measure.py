@@ -134,6 +134,8 @@ def measure_nucleus(
     nuc: Nucleus,
     z_pix_res: float,
     annulus_scale: float = DEFAULT_ANNULUS_SCALE,
+    *,
+    plane_start: int = 1,
 ) -> tuple[int, int, int, int]:
     """Measure fluorescence inside and around a single nucleus.
 
@@ -149,6 +151,8 @@ def measure_nucleus(
         z_pix_res: Z / XY pixel resolution ratio.
         annulus_scale: Annulus outer-radius multiplier relative to the
             inner disk radius at each plane.  Default 1.5.
+        plane_start: Absolute Z coordinate of stack[0]. Defaults to 1;
+            explicitly use 0 for zero-origin coordinates.
 
     Returns:
         ``(sum_in, count_in, sum_ann, count_ann)`` as ints.  ``count_``
@@ -169,8 +173,9 @@ def measure_nucleus(
     # Z extent of the sphere, in plane units.  Java code walked all
     # planes; here we clamp to planes that could touch the sphere.
     half_z = radius / z_pix_res if z_pix_res > 0 else radius
-    z_lo = max(0, int(math.floor(nuc.z - half_z)))
-    z_hi = min(nz - 1, int(math.ceil(nuc.z + half_z)))
+    nuc_z = nuc.z - plane_start
+    z_lo = max(0, int(math.floor(nuc_z - half_z)))
+    z_hi = min(nz - 1, int(math.ceil(nuc_z + half_z)))
 
     sum_in = 0
     count_in = 0
@@ -178,7 +183,7 @@ def measure_nucleus(
     count_ann = 0
 
     for z in range(z_lo, z_hi + 1):
-        r_in = project_radius(nuc.z, z, radius, z_pix_res)
+        r_in = project_radius(nuc_z, z, radius, z_pix_res)
         if r_in <= 0:
             continue
         r_out = r_in * annulus_scale
@@ -205,6 +210,8 @@ def measure_timepoint(
     nuclei: list[Nucleus],
     z_pix_res: float,
     annulus_scale: float = DEFAULT_ANNULUS_SCALE,
+    *,
+    plane_start: int = 1,
 ) -> list[tuple[int, int, int, int]]:
     """Measure every nucleus at one timepoint.
 
@@ -215,13 +222,15 @@ def measure_timepoint(
             matches the input length (index-aligned).
         z_pix_res: Z / XY pixel resolution ratio.
         annulus_scale: Annulus outer-radius multiplier.
+        plane_start: Absolute Z coordinate of stack[0]. Defaults to 1;
+            explicitly use 0 for zero-origin coordinates.
 
     Returns:
         List of ``(sum_in, count_in, sum_ann, count_ann)`` tuples,
         one per input nucleus, index-aligned with ``nuclei``.
     """
     return [
-        measure_nucleus(stack, n, z_pix_res, annulus_scale)
+        measure_nucleus(stack, n, z_pix_res, annulus_scale, plane_start=plane_start)
         for n in nuclei
     ]
 
@@ -231,6 +240,8 @@ def measure_timepoint_with_blot(
     nuclei: list[Nucleus],
     z_pix_res: float,
     annulus_scale: float = DEFAULT_ANNULUS_SCALE,
+    *,
+    plane_start: int = 1,
 ) -> list[tuple[int, int, int, int, int, int]]:
     """Like :func:`measure_timepoint` but also computes **blot-corrected**
     annulus sums that exclude contaminating neighbor nuclei.
@@ -250,6 +261,8 @@ def measure_timepoint_with_blot(
         nuclei: Nucleus list for this timepoint (index-aligned output).
         z_pix_res: Z / XY pixel resolution ratio.
         annulus_scale: Annulus outer-radius multiplier.
+        plane_start: Absolute Z coordinate of stack[0]. Defaults to 1;
+            explicitly use 0 for zero-origin coordinates.
 
     Returns:
         Index-aligned list of
@@ -270,10 +283,11 @@ def measure_timepoint_with_blot(
             continue
         r = nuc.size / 2.0
         half_z = r / z_pix_res if z_pix_res > 0 else r
-        z_lo = max(0, int(math.floor(nuc.z - half_z)))
-        z_hi = min(nz - 1, int(math.ceil(nuc.z + half_z)))
+        nuc_z = nuc.z - plane_start
+        z_lo = max(0, int(math.floor(nuc_z - half_z)))
+        z_hi = min(nz - 1, int(math.ceil(nuc_z + half_z)))
         info.append({
-            "nuc": nuc,
+            "z": nuc_z,
             "radius": r,
             "cx": int(round(nuc.x)),
             "cy": int(round(nuc.y)),
@@ -296,7 +310,7 @@ def measure_timepoint_with_blot(
             if entry is None or not (entry["z_lo"] <= z <= entry["z_hi"]):
                 continue
             r_in = project_radius(
-                entry["nuc"].z, z, entry["radius"], z_pix_res,
+                entry["z"], z, entry["radius"], z_pix_res,
             )
             if r_in > 0:
                 disks.append((entry["cx"], entry["cy"], r_in))
@@ -325,12 +339,11 @@ def measure_timepoint_with_blot(
             results.append((0, 0, 0, 0, 0, 0))
             continue
 
-        nuc = entry["nuc"]
         cx, cy = entry["cx"], entry["cy"]
         sum_in = count_in = sum_ann = count_ann = sum_blot = count_blot = 0
 
         for z in range(entry["z_lo"], entry["z_hi"] + 1):
-            r_in = project_radius(nuc.z, z, entry["radius"], z_pix_res)
+            r_in = project_radius(entry["z"], z, entry["radius"], z_pix_res)
             if r_in <= 0:
                 continue
             r_out = r_in * annulus_scale

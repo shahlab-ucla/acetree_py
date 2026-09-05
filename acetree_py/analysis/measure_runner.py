@@ -44,6 +44,7 @@ from .expression_measurements import (
     NucleusGeometrySignature,
     expression_document_fingerprint,
     expression_measurement_calibration,
+    expression_measurement_plane_start,
     expression_measurement_dependency_fingerprint,
 )
 
@@ -72,6 +73,7 @@ class _MeasurementRun:
     source_fingerprint: str
     source_dependency_fingerprint: str
     source_calibration: tuple[float, float, int, float]
+    source_plane_start: int
 
 
 def measure_expression_set(
@@ -106,6 +108,7 @@ def measure_expression_set(
         source_revision=run.source_revision,
         source_dependency_fingerprint=run.source_dependency_fingerprint,
         source_calibration=run.source_calibration,
+        source_plane_start=run.source_plane_start,
     )
     if not _measurement_source_matches(manager, run):
         raise RuntimeError(
@@ -142,6 +145,7 @@ def measure_expression_family(
         source_revision=run.source_revision,
         source_dependency_fingerprint=run.source_dependency_fingerprint,
         source_calibration=run.source_calibration,
+        source_plane_start=run.source_plane_start,
     )
     return result
 
@@ -215,6 +219,7 @@ def run_measure(
     source_fingerprint = measurement.source_fingerprint
     source_dependency_fingerprint = measurement.source_dependency_fingerprint
     source_calibration = measurement.source_calibration
+    source_plane_start = measurement.source_plane_start
 
     staged_csvs = _stage_measure_csvs(
         manager,
@@ -275,6 +280,7 @@ def run_measure(
             source_revision=source_revision,
             source_dependency_fingerprint=source_dependency_fingerprint,
             source_calibration=source_calibration,
+            source_plane_start=source_plane_start,
         )
 
         # Building a large store can take long enough for a background caller
@@ -401,6 +407,7 @@ def _collect_measurement_run(
         expression_measurement_dependency_fingerprint(manager)
     )
     source_calibration = expression_measurement_calibration(manager)
+    source_plane_start = expression_measurement_plane_start(manager)
 
     method = manager._expr_corr if correction_method is None else correction_method
     if method not in RED_CORRECTIONS:
@@ -475,9 +482,12 @@ def _collect_measurement_run(
                         stack,
                         nuclei,
                         z_pix_res,
+                        plane_start=source_plane_start,
                     )
                 else:
-                    raw = measure_timepoint(stack, nuclei, z_pix_res)
+                    raw = measure_timepoint(
+                        stack, nuclei, z_pix_res, plane_start=source_plane_start
+                    )
                     tuples = [
                         (inner_sum, inner_count, ann_sum, ann_count, 0, 0)
                         for inner_sum, inner_count, ann_sum, ann_count in raw
@@ -504,6 +514,7 @@ def _collect_measurement_run(
         source_fingerprint=source_fingerprint,
         source_dependency_fingerprint=source_dependency_fingerprint,
         source_calibration=source_calibration,
+        source_plane_start=source_plane_start,
     )
     image_manifest_after = (
         image_source_manifest_token(
@@ -551,6 +562,7 @@ def _build_expression_measurement_set(
     source_revision: int,
     source_dependency_fingerprint: str,
     source_calibration: tuple[float, float, int, float],
+    source_plane_start: int,
 ) -> ExpressionMeasurementSet:
     """Retain every measured channel in a revision- and geometry-bound store."""
 
@@ -608,6 +620,7 @@ def _build_expression_measurement_set(
         source_revision=source_revision,
         source_dependency_fingerprint=source_dependency_fingerprint,
         source_calibration=source_calibration,
+        source_plane_start=source_plane_start,
         correction_method=method,
         at_channel=at_channel,
         channels=tuple(channels),
@@ -623,6 +636,7 @@ def _build_expression_measurement_family(
     source_revision: int,
     source_dependency_fingerprint: str,
     source_calibration: tuple[float, float, int, float],
+    source_plane_start: int,
 ) -> ExpressionMeasurementFamily:
     """Build one aggregate store from an all-corrections measurement pass."""
 
@@ -676,6 +690,7 @@ def _build_expression_measurement_family(
         source_revision=source_revision,
         source_dependency_fingerprint=source_dependency_fingerprint,
         source_calibration=source_calibration,
+        source_plane_start=source_plane_start,
         channels=tuple(channels),
         geometries=geometries,
     )

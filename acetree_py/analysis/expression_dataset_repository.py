@@ -138,6 +138,7 @@ class ExpressionTraceProvenance:
     at_channel: int | None
     channel_verified: bool
     correction_verified: bool
+    measurement_algorithm_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,6 +533,11 @@ class ExpressionDatasetRepository:
                     at_channel=0 if family is not None else measurement.at_channel,
                     channel_verified=True,
                     correction_verified=True,
+                    measurement_algorithm_version=(
+                        family.measurement_algorithm_version
+                        if family is not None
+                        else measurement.measurement_algorithm_version
+                    ),
                 ),
                 dataset_snapshot_token=self._snapshot_token(entry),
                 dataset_generation=entry.generation,

@@ -905,3 +905,48 @@ def test_stack_tiff_all_channel_fast_path_rejects_rgb_as_z_stack(tmp_path: Path)
 
     with pytest.raises(ValueError, match="RGB TIFF page"):
         provider.get_all_channel_stacks(1)
+
+
+@pytest.mark.parametrize("plane_start", [1, 7])
+@pytest.mark.parametrize("correction_method", ["none", "blot"])
+def test_absolute_first_plane_measurement_and_origin_freshness(plane_start, correction_method):
+    """An asymmetric stack binds raw/blot sampling to the dataset's Z origin."""
+    from acetree_py.analysis.expression_measurements import freeze_expression_measurement_family
+
+    manager = NucleiManager()
+    manager.config = AceTreeConfig(
+        xy_res=1.0, z_res=2.0, plane_start=plane_start, plane_end=plane_start + 2,
+    )
+    manager.movie.xy_res = 1.0
+    manager.movie.z_res = 2.0
+    manager.movie.num_planes = 3
+    nucleus = Nucleus(index=1, x=4, y=4, z=float(plane_start), size=2, status=1, identity="A")
+    manager.nuclei_record = [[nucleus]]
+    manager.set_all_successors()
+    manager.process(do_identity=False)
+    stack = np.full((3, 9, 9), 2000, dtype=np.uint16)
+    stack[0] = 10
+    for y, x in ((4, 4), (3, 4), (5, 4), (4, 3), (4, 5)):
+        stack[0, y, x] = 100
+    provider = NumpyProvider(stack[np.newaxis, ...])
+
+    measured = measure_expression_set(manager, provider, correction_method=correction_method)
+    family = measure_expression_family(manager, provider)
+    sample = measured.sample(manager, 0, 1, nucleus)
+    assert sample.raw == pytest.approx(100 * SCALE)
+    assert sample.value == pytest.approx((100 if correction_method == "none" else 90) * SCALE)
+    assert family.corrected_value(manager, 0, 1, nucleus, correction_method) == sample.value
+    assert measured.source_plane_start == family.source_plane_start == plane_start
+    frozen = freeze_expression_measurement_family(
+        manager, family, dataset_id="origin", source_uri="origin.xml",
+        source_fingerprint="source", snapshot_token="snapshot", dataset_generation=0,
+        image_manifest_token=None, measured_at="2026-09-05T00:00:00Z",
+    )
+    assert frozen.measurement_algorithm_version == 2
+    assert frozen.is_current(manager)
+    manager.config.plane_start += 1
+    assert not measured.is_current(manager)
+    assert not family.is_current(manager)
+    assert not measured.dependencies_current(manager)
+    assert not family.dependencies_current(manager, correction_method)
+    assert not frozen.is_current(manager)

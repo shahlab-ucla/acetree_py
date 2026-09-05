@@ -24,7 +24,7 @@ from ..core.nucleus import RED_CORRECTIONS
 from .expression_plot import ExpressionChannel
 
 
-EXPRESSION_MEASUREMENT_CACHE_VERSION = 1
+EXPRESSION_MEASUREMENT_CACHE_VERSION = 2
 
 if TYPE_CHECKING:
     from ..core.cell import Cell
@@ -143,6 +143,8 @@ class ExpressionMeasurementFamily:
     source_calibration: tuple[float, float, int, float]
     channels: tuple[MeasuredExpressionAggregateChannel, ...]
     geometries: Mapping[tuple[int, int], NucleusGeometrySignature]
+    source_plane_start: int = 1
+    measurement_algorithm_version: int = EXPRESSION_MEASUREMENT_CACHE_VERSION
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "channels", tuple(self.channels))
@@ -157,7 +159,11 @@ class ExpressionMeasurementFamily:
         return tuple(RED_CORRECTIONS)
 
     def is_current(self, manager: NucleiManager) -> bool:
-        return self.source_revision == int(getattr(manager, "data_revision", 0))
+        return (
+            self.source_revision == int(getattr(manager, "data_revision", 0))
+            and self.source_plane_start == expression_measurement_plane_start(manager)
+            and self.measurement_algorithm_version == EXPRESSION_MEASUREMENT_CACHE_VERSION
+        )
 
     def dependencies_current(
         self,
@@ -178,7 +184,10 @@ class ExpressionMeasurementFamily:
                 f"Unknown correction_method={correction_method!r}; "
                 f"choose one of: {choices}"
             )
-        if expression_measurement_calibration(manager) != self.source_calibration:
+        if (
+            expression_measurement_calibration(manager) != self.source_calibration
+            or expression_measurement_plane_start(manager) != self.source_plane_start
+        ):
             return False
         if correction_method != "blot":
             return True
@@ -367,7 +376,8 @@ class FrozenDatasetMeasurementCache:
         """Return whether every dependency of this full cache still matches."""
 
         return (
-            self.source_revision == int(getattr(manager, "data_revision", 0))
+            self.measurement_algorithm_version == EXPRESSION_MEASUREMENT_CACHE_VERSION
+            and self.source_revision == int(getattr(manager, "data_revision", 0))
             and self.source_calibration == expression_measurement_calibration(manager)
             and self.source_dependency_fingerprint
             == expression_measurement_dependency_fingerprint(manager)
@@ -529,6 +539,8 @@ class ExpressionMeasurementSet:
     channels: tuple[MeasuredExpressionChannel, ...]
     geometries: Mapping[tuple[int, int], NucleusGeometrySignature]
     csv_paths: tuple[Path, ...] = ()
+    source_plane_start: int = 1
+    measurement_algorithm_version: int = EXPRESSION_MEASUREMENT_CACHE_VERSION
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "channels", tuple(self.channels))
@@ -546,7 +558,11 @@ class ExpressionMeasurementSet:
     def is_current(self, manager: NucleiManager) -> bool:
         """Return whether this result belongs to the manager's current edit."""
 
-        return self.source_revision == int(getattr(manager, "data_revision", 0))
+        return (
+            self.source_revision == int(getattr(manager, "data_revision", 0))
+            and self.source_plane_start == expression_measurement_plane_start(manager)
+            and self.measurement_algorithm_version == EXPRESSION_MEASUREMENT_CACHE_VERSION
+        )
 
     def dependencies_current(self, manager: NucleiManager) -> bool:
         """Return whether non-revision measurement inputs still match.
@@ -559,7 +575,10 @@ class ExpressionMeasurementSet:
         sample lookup.
         """
 
-        if expression_measurement_calibration(manager) != self.source_calibration:
+        if (
+            expression_measurement_calibration(manager) != self.source_calibration
+            or expression_measurement_plane_start(manager) != self.source_plane_start
+        ):
             return False
         if self.correction_method != "blot":
             return True
@@ -755,7 +774,7 @@ def freeze_expression_measurement_family(
         dataset_generation=dataset_generation,
         image_manifest_token=image_manifest_token,
         measured_at=measured_at,
-        measurement_algorithm_version=EXPRESSION_MEASUREMENT_CACHE_VERSION,
+        measurement_algorithm_version=family.measurement_algorithm_version,
         source_revision=family.source_revision,
         source_dependency_fingerprint=family.source_dependency_fingerprint,
         source_calibration=family.source_calibration,
@@ -823,6 +842,8 @@ def expression_document_fingerprint(manager: NucleiManager) -> str:
                 float(getattr(manager.movie, "z_res", 0.0)),
                 int(getattr(manager.movie, "num_planes", 0)),
                 float(getattr(manager, "z_pix_res", 0.0)),
+                expression_measurement_plane_start(manager),
+                EXPRESSION_MEASUREMENT_CACHE_VERSION,
             )
         ).encode("ascii")
     )
@@ -857,6 +878,12 @@ def expression_document_fingerprint(manager: NucleiManager) -> str:
     return digest.hexdigest()
 
 
+def expression_measurement_plane_start(manager: NucleiManager) -> int:
+    """Return the absolute Z coordinate of the first image plane."""
+
+    return int(getattr(getattr(manager, "config", None), "plane_start", 1))
+
+
 def expression_measurement_calibration(
     manager: NucleiManager,
 ) -> tuple[float, float, int, float]:
@@ -880,7 +907,13 @@ def expression_measurement_dependency_fingerprint(manager: NucleiManager) -> str
     """
 
     digest = hashlib.sha256()
-    digest.update(repr(expression_measurement_calibration(manager)).encode("ascii"))
+    digest.update(
+        repr((
+            expression_measurement_calibration(manager),
+            expression_measurement_plane_start(manager),
+            EXPRESSION_MEASUREMENT_CACHE_VERSION,
+        )).encode("ascii")
+    )
     digest.update(b"\n")
     digest.update(f"frames:{len(manager.nuclei_record)}\n".encode("ascii"))
     for t0, nuclei in enumerate(manager.nuclei_record):
@@ -986,6 +1019,7 @@ __all__ = [
     "expression_cells_fingerprint",
     "expression_document_fingerprint",
     "expression_measurement_calibration",
+    "expression_measurement_plane_start",
     "expression_measurement_dependency_fingerprint",
     "freeze_expression_measurement_family",
     "legacy_expression_coverage",

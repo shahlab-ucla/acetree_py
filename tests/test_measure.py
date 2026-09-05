@@ -119,6 +119,7 @@ class TestMeasureNucleus:
 
         sum_in, count_in, sum_ann, count_ann = measure_nucleus(
             stack, nuc, z_pix_res,
+            plane_start=0,
         )
 
         # Every pixel in the disk should be ~1000; annulus should be background.
@@ -140,6 +141,7 @@ class TestMeasureNucleus:
 
         sum_in, count_in, sum_ann, count_ann = measure_nucleus(
             stack, nuc, 1.0,
+            plane_start=0,
         )
         assert count_in > 0
         assert count_ann > 0
@@ -150,24 +152,24 @@ class TestMeasureNucleus:
         """status<1 ⇒ all zeros returned."""
         stack = np.ones((5, 32, 32), dtype=np.uint16) * 500
         nuc = _make_nucleus(status=-1)
-        assert measure_nucleus(stack, nuc, 1.0) == (0, 0, 0, 0)
+        assert measure_nucleus(stack, nuc, 1.0, plane_start=0) == (0, 0, 0, 0)
 
     def test_zero_size_returns_zero(self):
         stack = np.ones((5, 32, 32), dtype=np.uint16) * 500
         nuc = _make_nucleus(size=0)
-        assert measure_nucleus(stack, nuc, 1.0) == (0, 0, 0, 0)
+        assert measure_nucleus(stack, nuc, 1.0, plane_start=0) == (0, 0, 0, 0)
 
     def test_requires_3d_stack(self):
         stack = np.zeros((32, 32), dtype=np.uint16)
         nuc = _make_nucleus()
         with pytest.raises(ValueError):
-            measure_nucleus(stack, nuc, 1.0)
+            measure_nucleus(stack, nuc, 1.0, plane_start=0)
 
     def test_offscreen_nucleus(self):
         """Nucleus centered outside image returns mostly empty measurement."""
         stack = np.ones((5, 32, 32), dtype=np.uint16) * 100
         nuc = _make_nucleus(x=500, y=500, z=2.0, size=16)
-        sum_in, count_in, _, _ = measure_nucleus(stack, nuc, 1.0)
+        sum_in, count_in, _, _ = measure_nucleus(stack, nuc, 1.0, plane_start=0)
         # The disk bounding box is entirely outside the image bounds, so
         # count should be zero.
         assert count_in == 0
@@ -185,7 +187,7 @@ class TestMeasureTimepoint:
             _make_nucleus(index=2, x=20, y=20, z=2.0, size=8, status=-1),
             _make_nucleus(index=3, x=10, y=10, z=2.0, size=8),
         ]
-        out = measure_timepoint(stack, nuclei, 1.0)
+        out = measure_timepoint(stack, nuclei, 1.0, plane_start=0)
         assert len(out) == 3
         # Dead nucleus returns zeros
         assert out[1] == (0, 0, 0, 0)
@@ -195,7 +197,7 @@ class TestMeasureTimepoint:
 
     def test_empty_list(self):
         stack = np.ones((5, 32, 32), dtype=np.uint16)
-        assert measure_timepoint(stack, [], 1.0) == []
+        assert measure_timepoint(stack, [], 1.0, plane_start=0) == []
 
 
 # ── measure_timepoint_with_blot ────────────────────────────────────
@@ -213,7 +215,7 @@ class TestMeasureTimepointWithBlot:
             _make_nucleus(index=1, x=16, y=16, z=2.0, size=8),
             _make_nucleus(index=2, x=20, y=20, z=2.0, size=8, status=-1),
         ]
-        out = measure_timepoint_with_blot(stack, nuclei, 1.0)
+        out = measure_timepoint_with_blot(stack, nuclei, 1.0, plane_start=0)
         assert len(out) == 2
         # Each tuple has 6 fields
         assert all(len(t) == 6 for t in out)
@@ -232,7 +234,7 @@ class TestMeasureTimepointWithBlot:
             value_in=1000, value_out=50,
         )
         nuc = _make_nucleus(index=1, x=32, y=32, z=5.0, size=16)
-        out = measure_timepoint_with_blot(stack, [nuc], 1.0)
+        out = measure_timepoint_with_blot(stack, [nuc], 1.0, plane_start=0)
         sum_in, count_in, sum_ann, count_ann, sum_blot, count_blot = out[0]
         # With one nucleus, blot annulus == global annulus
         assert sum_ann == sum_blot
@@ -276,7 +278,7 @@ class TestMeasureTimepointWithBlot:
         target = _make_nucleus(index=1, x=32, y=40, z=5.0, size=16)
         neighbor = _make_nucleus(index=2, x=44, y=40, z=5.0, size=16)
 
-        out = measure_timepoint_with_blot(stack, [target, neighbor], 1.0)
+        out = measure_timepoint_with_blot(stack, [target, neighbor], 1.0, plane_start=0)
         sum_in, count_in, sum_ann, count_ann, sum_blot, count_blot = out[0]
 
         # Sanity: interior is bright
@@ -308,7 +310,7 @@ class TestMeasureTimepointWithBlot:
         # Two nuclei, same Z plane, annuli overlapping
         n1 = _make_nucleus(index=1, x=20, y=24, z=3.0, size=16)
         n2 = _make_nucleus(index=2, x=32, y=24, z=3.0, size=16)
-        out = measure_timepoint_with_blot(stack, [n1, n2], 1.0)
+        out = measure_timepoint_with_blot(stack, [n1, n2], 1.0, plane_start=0)
         for row in out:
             _, _, _, count_ann, _, count_blot = row
             assert count_blot <= count_ann
@@ -381,11 +383,11 @@ def manager_2tp_1nuc() -> NucleiManager:
 
     # Two timepoints, one nucleus at each — both named "ABa" via pred/succ link
     n1 = Nucleus(
-        index=1, x=32, y=32, z=5.0, size=16, status=1,
+        index=1, x=32, y=32, z=6.0, size=16, status=1,
         identity="ABa", predecessor=-1, successor1=1, successor2=-1,
     )
     n2 = Nucleus(
-        index=1, x=32, y=32, z=5.0, size=16, status=1,
+        index=1, x=32, y=32, z=6.0, size=16, status=1,
         identity="ABa", predecessor=1, successor1=-1, successor2=-1,
     )
     mgr.nuclei_record = [[n1], [n2]]
@@ -452,11 +454,11 @@ def test_run_measure_blot_correction_writes_rwcorr3(tmp_path: Path):
 
     # Two neighboring nuclei sharing a plane so their annuli overlap.
     n1 = Nucleus(
-        index=1, x=32, y=40, z=5.0, size=16, status=1,
+        index=1, x=32, y=40, z=6.0, size=16, status=1,
         identity="A", predecessor=-1, successor1=-1, successor2=-1,
     )
     n2 = Nucleus(
-        index=2, x=44, y=40, z=5.0, size=16, status=1,
+        index=2, x=44, y=40, z=6.0, size=16, status=1,
         identity="B", predecessor=-1, successor1=-1, successor2=-1,
     )
     mgr.nuclei_record = [[n1, n2]]
@@ -508,7 +510,7 @@ def test_run_measure_blot_matches_global_when_isolated(tmp_path: Path):
     mgr.movie.xy_res = 1.0
     mgr.movie.z_res = 1.0
     n1 = Nucleus(
-        index=1, x=32, y=32, z=5.0, size=16, status=1,
+        index=1, x=32, y=32, z=6.0, size=16, status=1,
         identity="A", predecessor=-1, successor1=-1, successor2=-1,
     )
     mgr.nuclei_record = [[n1]]

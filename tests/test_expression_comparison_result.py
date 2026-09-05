@@ -850,3 +850,26 @@ def test_writer_rejects_oversized_cache_before_replacing_last_good(
 
     assert destination.read_text(encoding="utf-8") == "last-good\n"
     assert list(tmp_path.glob(".bounded.aceexpr.*.tmp")) == []
+
+
+def test_historical_cache_round_trip_and_corrected_comparison_boundary(tmp_path):
+    legacy = _measurement_cache("legacy")
+    original = _cache_capture(legacy)
+    destination = tmp_path / "historical.aceexpr"
+    save_expression_comparison_result(destination, original)
+    before = destination.read_bytes()
+    reopened = load_expression_comparison_result(destination)
+    assert reopened.measurement_caches[0].measurement_algorithm_version == 1
+    assert reopened.measurement_caches[0].channels == legacy.channels
+    historical = build_expression_comparison_data(reopened)
+    assert historical.native_traces[0].values == (90.0, 100.0)
+    assert destination.read_bytes() == before
+
+    corrected = replace(_measurement_cache("corrected"), measurement_algorithm_version=2)
+    mixed = _cache_capture(legacy, corrected)
+    with pytest.raises(ValueError, match="Recompute.*exclude"):
+        build_expression_comparison_data(mixed)
+    # Keeping the historical row in a portable set does not prevent selecting
+    # only the corrected dataset for a new comparison.
+    data = build_expression_comparison_data(mixed, included_dataset_ids=("corrected",))
+    assert data.native_traces[0].values == (90.0, 100.0)

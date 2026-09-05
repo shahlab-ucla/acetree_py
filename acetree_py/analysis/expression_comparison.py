@@ -565,6 +565,13 @@ class ExpressionComparisonService:
                     )
                 )
 
+        _validate_measurement_algorithms(
+            datasets,
+            {
+                trace.dataset_id for trace in native
+                if any(value is not None for value in trace.values)
+            },
+        )
         resolved_units = {trace.channel_unit for trace in native}
         if channel_unit is not None:
             incompatible = {unit for unit in resolved_units if unit != channel_unit}
@@ -1264,6 +1271,39 @@ def _provenance_export_values(source: DatasetProvenance) -> dict[str, object]:
     }
 
 
+def measurement_algorithm_version(provenance: DatasetProvenance) -> int | None:
+    """Read recorded algorithm provenance without upgrading historical values."""
+
+    value = dict(provenance.metadata).get("measurement_algorithm_version")
+    try:
+        version = int(value)
+    except (TypeError, ValueError):
+        return None
+    return version if version > 0 else None
+
+
+def _validate_measurement_algorithms(
+    datasets: tuple[ExpressionDataset, ...],
+    numeric_dataset_ids: set[str],
+) -> None:
+    versions = {
+        measurement_algorithm_version(dataset.provenance)
+        for dataset in datasets
+        if dataset.provenance.dataset_id in numeric_dataset_ids
+    }
+    # Algorithm 2 introduced absolute-plane sampling. Unknown and algorithm-1
+    # captures remain readable on their own, but their numbers cannot be pooled
+    # with corrected measurements (or measurements from a different algorithm).
+    if len(versions) > 1 and any(
+        version is not None and version >= 2 for version in versions
+    ):
+        raise ValueError(
+            "Measurement algorithms differ: corrected measurements cannot be "
+            "compared with historical or unversioned values. Recompute the "
+            "included datasets together, or exclude the incompatible rows."
+        )
+
+
 def _format_optional(value: float | None) -> str:
     return "" if value is None else _format_float(value)
 
@@ -1298,4 +1338,5 @@ __all__ = [
     "TraceAvailability",
     "TraceSmoother",
     "export_expression_comparison_tidy_csv",
+    "measurement_algorithm_version",
 ]

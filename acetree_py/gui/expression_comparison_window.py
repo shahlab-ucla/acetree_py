@@ -78,6 +78,7 @@ from ..analysis.expression_comparison import (
     SummarySpec,
     TraceAvailability,
     export_expression_comparison_tidy_csv,
+    measurement_algorithm_version,
 )
 from ..analysis.expression_comparison_result import (
     APPEARANCE_INCLUDED_DATASET_IDS,
@@ -1392,7 +1393,16 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
             color_item.setToolTip("Double-click to choose a dataset trace color")
             self._dataset_table.setItem(row, self.COL_COLOR, color_item)
 
-            status_item = QTableWidgetItem(state.message)
+            status_text = state.message
+            captured = state.materialized_dataset or state.frozen_dataset
+            if captured is not None and captured.traces:
+                version = measurement_algorithm_version(captured.provenance)
+                if version is None or version < EXPRESSION_MEASUREMENT_CACHE_VERSION:
+                    algorithm = "unrecorded" if version is None else str(version)
+                    status_text = (
+                        f"Historical measurements (algorithm {algorithm}) — {status_text}"
+                    )
+            status_item = QTableWidgetItem(status_text)
             status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
             status_item.setData(Qt.UserRole, key)
             if state.repository_status is not None:
@@ -2751,6 +2761,11 @@ class ExpressionComparisonWindow(QWidget):  # type: ignore[misc]
                 ("channel_verified", str(provenance.channel_verified).lower()),
                 ("correction_verified", str(provenance.correction_verified).lower()),
             )
+            if provenance.measurement_algorithm_version is not None:
+                metadata += ((
+                    "measurement_algorithm_version",
+                    str(provenance.measurement_algorithm_version),
+                ),)
         if self._source_mode() == "saved" and self._legacy_ack.isChecked():
             metadata += (("legacy_acknowledgement", "true"),)
         return ExpressionDataset(
@@ -3605,8 +3620,14 @@ def _cache_label(status: ExpressionDatasetStatus) -> str:
 
 
 def _measurement_cache_label(cache: Any) -> str:
+    version = cache.measurement_algorithm_version
+    prefix = (
+        f"Historical cache (algorithm {version})"
+        if version < EXPRESSION_MEASUREMENT_CACHE_VERSION
+        else f"Full cache (algorithm {version})"
+    )
     return (
-        f"Full cache: {len(cache.cell_names)} cells · "
+        f"{prefix}: {len(cache.cell_names)} cells · "
         f"{len(cache.channels)} channels · "
         f"{len(cache.available_corrections)} corrections · {cache.measured_at}"
     )

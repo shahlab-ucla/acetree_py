@@ -207,11 +207,11 @@ class ExpressionComparisonResult:
                 )
             if (
                 cache.measurement_algorithm_version
-                != EXPRESSION_MEASUREMENT_CACHE_VERSION
+                not in (1, EXPRESSION_MEASUREMENT_CACHE_VERSION)
             ):
                 raise ValueError(
                     "unsupported frozen measurement algorithm version "
-                    f"{cache.measurement_algorithm_version}; expected "
+                    f"{cache.measurement_algorithm_version}; expected 1 or "
                     f"{EXPRESSION_MEASUREMENT_CACHE_VERSION}"
                 )
         object.__setattr__(self, "measurement_caches", caches)
