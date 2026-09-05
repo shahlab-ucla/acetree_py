@@ -57,6 +57,7 @@ class _ApplicationPlan:
     append_order: tuple[_NodeKey, ...]
     arcs: tuple[tuple[_NodeKey, _NodeKey], ...]
     detection_mapping: dict[str, NucleusLocation]
+    changed_sources: tuple[_NodeKey, ...]
     changed: bool
 
 
@@ -79,8 +80,8 @@ class ApplyTrackingProposal(EditCommand):
     calibration: Calibration
 
     _original_record_len: int = field(default=0, init=False)
-    _original_frame_lengths: list[int] = field(default_factory=list, init=False)
-    _existing_snapshots: list[tuple[Nucleus, Nucleus]] = field(
+    _original_frame_lengths: dict[int, int] = field(default_factory=dict, init=False)
+    _successor_snapshots: list[tuple[Nucleus, int, int]] = field(
         default_factory=list, init=False
     )
     _detection_mapping: dict[str, NucleusLocation] = field(
@@ -90,7 +91,9 @@ class ApplyTrackingProposal(EditCommand):
     _noop: bool = field(default=False, init=False)
 
     def execute(self, nuclei_record: NucleiRecord) -> None:
-        self._capture_snapshot(nuclei_record)
+        self._applied = False
+        self._detection_mapping = {}
+        self._noop = False
         plan = _build_application_plan(self.result, self.calibration, nuclei_record)
         self._detection_mapping = dict(plan.detection_mapping)
         self._noop = not plan.changed
@@ -98,6 +101,7 @@ class ApplyTrackingProposal(EditCommand):
             self._applied = True
             return
 
+        self._capture_snapshot(nuclei_record, plan)
         self._mark_rollback_ready()
         try:
             _apply_plan(plan, nuclei_record)
@@ -109,9 +113,10 @@ class ApplyTrackingProposal(EditCommand):
         self._applied = True
 
     def undo(self, nuclei_record: NucleiRecord) -> None:
-        if not self._existing_snapshots and not self._original_frame_lengths:
+        if not self._applied:
             return
-        self._restore_snapshot(nuclei_record)
+        if not self._noop:
+            self._restore_snapshot(nuclei_record)
         self._detection_mapping = {}
         self._applied = False
 
@@ -134,26 +139,30 @@ class ApplyTrackingProposal(EditCommand):
             raise RuntimeError("The tracking proposal is not currently applied")
         return dict(self._detection_mapping)
 
-    def _capture_snapshot(self, nuclei_record: NucleiRecord) -> None:
+    def _capture_snapshot(self, nuclei_record: NucleiRecord, plan: _ApplicationPlan) -> None:
         self._original_record_len = len(nuclei_record)
-        self._original_frame_lengths = [len(frame) for frame in nuclei_record]
-        self._existing_snapshots = [
-            (nucleus, nucleus.copy())
-            for frame in nuclei_record
-            for nucleus in frame
-        ]
-        self._detection_mapping = {}
-        self._applied = False
-        self._noop = False
+        appended_frames = {plan.nodes[key].frame - 1 for key in plan.append_order}
+        self._original_frame_lengths = {
+            frame: len(nuclei_record[frame])
+            for frame in appended_frames
+            if frame < self._original_record_len
+        }
+        self._successor_snapshots = []
+        for key in plan.changed_sources:
+            node = plan.nodes[key]
+            nucleus = _existing_nucleus(nuclei_record, node.frame, node.index)
+            self._successor_snapshots.append(
+                (nucleus, nucleus.successor1, nucleus.successor2)
+            )
 
     def _restore_snapshot(self, nuclei_record: NucleiRecord) -> None:
-        # Restore fields in place so external GUI/tree references to curated
-        # nuclei remain valid after undo.
-        for current, saved in self._existing_snapshots:
-            current.__dict__.clear()
-            current.__dict__.update(saved.__dict__)
+        # Validation permits only successor additions on existing nuclei.
+        # Keep their object identity and every field outside that mutation.
+        for nucleus, successor1, successor2 in self._successor_snapshots:
+            nucleus.successor1 = successor1
+            nucleus.successor2 = successor2
 
-        for frame_index, old_length in enumerate(self._original_frame_lengths):
+        for frame_index, old_length in self._original_frame_lengths.items():
             if frame_index < len(nuclei_record):
                 del nuclei_record[frame_index][old_length:]
         del nuclei_record[self._original_record_len:]
@@ -241,13 +250,14 @@ def _build_application_plan(
         detection_keys[detection_id] = key
         detection_mapping[detection_id] = location
 
-    next_indices = {
-        frame: len(nuclei_record[frame - 1])
-        for frame in range(1, len(nuclei_record) + 1)
-    }
+    next_indices: dict[int, int] = {}
 
     def allocate(frame: int) -> int:
-        next_indices[frame] = next_indices.get(frame, 0) + 1
+        if frame not in next_indices:
+            next_indices[frame] = (
+                len(nuclei_record[frame - 1]) if frame <= len(nuclei_record) else 0
+            )
+        next_indices[frame] += 1
         return next_indices[frame]
 
     append_order: list[_NodeKey] = []
@@ -375,6 +385,7 @@ def _build_application_plan(
         arcs.append((previous_key, target_key))
 
     changed = bool(append_order)
+    changed_sources: set[_NodeKey] = set()
     simulated_predecessors: dict[NucleusLocation, NucleusLocation | None] = {}
     simulated_successors: dict[NucleusLocation, set[NucleusLocation]] = {}
     for node in nodes.values():
@@ -424,6 +435,8 @@ def _build_application_plan(
                     "already has two successors"
                 )
             successors.add(target_location)
+            if source_node.existing:
+                changed_sources.add(source_key)
             changed = True
 
     return _ApplicationPlan(
@@ -431,6 +444,7 @@ def _build_application_plan(
         append_order=tuple(append_order),
         arcs=tuple(arcs),
         detection_mapping=detection_mapping,
+        changed_sources=tuple(sorted(changed_sources)),
         changed=changed,
     )
 

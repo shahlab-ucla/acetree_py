@@ -362,3 +362,63 @@ def test_proposal_cannot_reparent_an_existing_anchored_nucleus():
 
     assert existing_child.predecessor == 1
     assert old_parent.successor1 == 1
+
+
+def test_partial_application_rolls_back_touched_links_rows_and_new_frames(monkeypatch):
+    import acetree_py.tracking.integration as integration
+
+    seed = _seed()
+    tombstone = Nucleus(index=1, status=-1, identity="deleted", weight=23)
+    unrelated = Nucleus(index=2, status=1, identity="curated", weight=91)
+    record = [[seed], [tombstone, unrelated], []]
+    before = deepcopy(record)
+    originals = [seed, tombstone, unrelated]
+    result = _result(
+        (_detection("seed", 1, 5.0), _detection("last", 4, 8.0)),
+        (TrackEdge("seed", "last", 1.0, kind="gap"),),
+        {"seed": (1, 1)},
+    )
+    command = ApplyTrackingProposal(result, CALIBRATION)
+    history = EditHistory(record)
+    apply_plan = integration._apply_plan
+
+    def fail_after_links(plan, target):
+        apply_plan(plan, target)
+        raise RuntimeError("interrupted after link installation")
+
+    monkeypatch.setattr(integration, "_apply_plan", fail_after_links)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        history.do(command)
+    assert record == before
+    assert not history.can_undo and not history.modified
+    with pytest.raises(RuntimeError, match="not currently applied"):
+        _ = command.detection_mapping
+
+    monkeypatch.setattr(integration, "_apply_plan", apply_plan)
+    history.do(command)
+    accepted = deepcopy(record)
+    mapping = command.detection_mapping
+    for operation in (None, history.redo):
+        if operation:
+            operation()
+        assert record == accepted and command.detection_mapping == mapping
+        history.undo()
+        assert record == before
+        assert all(actual is original for actual, original in zip(
+            [n for frame in record for n in frame], originals, strict=True
+        ))
+
+
+def test_acceptance_into_an_empty_record_undoes_and_redoes():
+    record = []
+    command = ApplyTrackingProposal(
+        _result((_detection("new", 2, 6.0),), ()), CALIBRATION,
+    )
+    history = EditHistory(record)
+    history.do(command)
+    accepted = deepcopy(record)
+    assert [len(frame) for frame in record] == [0, 1]
+    history.undo()
+    assert record == []
+    history.redo()
+    assert record == accepted

@@ -96,16 +96,16 @@ NUCZINDEXOFFSET = 0
 class TrackingAnalysisSnapshot:
     """Immutable document context consumed by a background tracking run.
 
-    Every nucleus is copied on the GUI thread before the worker starts. The
-    provider is a template: built-in providers are cloned with independent
-    file-handle caches in the worker. The monotonic change counter catches
+    Selected-forward runs copy nuclei on the GUI thread before the worker
+    starts; global runs need no nuclei copy. Built-in providers are cloned
+    with independent file-handle caches in the worker. The change counter catches
     edit→undo sequences that return to the same history revision.
     """
 
     request: TrackingRequest
     image_provider: ImageProvider
     calibration: Calibration
-    nuclei_record: list[list[Nucleus]]
+    nuclei_record: list[list[Nucleus]] | None
     revision: int
     change_counter: int
 
@@ -680,10 +680,12 @@ class AceTreeApp:
             z_um=config.z_res,
             plane_start=config.plane_start,
         )
-        nuclei_snapshot = [
-            [nucleus.copy() for nucleus in frame]
-            for frame in self.manager.nuclei_record
-        ]
+        nuclei_snapshot = None
+        if request.scope.kind == "selected_forward":
+            nuclei_snapshot = [
+                [nucleus.copy() for nucleus in frame]
+                for frame in self.manager.nuclei_record
+            ]
         return TrackingAnalysisSnapshot(
             request=request,
             image_provider=self.image_provider,
