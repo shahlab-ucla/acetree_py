@@ -56,3 +56,9 @@ Agent gate: ROI UI models, viewer integration, and Objects panel: **24 passed**.
 ### GUI environment
 
 Installed tested napari 0.6.6 in isolated workspace .alpha-v2-venv. Hidden Windows-backend real-OpenGL canvas probe succeeded (nonuniform synthetic image, RGB standard deviation 82.3). Offscreen plugin alone cannot render OpenGL.
+
+### A2 — stable image channel identity
+
+Explicit channel sets reject missing paths, gaps, unreadable samples, or unparseable time patterns instead of renumbering survivors. The app can still open nuclei and reports the source error. One missing-first-channel/recovery scenario checks both scientific identities.
+
+`pytest tests/test_image_split.py tests/test_image_provider.py tests/test_interleaved_tiff.py tests/test_gui_app.py tests/test_cli.py -q`: **214 passed**, 14 existing TIFF warnings in 6.13s.

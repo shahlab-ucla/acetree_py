@@ -683,3 +683,40 @@ class TestAutoDetectFormat:
         assert info["num_timepoints"] == 100  # max - min + 1 = 100 - 1 + 1
         assert info["prefix"] == "mutant_t30_image_t"
         assert info["pattern"].startswith("t{NNN} (range: 1-100)")
+
+
+def test_missing_first_channel_never_renumbers_surviving_images(tmp_path):
+    import tifffile
+
+    from acetree_py.gui.app import AceTreeApp
+    from acetree_py.io.config import AceTreeConfig
+    from acetree_py.io.config_writer import write_config_xml
+    from acetree_py.io.image_provider import (
+        ImageChannelConfigurationError, create_image_provider_from_config,
+    )
+    from acetree_py.io.nuclei_writer import write_nuclei_zip
+
+    red = tmp_path / "red_t1.tif"
+    green = tmp_path / "green_t1.tif"
+    tifffile.imwrite(green, np.full((2, 8, 8), 20, dtype=np.uint16), photometric="minisblack")
+    config = AceTreeConfig(
+        config_file=tmp_path / "embryo.xml", zip_file=tmp_path / "nuclei.zip",
+        image_channels={1: red, 2: green}, num_channels=2,
+        ending_index=1, plane_end=2, split=0, flip=0,
+    )
+    with pytest.raises(ImageChannelConfigurationError, match="Channel 1 image not found"):
+        create_image_provider_from_config(config)
+
+    # Annotation access remains available with an actionable image error.
+    write_nuclei_zip([[]], config.zip_file)
+    write_config_xml(config, config.config_file)
+    app = AceTreeApp.from_config(config.config_file)
+    assert app.image_provider is None
+    assert "Channel 1 image not found" in app.image_source_error
+    assert app.manager.num_timepoints == 1
+
+    tifffile.imwrite(red, np.full((2, 8, 8), 10, dtype=np.uint16), photometric="minisblack")
+    provider = create_image_provider_from_config(config)
+    assert provider.num_channels == 2
+    assert np.all(provider.get_plane(1, 1, 0) == 10)
+    assert np.all(provider.get_plane(1, 1, 1) == 20)

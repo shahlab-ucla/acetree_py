@@ -126,6 +126,18 @@ class DetectorPreviewSnapshot:
     change_counter: int
 
 
+def _open_configured_images(config: AceTreeConfig):
+    """Keep nuclei accessible when explicit image channel paths need repair."""
+    from ..io.image_provider import ImageChannelConfigurationError
+
+    try:
+        return create_image_provider_from_config(config), ""
+    except ImageChannelConfigurationError as error:
+        message = f"Images unavailable: {error}. Check the image paths in the dataset config."
+        logger.warning(message)
+        return None, message
+
+
 class AceTreeApp:
     """Main AceTree application with napari viewer.
 
@@ -160,6 +172,7 @@ class AceTreeApp:
 
         self.manager = manager
         self.image_provider = image_provider
+        self.image_source_error = ""
         self.roi_manager = roi_manager if roi_manager is not None else RoiManager()
         self.roi_measurement_engine = RoiMeasurementEngine(image_provider)
         self.edit_history = EditHistory(
@@ -285,9 +298,10 @@ class AceTreeApp:
         manager.process()
 
         # Auto-create image provider if not provided
+        image_source_error = ""
         if image_provider is None:
             logger.info("Auto-detecting image provider from config...")
-            image_provider = create_image_provider_from_config(config)
+            image_provider, image_source_error = _open_configured_images(config)
             if image_provider is not None:
                 logger.info("Image provider created: %s (planes=%d)",
                             type(image_provider).__name__,
@@ -303,6 +317,7 @@ class AceTreeApp:
             num_timepoints=manager.num_timepoints,
         )
         app = cls(manager, image_provider, roi_manager=roi_manager)
+        app.image_source_error = image_source_error
         app.roi_manager.reconcile_cells(app._resolve_roi_cell_anchor)
         tracking_sidecar = config.zip_file.with_suffix(".tracking.json")
         if tracking_sidecar.exists():
@@ -377,7 +392,7 @@ class AceTreeApp:
         write_config_xml(config, xml_path)
 
         # Create image provider
-        image_provider = create_image_provider_from_config(config)
+        image_provider, image_source_error = _open_configured_images(config)
         if image_provider is not None:
             logger.info("Image provider created: %s (planes=%d)",
                         type(image_provider).__name__,
@@ -394,6 +409,7 @@ class AceTreeApp:
                 num_timepoints=manager.num_timepoints,
             ),
         )
+        app.image_source_error = image_source_error
         app.current_time = 1
         plane_start = int(config.plane_start)
         if image_provider is not None and image_provider.num_planes > 0:
@@ -576,6 +592,8 @@ class AceTreeApp:
 
         # Initial display
         self.update_display()
+        if self.image_source_error:
+            self._say(self.image_source_error + " Nuclei remain available.")
 
         if self._pending_initial_tracking_request is not None:
             # The review workbench needs ViewerIntegration's preview layers,

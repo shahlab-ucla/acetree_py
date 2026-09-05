@@ -1118,6 +1118,10 @@ class MultiChannelFolderProvider:
         return self._channels[0].image_shape
 
 
+class ImageChannelConfigurationError(ValueError):
+    """Configured channel identities cannot be loaded without ambiguity."""
+
+
 def create_image_provider_from_config(config) -> ImageProvider | None:
     """Auto-detect and create an appropriate ImageProvider from an AceTreeConfig.
 
@@ -1143,10 +1147,14 @@ def create_image_provider_from_config(config) -> ImageProvider | None:
         config: An AceTreeConfig instance.
 
     Returns:
-        An ImageProvider, or None if image files can't be found.
+        An ImageProvider, or None if a single image source cannot be found.
+
+    Raises:
+        ImageChannelConfigurationError: Explicit channel paths are incomplete
+            or invalid. Channels are never silently removed or renumbered.
     """
     # ── Multi-channel from separate folders ──────────────────────
-    if config.image_channels and len(config.image_channels) > 1:
+    if config.image_channels:
         return _create_multi_channel_provider(config)
 
     # ── Single image_file based provider ─────────────────────────
@@ -1341,12 +1349,24 @@ def _create_multi_channel_provider(config) -> ImageProvider | None:
     """
     channel_providers = []
     flip_active = getattr(config, "flip", 0) == 1
+    # Older programmatic configs may leave num_channels at its default while
+    # supplying all explicit paths. Accept them, but never collapse gaps.
+    count = max(int(getattr(config, "num_channels", 1)), len(config.image_channels))
+    expected = set(range(1, count + 1))
+    actual = set(config.image_channels)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        detail = f"Missing configured image channel(s): {missing}" if missing else (
+            f"Image channel identifiers must be consecutive from 1; got {sorted(actual)}"
+        )
+        raise ImageChannelConfigurationError(detail)
 
     for ch_num in sorted(config.image_channels.keys()):
         ch_path = Path(config.image_channels[ch_num])
-        if not ch_path.exists():
-            logger.warning("Channel %d image not found: %s", ch_num, ch_path)
-            continue
+        if not ch_path.is_file():
+            raise ImageChannelConfigurationError(
+                f"Channel {ch_num} image not found: {ch_path}"
+            )
 
         ch_dir = ch_path.parent
         ch_name = ch_path.name
@@ -1367,12 +1387,16 @@ def _create_multi_channel_provider(config) -> ImageProvider | None:
             t_fmt = f"{{time:0{t_width}d}}" if t_width > 0 else "{time}"
             pattern = f"{prefix_before_t}{join}{t_fmt}{ch_ext}"
         else:
-            logger.warning("Could not parse time pattern from channel %d file: %s",
-                          ch_num, ch_path.name)
-            continue
+            raise ImageChannelConfigurationError(
+                f"Channel {ch_num} has no recognizable time index: {ch_path.name}"
+            )
 
         # Probe plane count from first file
         actual_planes = _probe_stack_planes(ch_path)
+        if actual_planes is None or actual_planes < 1:
+            raise ImageChannelConfigurationError(
+                f"Channel {ch_num} image could not be read: {ch_path}"
+            )
         plane_start = max(1, int(getattr(config, "plane_start", 1)))
         plane_end = int(getattr(config, "plane_end", 0))
         configured_planes = (
@@ -1387,10 +1411,6 @@ def _create_multi_channel_provider(config) -> ImageProvider | None:
         channel_providers.append(provider)
         logger.info("Channel %d: dir=%s, pattern='%s', planes=%d",
                     ch_num, ch_dir, pattern, num_planes)
-
-    if not channel_providers:
-        logger.warning("No valid channel providers created")
-        return None
 
     logger.info("Creating MultiChannelFolderProvider: %d channels, flip=%s",
                 len(channel_providers), flip_active)
