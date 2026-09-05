@@ -101,6 +101,8 @@ def roi_overlay_shapes(
     manager: Any,
     timepoint: int,
     z_plane: int,
+    *,
+    object_ids: Iterable[Any] | None = None,
 ) -> tuple[RoiOverlayShape, ...]:
     """Project model records for exactly one current time and Z plane."""
 
@@ -108,8 +110,11 @@ def roi_overlay_shapes(
         getattr(value, "class_id", None): value
         for value in _manager_items(manager, "classes", "object_classes")
     }
+    visible_ids = None if object_ids is None else frozenset(str(item) for item in object_ids)
     result: list[RoiOverlayShape] = []
     for track in _manager_items(manager, "objects", "objects"):
+        if visible_ids is not None and str(getattr(track, "object_id", None)) not in visible_ids:
+            continue
         frame = (getattr(track, "frames", {}) or {}).get(int(timepoint))
         if frame is None or _enum_value(getattr(frame, "presence", "")) != "segmented":
             continue
@@ -197,6 +202,8 @@ class RoiViewerIntegration:
         self._editor_layer: Any = None
         self._editor_session: _EditorSession | None = None
         self._three_dimensional = False
+        self._overlay_visible = True
+        self._visible_object_ids: frozenset[str] | None = None
 
     @property
     def editing(self) -> bool:
@@ -222,7 +229,7 @@ class RoiViewerIntegration:
                 name=OVERLAY_LAYER_NAME,
                 edge_color="orange",
                 edge_width=2,
-                visible=True,
+                visible=self._overlay_visible and not self._three_dimensional,
             )
             self._overlay_layer = self.overlay_layer
         if self.editor_layer is None:
@@ -337,7 +344,9 @@ class RoiViewerIntegration:
             return ()
         timepoint = int(timepoint or getattr(self.app, "current_time", 1))
         z_plane = int(z_plane or getattr(self.app, "current_plane", 1))
-        shapes = roi_overlay_shapes(self.manager, timepoint, z_plane)
+        shapes = roi_overlay_shapes(
+            self.manager, timepoint, z_plane, object_ids=self._visible_object_ids,
+        )
         previous = self._snapshot_layer(self.overlay_layer)
         try:
             self.overlay_layer.data = []
@@ -580,13 +589,15 @@ class RoiViewerIntegration:
         self._set_space_shortcut_enabled(True)
         self._restore_cell_interaction_layer()
         if session.create_object:
-            selector = getattr(self.app, "_on_roi_object_selected", None)
-            if callable(selector):
-                selector(session.object_id)
+            selected_id = session.object_id
             panel = getattr(self.app, "_subcellular_objects_panel", None)
             if panel is not None:
                 panel.refresh()
                 panel.select_object(session.object_id)
+                selected_id = getattr(panel, "current_object_id", selected_id)
+            selector = getattr(self.app, "_on_roi_object_selected", None)
+            if callable(selector):
+                selector(selected_id)
         self._sync_panel_inspect()
         return command
 
@@ -724,6 +735,19 @@ class RoiViewerIntegration:
             self.cancel_edit()
         self.update_overlay()
 
+    def set_visible_object_ids(self, object_ids: Iterable[Any] | None) -> None:
+        """Apply the Objects browser filter to the permanent image projection."""
+        visible_ids = None if object_ids is None else frozenset(str(item) for item in object_ids)
+        if visible_ids != self._visible_object_ids:
+            self._visible_object_ids = visible_ids
+            self.update_overlay()
+
+    def set_overlay_visible(self, visible: bool) -> None:
+        """Remember explicit visibility independently of temporary 3D suppression."""
+        self._overlay_visible = bool(visible)
+        if self.overlay_layer is not None:
+            self.overlay_layer.visible = self._overlay_visible and not self._three_dimensional
+
     def set_three_dimensional(self, active: bool) -> None:
         """Keep detached/3D previews read-only and mode-safe."""
 
@@ -731,7 +755,7 @@ class RoiViewerIntegration:
         if active:
             self.cancel_edit()
         if self.overlay_layer is not None:
-            self.overlay_layer.visible = not active
+            self.overlay_layer.visible = self._overlay_visible and not active
         self._lock_overlay()
         if not active:
             self.update_overlay()

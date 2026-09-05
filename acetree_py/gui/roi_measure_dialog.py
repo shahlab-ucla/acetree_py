@@ -24,6 +24,7 @@ ROI_METRIC_CHOICES = (
 
 
 try:
+    from qtpy.QtCore import Qt
     from qtpy.QtWidgets import (
         QCheckBox,
         QComboBox,
@@ -33,8 +34,10 @@ try:
         QFormLayout,
         QGroupBox,
         QLabel,
+        QScrollArea,
         QSpinBox,
         QVBoxLayout,
+        QWidget,
     )
 
     _QT_AVAILABLE = True
@@ -56,10 +59,21 @@ class RoiMeasureDialog(QDialog):  # type: ignore[misc]
         self.setMinimumWidth(500)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        introduction = QLabel(
             "Measure raw image intensities for curated subcellular objects. "
             "Results publish only after the complete run succeeds."
-        ))
+        )
+        introduction.setWordWrap(True)
+        layout.addWidget(introduction)
+        content = QWidget()
+        options = QVBoxLayout(content)
+        options.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        scroll.setMinimumHeight(220)
+        layout.addWidget(scroll, 1)
 
         basic = QGroupBox("Basic")
         form = QFormLayout(basic)
@@ -110,11 +124,11 @@ class RoiMeasureDialog(QDialog):  # type: ignore[misc]
             metric_layout.addWidget(checkbox)
             self._metric_checks[key] = checkbox
         form.addRow(metric_box)
-        layout.addWidget(basic)
+        options.addWidget(basic)
 
         self._advanced_toggle = QCheckBox("Show advanced options")
         self._advanced_toggle.setAccessibleName("Show advanced ROI measurement options")
-        layout.addWidget(self._advanced_toggle)
+        options.addWidget(self._advanced_toggle)
 
         self._advanced_group = QGroupBox("Advanced")
         advanced = QFormLayout(self._advanced_group)
@@ -137,19 +151,31 @@ class RoiMeasureDialog(QDialog):  # type: ignore[misc]
         self._histogram_bins.setAccessibleName("Histogram bin count")
         advanced.addRow("Histogram bins", self._histogram_bins)
         self._advanced_group.setVisible(False)
-        layout.addWidget(self._advanced_group)
+        options.addWidget(self._advanced_group)
+        options.addStretch(1)
         self._advanced_toggle.toggled.connect(self._advanced_group.setVisible)
 
+        self._validation_label = QLabel()
+        self._validation_label.setWordWrap(True)
+        self._validation_label.setAccessibleName("ROI measurement validation")
+        self._validation_label.hide()
+        layout.addWidget(self._validation_label)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept_if_valid)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        screen = self.screen()
+        height = 650 if screen is None else min(650, screen.availableGeometry().height() - 80)
+        self.resize(560, max(360, height))
 
     def _accept_if_valid(self) -> None:
-        if not any(item.isChecked() for item in self._channel_checks):
+        try:
+            self.build_request()
+        except (ValueError, RuntimeError) as error:
+            self._validation_label.setText(str(error))
+            self._validation_label.show()
             return
-        if not any(item.isChecked() for item in self._metric_checks.values()):
-            return
+        self._validation_label.hide()
         self.accept()
 
     def get_values(self) -> dict[str, Any]:
@@ -182,20 +208,32 @@ class RoiMeasureDialog(QDialog):  # type: ignore[misc]
         values = self.get_values()
         scope = values.pop("scope")
         time_scope = values.pop("time_scope")
+        if not values["channels"]:
+            raise ValueError("Select at least one image channel.")
+        if not values["metric_keys"]:
+            raise ValueError("Select at least one scalar output.")
+        objects = tuple(getattr(self.manager, "objects", ()))
+        if not objects:
+            raise ValueError("Create a subcellular object before measuring.")
         object_ids = None
         if scope == "selected":
             selected = getattr(self.app, "current_roi_object_id", None)
-            if selected is None:
+            if selected is None or not any(item.object_id == selected for item in objects):
                 raise ValueError("Select a subcellular object first")
             object_ids = (str(selected),)
         elif scope == "class":
-            class_id = getattr(self.app, "current_roi_class_id", None)
+            panel = getattr(self.app, "_subcellular_objects_panel", None)
+            class_id = (
+                panel.selected_class_id if panel is not None
+                else getattr(self.app, "current_roi_class_id", None)
+            )
             if class_id is None:
                 raise ValueError("Select a subcellular object class first")
-            objects = getattr(self.manager, "objects", ())
             object_ids = tuple(
                 str(item.object_id) for item in objects if item.class_id == class_id
             )
+            if not object_ids:
+                raise ValueError("The selected class has no objects to measure.")
         timepoints = (
             (int(getattr(self.app, "current_time", 1)),)
             if time_scope == "current"

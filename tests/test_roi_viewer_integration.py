@@ -365,3 +365,23 @@ def test_contour_drawing_appends_consecutive_slice_to_same_object():
     restored = manager.get_object(track.object_id).frames[4].geometry
     assert tuple(item.z_plane for item in restored.slices) == (12,)
     NucleusAnchor,
+
+
+def test_object_filters_and_explicit_visibility_survive_3d_navigation():
+    document, track = _document()
+    app = SimpleNamespace(viewer=_RealishViewer(), current_time=4, current_plane=12)
+    integration = RoiViewerIntegration(app, SimpleNamespace(document=document))
+    integration.setup_layers()
+    integration.set_visible_object_ids(())
+    assert integration.overlay_layer.data == []
+    integration.set_visible_object_ids((track.object_id,))
+    assert integration.overlay_layer.properties["object_id"] == [str(track.object_id)]
+    integration.set_overlay_visible(False)
+    integration.set_three_dimensional(True)
+    integration.set_three_dimensional(False)
+    assert not integration.overlay_layer.visible
+    integration.set_three_dimensional(True)
+    integration.set_overlay_visible(True)
+    assert not integration.overlay_layer.visible
+    integration.set_three_dimensional(False)
+    assert integration.overlay_layer.visible

@@ -66,3 +66,39 @@ def test_profile_csv_preserves_zero_and_missing_reason(tmp_path):
     assert rows[0]["image_channel"] == "2"
     assert rows[1]["value"] == ""
     assert rows[1]["missing_reason"] == "no_finite_pixels"
+
+
+def test_measure_dialog_keeps_invalid_requests_open_and_fits_a_laptop(qtbot):
+    from qtpy.QtWidgets import QDialog
+
+    manager = RoiManager()
+    object_class = manager.create_class("Golgi", (0.2, 0.8, 1.0, 1.0))
+    track = manager.create_object(object_class.class_id)
+    app = SimpleNamespace(
+        roi_manager=manager,
+        image_provider=SimpleNamespace(num_channels=2),
+        current_roi_object_id=None,
+        current_time=4,
+    )
+    dialog = RoiMeasureDialog(app)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog._advanced_toggle.setChecked(True)
+    dialog._scope_combo.setCurrentIndex(dialog._scope_combo.findData("selected"))
+    dialog._accept_if_valid()
+    assert dialog.result() == QDialog.Rejected
+    assert dialog.isVisible()
+    assert "Select a subcellular object" in dialog._validation_label.text()
+    assert dialog.minimumSizeHint().width() < 700
+    assert dialog.minimumSizeHint().height() < 600
+    assert dialog.width() <= 700
+
+    app.current_roi_object_id = track.object_id
+    for checkbox in dialog._channel_checks:
+        checkbox.setChecked(False)
+    dialog._accept_if_valid()
+    assert "image channel" in dialog._validation_label.text()
+    assert dialog.isVisible()
+    dialog._channel_checks[0].setChecked(True)
+    dialog._accept_if_valid()
+    assert dialog.result() == QDialog.Accepted

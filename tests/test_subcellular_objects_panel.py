@@ -132,3 +132,68 @@ def test_plot_track_and_spatial_profiles_are_separate_actions(qtbot):
     ]
     assert "scalar" in panel._btn_plot.accessibleName().lower()
     assert "spatial" in panel._btn_profiles.accessibleName().lower()
+
+
+def test_filters_clear_hidden_targets_and_drive_measurement_scope(qtbot):
+    from acetree_py.core.roi_manager import RoiManager
+    from acetree_py.gui.roi_measure_dialog import RoiMeasureDialog
+
+    source, _first_class, first_track = _manager()
+    manager = RoiManager(source.document)
+    second_class = manager.create_class("Golgi", (0.2, 0.8, 1.0, 1.0))
+    second_track = manager.create_object(second_class.class_id)
+    overlay_filters = []
+    cancelled_edits = []
+    app = SimpleNamespace(
+        roi_manager=manager,
+        current_time=42,
+        current_plane=15,
+        current_cell_name="",
+        current_roi_object_id=None,
+        current_roi_class_id=None,
+        image_provider=SimpleNamespace(num_channels=2),
+        _roi_viewer_integration=SimpleNamespace(
+            set_visible_object_ids=lambda ids: overlay_filters.append(ids),
+            cancel_edit=lambda: cancelled_edits.append(True),
+        ),
+    )
+    panel = SubcellularObjectsPanel(app, browse_only=False)
+    app._subcellular_objects_panel = panel
+    qtbot.addWidget(panel)
+
+    def selection_changed(object_id):
+        app.current_roi_object_id = object_id
+        track = manager.get_object(object_id) if object_id else None
+        app.current_roi_class_id = None if track is None else track.class_id
+
+    panel.objectSelected.connect(selection_changed)
+    panel.select_object(first_track.object_id)
+    panel.select_class(second_class.class_id)
+    assert panel.current_object_id is None
+    assert app.current_roi_object_id is None
+    assert panel._track_list.currentItem() is None
+    assert not panel._btn_delete.isEnabled()
+    assert overlay_filters[-1] == {second_track.object_id}
+
+    dialog = RoiMeasureDialog(app)
+    qtbot.addWidget(dialog)
+    dialog._scope_combo.setCurrentIndex(dialog._scope_combo.findData("class"))
+    assert dialog.build_request().object_ids == (str(second_track.object_id),)
+
+    panel.select_class(None)
+    panel._cell_combo.setCurrentIndex(panel._cell_combo.findData("current"))
+    assert panel._track_list.count() == 0
+    assert overlay_filters[-1] == set()
+    assert "Select a cell" in panel._empty_label.text()
+    app.current_cell_name = "ABpl"
+    panel.refresh()
+    assert overlay_filters[-1] == {first_track.object_id}
+    panel.select_object(first_track.object_id)
+    panel.set_mode("edit")
+    panel._search_edit.setText("no matching object")
+    panel.refresh()
+    assert panel.current_object_id is None
+    assert app.current_roi_object_id is None
+    assert not panel._btn_edit.isEnabled()
+    assert cancelled_edits == [True]
+    assert panel.mode is RoiInteractionMode.INSPECT

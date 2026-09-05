@@ -4656,7 +4656,11 @@ class AceTreeApp:
         dialog = RoiMeasureDialog(self, parent=self.viewer.window._qt_window)
         if dialog.exec_() != QDialog.Accepted:
             return
-        request = dialog.build_request()
+        try:
+            request = dialog.build_request()
+        except (ValueError, RuntimeError) as error:
+            self._say(str(error))
+            return
         progress = QProgressDialog(
             "Measuring subcellular objects…",
             "Cancel",

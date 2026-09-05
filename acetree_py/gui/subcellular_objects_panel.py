@@ -160,7 +160,9 @@ def filter_object_rows(
             continue
         if state != "all" and row.current_state != state:
             continue
-        if cell_scope == "current" and row.association != selected_cell_name:
+        if cell_scope == "current" and (
+            not selected_cell_name or row.association != selected_cell_name
+        ):
             continue
         haystack = f"{row.label} {row.association} {row.status_text}".casefold()
         if needle and needle not in haystack:
@@ -217,6 +219,7 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         self.mode = RoiInteractionMode.INSPECT
         self._requested_browse_only = bool(browse_only)
         self._rows: dict[Any, ObjectBrowserRow] = {}
+        self._visible_object_ids: frozenset[Any] = frozenset()
         self._build_ui()
         self.refresh()
 
@@ -319,6 +322,10 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         self._track_list = QListWidget()
         self._track_list.setAccessibleName("Subcellular object tracks")
         layout.addWidget(self._track_list, 1)
+        self._empty_label = QLabel()
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setAccessibleName("Object filter status")
+        layout.addWidget(self._empty_label)
 
         selected = QGroupBox("Selected object")
         selected_form = QFormLayout(selected)
@@ -418,9 +425,13 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
 
     def _on_visibility_changed(self, visible: bool) -> None:
         integration = getattr(self.app, "_roi_viewer_integration", None)
-        layer = getattr(integration, "overlay_layer", None)
-        if layer is not None:
-            layer.visible = bool(visible)
+        setter = getattr(integration, "set_overlay_visible", None)
+        if callable(setter):
+            setter(visible)
+        else:
+            layer = getattr(integration, "overlay_layer", None)
+            if layer is not None:
+                layer.visible = bool(visible)
         self.actionRequested.emit("set_visibility", bool(visible))
 
     def set_mode(self, mode: RoiInteractionMode | str) -> bool:
@@ -457,12 +468,10 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         self._context_label.setText(
             f"t={current_time}  z={current_plane}  Selected cell: {selected_cell}"
         )
-        selected_id = self.current_object_id
         self._refresh_classes()
         rows = object_browser_rows(self.manager, current_time)
         self._rows = {row.object_id: row for row in rows}
         self._apply_filters()
-        self.select_object(selected_id)
         path = getattr(self.manager, "sidecar_path", None)
         state = "Unsaved" if bool(getattr(self.manager, "is_dirty", False)) else "Saved"
         if getattr(self.manager, "load_error", None):
@@ -501,6 +510,7 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
             selected_cell_name=str(getattr(self.app, "current_cell_name", "") or ""),
             search=self._search_edit.text(),
         )
+        self._visible_object_ids = frozenset(row.object_id for row in visible)
         self._track_list.blockSignals(True)
         self._track_list.clear()
         for row in visible:
@@ -511,20 +521,49 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
             if row.object_id == selected:
                 self._track_list.setCurrentItem(item)
         self._track_list.blockSignals(False)
+        self.select_object(selected)
+        no_cell = (
+            self._cell_combo.currentData() == "current"
+            and not getattr(self.app, "current_cell_name", "")
+        )
+        self._empty_label.setText(
+            "Select a cell to see its associated objects."
+            if no_cell else "No objects match these filters."
+        )
+        self._empty_label.setVisible(not visible)
+        integration = getattr(self.app, "_roi_viewer_integration", None)
+        setter = getattr(integration, "set_visible_object_ids", None)
+        if callable(setter):
+            setter(self._visible_object_ids)
 
     def select_object(self, object_id: Any) -> None:
-        self.current_object_id = object_id if object_id in self._rows else None
+        selected = object_id if object_id in self._visible_object_ids else None
+        self._track_list.blockSignals(True)
+        self._track_list.setCurrentItem(None)
         for index in range(self._track_list.count()):
             item = self._track_list.item(index)
-            if item.data(Qt.UserRole) == self.current_object_id:
+            if item.data(Qt.UserRole) == selected:
                 self._track_list.setCurrentItem(item)
                 break
-        self._refresh_inspector()
+        self._track_list.blockSignals(False)
+        self._set_selected_object(selected)
 
     def _on_selection_changed(self, current: Any, _previous: Any) -> None:
-        self.current_object_id = current.data(Qt.UserRole) if current is not None else None
+        self._set_selected_object(current.data(Qt.UserRole) if current is not None else None)
+
+    def _set_selected_object(self, object_id: Any) -> None:
+        changed = object_id != self.current_object_id
+        self.current_object_id = object_id
+        if changed and self.mode is not RoiInteractionMode.INSPECT:
+            integration = getattr(self.app, "_roi_viewer_integration", None)
+            cancel = getattr(integration, "cancel_edit", None)
+            if callable(cancel):
+                cancel()
+            if self.mode is not RoiInteractionMode.INSPECT:
+                self.set_mode(RoiInteractionMode.INSPECT)
         self._refresh_inspector()
-        self.objectSelected.emit(self.current_object_id)
+        if changed:
+            self.objectSelected.emit(object_id)
 
     def _refresh_inspector(self) -> None:
         row = self._rows.get(self.current_object_id)
