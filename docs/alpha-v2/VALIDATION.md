@@ -104,3 +104,9 @@ Windows GUI checkpoint: **73 passed, 1 failed**. All OpenGL context failures res
 Nuclear measurement now exposes private prepare/discard and atomic commit operations. The existing synchronous run_measure wraps them. Computation, CSV staging, and immutable store construction finish before the live manager is touched; commit rechecks the live source and retains the existing files/fields/store rollback. One workflow regression covers no publication during prepare, discard cleanup, a later edit preserved on rejection, and successful current-store publication.
 
 Numerical, transaction, expression-window and real-layer contrast gate: **74 passed** in 14.39s. GUI background integration follows A4.
+
+### C2 — live ROI plot provenance
+
+App-derived profile windows now bind selected objects and measured profiles to their source snapshot. Scalar and profile windows refresh after edits; CSV/SVG/toolbar exports reject stale measurements and recover after remeasurement. Metadata-only edits retain valid image measurements. Existing standalone profile APIs remain usable for caller-owned data.
+
+Agent gate: **26 passed**, including edit -> visible stale state in both windows -> all exports blocked -> remeasure -> exports restored. One prepared context per profile refresh/CSV/SVG and scalar SVG; external image/calibration changes rejected. Reviewed before integration; provider/dataset replacement follow-up assigned during C4.
