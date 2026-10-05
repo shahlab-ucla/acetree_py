@@ -3,7 +3,19 @@ name: Python compatibility
 on:
   push:
     branches: [alpha-v2]
+    paths:
+      - 'acetree_py/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - '.github/workflows/python-compatibility.yml'
   pull_request:
+    paths:
+      - 'acetree_py/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - '.github/workflows/python-compatibility.yml'
   workflow_dispatch:
 
 permissions:
@@ -49,7 +61,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xauth libgl1-mesa-dri libegl1 libopengl0 libxcb-cursor0 libxcb-xinerama0 libxkbcommon-x11-0
+          # Runtime counterparts of https://doc.qt.io/qt-6/linux-requirements.html
+          sudo apt-get install -y xvfb xauth libgl1 libgl1-mesa-dri libglx-mesa0 libegl1 libopengl0 \
+            libx11-xcb1 libxrender1 libxi6 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-image0 libxcb-render-util0 \
+            libxcb-glx0 libxcb-randr0 libxcb-shape0 libxcb-xfixes0 libxcb-sync1 libxcb-xinerama0 libxcb-xkb1
       - name: Validate Linux wheel, CLI, OpenGL and tests
         if: runner.os == 'Linux'
         env:
@@ -67,6 +83,7 @@ jobs:
           --workspace "${{ runner.temp }}/acetree-compatibility"
           --suite "${{ matrix.suite }}" --qt "${{ matrix.qt }}"
           --expected-architecture "${{ matrix.architecture }}"
+          ${{ runner.os == 'Windows' && '--software-opengl' || '' }}
       - name: Retain runtime, dependency versions, logs and test evidence
         if: always()
         uses: actions/upload-artifact@v4

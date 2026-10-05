@@ -45,6 +45,11 @@ GUI_SMOKE = """
 from pathlib import Path
 import os
 import sys
+if os.environ.get('ACETREE_SOFTWARE_OPENGL') == '1':
+    from ctypes.util import find_library
+    library = find_library('opengl32')
+    assert library and Path(library).resolve() == Path(os.environ['QT_OPENGL_DLL']).resolve(), library
+    print('Windows PyOpenGL library:', library, flush=True)
 import numpy as np
 import napari
 import qtpy
@@ -65,18 +70,70 @@ try:
     assert pixels.ndim == 3 and min(pixels.shape[:2]) > 1, pixels.shape
     assert np.ptp(pixels[..., :3]) > 0, 'OpenGL canvas produced a blank image'
     print('OpenGL canvas:', pixels.shape, flush=True)
+    import vispy
+    print(vispy.sys_info(), flush=True)
 finally:
     viewer.close()
 """
 
+
+WINDOWS_OPENGL_DLL = """
+from pathlib import Path
+import importlib
+import qtpy
+binding = importlib.import_module(qtpy.API_NAME)
+root = Path(binding.__file__).resolve().parent
+libraries = sorted(root.rglob('opengl32sw.dll'))
+assert len(libraries) == 1, f'Expected one bundled Qt Mesa DLL under {root}: {libraries}'
+library = libraries[0]
+print('Windows Qt binding:', qtpy.API_NAME, 'Mesa DLL:', library, flush=True)
+Path('windows-opengl-dll.txt').write_text(str(library), encoding='utf-8')
+"""
+
+LINUX_QT_LIBRARIES = """
+from pathlib import Path
+import importlib
+import os
+import subprocess
+import qtpy
+binding = importlib.import_module(qtpy.API_NAME)
+root = Path(binding.__file__).resolve().parent
+plugins = sorted(root.glob('Qt*/plugins/platforms/libqxcb.so'))
+plugins += sorted(root.glob('Qt*/plugins/xcbglintegrations/libqxcb-*.so'))
+print('Qt binding:', qtpy.API_NAME, 'root:', root, flush=True)
+for name in ('DISPLAY', 'QT_QPA_PLATFORM', 'LIBGL_ALWAYS_SOFTWARE'):
+    print(name, '=', os.environ.get(name), flush=True)
+assert plugins, 'Could not locate installed Qt xcb platform plugin'
+missing = []
+for plugin in plugins:
+    print('ldd:', plugin, flush=True)
+    result = subprocess.run(['ldd', str(plugin)], capture_output=True, text=True, timeout=10)
+    print(result.stdout, result.stderr, flush=True)
+    if result.returncode or 'not found' in result.stdout:
+        missing.append(str(plugin))
+assert not missing, 'Missing Qt native dependencies: ' + ', '.join(missing)
+"""
+
+QT_PLATFORM_DIAGNOSTICS = """
+import os
+os.environ['QT_DEBUG_PLUGINS'] = '1'
+from qtpy.QtWidgets import QApplication
+app = QApplication([])
+app.processEvents()
+print('Qt platform initialized:', app.platformName(), flush=True)
+"""
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--workspace', type=Path, required=True)
     parser.add_argument('--suite', choices=('full', 'smoke'), default='smoke')
     parser.add_argument('--qt', choices=('default', 'pyside6'), default='default')
+    parser.add_argument('--software-opengl', action='store_true',
+                        help='Use the installed Qt Mesa DLL on Windows CI virtual displays')
     parser.add_argument('--expected-architecture', choices=('x64', 'arm64'))
     args = parser.parse_args()
+    if args.software_opengl and os.name != 'nt':
+        parser.error('--software-opengl is supported only on Windows')
     source = Path(__file__).resolve().parents[1]
     workspace = args.workspace.resolve()
     if workspace.is_relative_to(source):
@@ -99,7 +156,7 @@ def main() -> None:
                 'QT_QPA_PLATFORM', 'PYTEST_ADDOPTS'):
         environment.pop(key, None)
     environment.update(PYTHONNOUSERSITE='1', PYTHONUNBUFFERED='1',
-                       ACETREE_EXPECTED_QT=args.qt,
+                       ACETREE_EXPECTED_QT=args.qt, ACETREE_SOFTWARE_OPENGL='0',
                        NUMBA_CACHE_DIR=str(workspace / 'numba-cache'))
     if args.qt == 'pyside6':
         environment.update(QT_API='pyside6', PYTEST_QT_API='pyside6')
@@ -113,8 +170,13 @@ def main() -> None:
             timeout: int = 900, check: bool = True) -> int:
         print(f'[{label}] {command}', flush=True)
         with (workspace / f'{label}.log').open('w', encoding='utf-8') as log:
-            result = subprocess.run(command, cwd=cwd, env=environment, stdout=log,
-                                    stderr=subprocess.STDOUT, timeout=timeout, check=False)
+            try:
+                result = subprocess.run(command, cwd=cwd, env=environment, stdout=log,
+                                        stderr=subprocess.STDOUT, timeout=timeout, check=False)
+            except subprocess.TimeoutExpired:
+                if check:
+                    raise
+                result = subprocess.CompletedProcess(command, 124)
         print((workspace / f'{label}.log').read_text(encoding='utf-8', errors='replace'),
               flush=True)
         if check and result.returncode:
@@ -153,7 +215,33 @@ def main() -> None:
             requirements = [wheel + '[gui,dev]']
         run('gui-install', [str(gui), '-m', 'pip', 'install', *requirements])
         run('gui-pip-check', [str(gui), '-m', 'pip', 'check'])
-        run('gui-imports-opengl', [str(gui), '-I', '-c', GUI_SMOKE])
+        if args.software_opengl:
+            run('gui-windows-opengl-library', [str(gui), '-I', '-c', WINDOWS_OPENGL_DLL],
+                timeout=30)
+            library = (workspace / 'windows-opengl-dll.txt').read_text(encoding='utf-8')
+            if not Path(library).is_file():
+                raise RuntimeError(f'Installed Qt Mesa DLL does not exist: {library}')
+            # PyOpenGL searches PATH for opengl32.dll. Qt and both VisPy backends
+            # must use this same Mesa DLL, including napari 0.7's gl+ backend.
+            alias = gui.parent / 'opengl32.dll'
+            shutil.copy2(library, alias)
+            environment.update(QT_OPENGL='software', QT_OPENGL_DLL=str(alias),
+                               VISPY_GL_LIB=str(alias), ACETREE_SOFTWARE_OPENGL='1',
+                               PATH=str(gui.parent) + os.pathsep + environment.get('PATH', ''))
+            print('Windows software OpenGL: Qt, VisPy and PyOpenGL use', alias, flush=True)
+        if sys.platform.startswith('linux'):
+            status = run('gui-linux-qt-libraries', [str(gui), '-I', '-c', LINUX_QT_LIBRARIES],
+                         timeout=40, check=False)
+            if status:
+                run('gui-qt-platform-diagnostics',
+                    [str(gui), '-I', '-c', QT_PLATFORM_DIAGNOSTICS], timeout=30, check=False)
+                raise RuntimeError('Qt native dependency validation failed; see diagnostic logs')
+        try:
+            run('gui-imports-opengl', [str(gui), '-I', '-c', GUI_SMOKE])
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            run('gui-qt-platform-diagnostics',
+                [str(gui), '-I', '-c', QT_PLATFORM_DIAGNOSTICS], timeout=30, check=False)
+            raise
         # Tests import helpers as tests.*; copy them without any application source.
         shutil.copytree(source / 'tests', workspace / 'tests',
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
