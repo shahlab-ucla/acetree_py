@@ -18,10 +18,10 @@ Branch: alpha-v2. Starting commit: b29829e.
 | Dependency/install review | GPT-6 Luna panel member 2 | Python/platform resolution audit | Complete; napari <0.7 excludes documented 3.14 support |
 | GUI/scientific/worker review | GPT-6 Luna panel member 3 | Runtime risks and existing regression inventory | Complete; no speculative worker changes |
 | Dependency markers, installer preflight, text serialization | GPT-6.1 Sol implementer | Older Python preserved; modern GUI path; clear unsupported-platform error | Complete; 587ecb2 and ab5cabd |
-| Cross-platform CI and reusable validation | GPT-6.1 Sol CI implementer | Fresh wheel/core/GUI environments; required GUI tests execute | In progress |
-| Independent implementation review | GPT-6.1 Sol reviewer | Diff and validation review; concrete concerns resolved | Initial fixes and Windows graphics follow-up reviewed; final CI pending |
-| Local runtime validation and documentation | Coordinator | Fresh 3.10/3.11/3.14 evidence and support instructions | In progress |
-| Commit, push, remote verification | Coordinator | Focused commits on alpha-v2; required CI results inspected | Pending |
+| Cross-platform CI and reusable validation | GPT-6.1 Sol CI implementer | Fresh wheel/core/GUI environments; required GUI tests execute | Complete; all 16 matrix jobs passed |
+| Independent implementation review | GPT-6.1 Sol reviewer | Diff and validation review; concrete concerns resolved | Complete; implementation, graphics, layout, and final test corrections reviewed |
+| Local runtime validation and documentation | Coordinator | Fresh 3.10/3.11/3.14 evidence and support instructions | Complete |
+| Commit, push, remote verification | Coordinator | Focused commits on alpha-v2; required CI results inspected | Complete; code pushed and all matrix results inspected |
 
 ## Evidence
 
@@ -43,3 +43,19 @@ Planning review was static, not proof of runtime compatibility. Validation resul
 - Linux CI now installs the missing XCB runtime libraries and checks Qt plugin native dependencies before GUI execution. The second matrix run is https://github.com/shahlab-ucla/acetree_py/actions/runs/37353284256 . Documentation-only commits do not rerun the matrix.
 - The second matrix run passed both alternate PySide6 rows and Intel Mac Python 3.10/3.11. Other Linux/macOS rows exposed a real Objects filter-row minimum-width overflow under native font metrics. The filter controls now use two rows, with a compact-dock regression that retains strict full-action visibility.
 - All Windows default rows passed required GUI workflows. Full-suite failures were test assumptions: ANSI styling split CLI option text and fast recomputations could share a wall-clock tick. Help assertions now inspect unstyled text; force-recompute checks fresh provider reads and atomic replacement instead of timestamp uniqueness.
+
+## Final matrix evidence
+
+Successful code validation run (all 16 jobs): https://github.com/shahlab-ucla/acetree_py/actions/runs/37354905927 at commit `219cac15254d61912298c961caa10998fd85d837`.
+
+| Platform | Python | Full-suite result |
+|---|---|---|
+| Linux | 3.10, 3.11, 3.14 | 1,943 passed, 2 skipped, 19 deselected on each |
+| Windows | 3.10, 3.11, 3.14 | 1,937 passed, 8 skipped, 19 deselected on each |
+
+All six full-suite jobs also passed all 14 mandatory GUI cases with zero skips, fresh wheel/core/GUI installation, dependency checks, CLI smoke checks, and nonblank rendered screenshots. The two shared skips require an external naming-test dataset; Windows additionally skips six POSIX permission checks. The 19 deselected tests require the MATLAB oracle, outside this pass.
+
+Linux Python 3.12/3.13, Apple Silicon Python 3.10/3.11/3.14, and alternate Windows PySide6 Python 3.11/3.14 smoke jobs passed. Intel Mac Python 3.10/3.11/3.13 also passed validation. The Python 3.10 job then hit a GitHub artifact-service timeout; rerunning only that job succeeded, including artifact upload. Workflow attempt 2 is green across all 16 configurations.
+
+Independent GPT-6.1 Sol review approved the final layout and test corrections. The three corrected CLI/recompute cases passed in fresh Python 3.11 and 3.14 installed-wheel environments under forced CI color settings; both layout cases passed on Python 3.14. Tests remain focused on visible workflows and recomputation behavior.
+- Visual review of the passing Linux Python 3.14 workspace screenshot confirmed the two-row Objects filters fit the compact dock without horizontal clipping.
