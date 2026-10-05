@@ -10,6 +10,7 @@ pytest.importorskip("qtpy.QtWidgets")
 napari = pytest.importorskip("napari")
 from pytestqt.exceptions import TimeoutError as QtTimeoutError
 from qtpy.QtCore import QPoint, Qt
+from qtpy.QtGui import QFont
 from qtpy.QtWidgets import QApplication, QDockWidget
 
 from acetree_py.core.roi_manager import RoiManager
@@ -164,3 +165,20 @@ def test_compact_workspace_preserves_selection_actions_menus_and_windows(qtbot, 
         window.grab().save(str(tmp_path / "workspace-objects.png"))
     finally:
         app.viewer.close()
+
+
+def test_objects_actions_fit_compact_dock_with_larger_native_metrics(qtbot, tmp_path):
+    from acetree_py.gui.subcellular_objects_panel import SubcellularObjectsPanel
+
+    app, track = _workspace_app()
+    panel = SubcellularObjectsPanel(app, browse_only=False)
+    qtbot.addWidget(panel)
+    # Match the width available to Objects in the 1280x720 workspace.
+    # Larger metrics reproduce the minimum width imposed by native controls.
+    panel.setFont(QFont("Arial", 10))
+    panel.resize(350, 550)
+    panel.show()
+    panel.select_object(track.object_id)
+    _assert_reachable(qtbot, panel._scroll_area, panel._btn_delete,
+                      tmp_path / "objects-larger-metrics-clipped.png")
+    assert panel._scroll_area.horizontalScrollBar().maximum() == 0

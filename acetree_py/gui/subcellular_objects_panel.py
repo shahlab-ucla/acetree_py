@@ -355,13 +355,15 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         self._show_checkbox = QCheckBox("Show ROIs")
         self._show_checkbox.setChecked(True)
         self._show_checkbox.setAccessibleName("Show subcellular ROI overlay")
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(self._show_checkbox)
+        # Native checkbox/combobox padding can make three controls wider than
+        # the compact dock. Keep the two filters together on their own row.
+        filter_row = QGridLayout()
+        filter_row.addWidget(self._show_checkbox, 0, 0, 1, 2)
         self._cell_combo = QComboBox()
         self._cell_combo.addItem("All cells", userData="all")
         self._cell_combo.addItem("Current cell", userData="current")
         self._cell_combo.setAccessibleName("Cell association filter")
-        filter_row.addWidget(self._cell_combo, 1)
+        filter_row.addWidget(self._cell_combo, 1, 0)
         self._state_combo = QComboBox()
         for label, value in (
             ("All states", "all"), ("Missing", "missing"), ("Draft", "draft"),
@@ -369,7 +371,7 @@ class SubcellularObjectsPanel(QWidget):  # type: ignore[misc]
         ):
             self._state_combo.addItem(label, userData=value)
         self._state_combo.setAccessibleName("Frame state filter")
-        filter_row.addWidget(self._state_combo, 1)
+        filter_row.addWidget(self._state_combo, 1, 1)
         layout.addLayout(filter_row)
         self._search_edit = QLineEdit()
         self._search_edit.setPlaceholderText("Search class, index, or associated cell")
