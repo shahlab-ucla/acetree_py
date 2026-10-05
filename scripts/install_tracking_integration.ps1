@@ -51,6 +51,11 @@ if ($DryRun) {
     return
 }
 
+& $Python (Join-Path $PSScriptRoot "installer_preflight.py") $Variant
+if ($LASTEXITCODE -ne 0) {
+    throw "AceTree-Py installer preflight failed; installation was not started."
+}
+
 & $Python -m pip install --editable $InstallTarget
 if ($LASTEXITCODE -ne 0) {
     throw "AceTree-Py installation failed with exit code $LASTEXITCODE."

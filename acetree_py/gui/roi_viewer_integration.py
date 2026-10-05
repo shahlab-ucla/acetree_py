@@ -393,7 +393,9 @@ class RoiViewerIntegration:
     @staticmethod
     def _snapshot_layer(layer: Any) -> dict[str, Any]:
         text = getattr(layer, "text", None)
-        if hasattr(text, "dict"):
+        if hasattr(text, "model_dump"):
+            text = text.model_dump()
+        elif hasattr(text, "dict"):
             text = text.dict()
         return {
             "data": [np.array(item, copy=True) for item in getattr(layer, "data", ())],

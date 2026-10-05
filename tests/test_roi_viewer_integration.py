@@ -385,3 +385,24 @@ def test_object_filters_and_explicit_visibility_survive_3d_navigation():
     assert not integration.overlay_layer.visible
     integration.set_three_dimensional(False)
     assert integration.overlay_layer.visible
+
+
+@pytest.mark.parametrize("serializer", ["model_dump", "dict"])
+def test_text_snapshot_restores_serialized_labels_without_aliasing(serializer):
+    labels = {"string": ["Original"], "color": "yellow", "size": 11}
+
+    def serialize():
+        return labels
+
+    def deprecated_dict():
+        raise AssertionError("model_dump must take precedence over dict")
+
+    text_model = SimpleNamespace(dict=deprecated_dict)
+    setattr(text_model, serializer, serialize)
+    layer = _Layer([], name="ROI")
+    layer.text = text_model
+    snapshot = RoiViewerIntegration._snapshot_layer(layer)
+    labels["string"][0] = "Mutated"
+    layer.text = {"string": ["Partial"]}
+    RoiViewerIntegration._restore_layer(layer, snapshot)
+    assert layer.text == {"string": ["Original"], "color": "yellow", "size": 11}

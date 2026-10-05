@@ -371,7 +371,9 @@ class ViewerIntegration:
         """Capture geometry and parallel presentation arrays for rollback."""
 
         text = getattr(layer, "text", None)
-        if hasattr(text, "dict"):
+        if hasattr(text, "model_dump"):
+            text = text.model_dump()
+        elif hasattr(text, "dict"):
             text = text.dict()
         return {
             "data": [np.array(shape, copy=True) for shape in layer.data],

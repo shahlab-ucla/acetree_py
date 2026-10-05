@@ -79,6 +79,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
+"$PYTHON_BIN" "$SCRIPT_DIR/installer_preflight.py" "$VARIANT"
+
 "$PYTHON_BIN" -m pip install --editable "$INSTALL_TARGET"
 VERSION_OUTPUT=$("$PYTHON_BIN" -m acetree_py --version)
 case "$VERSION_OUTPUT" in

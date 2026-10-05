@@ -332,3 +332,24 @@ def test_partial_add_and_rollback_failure_is_never_silenced(monkeypatch) -> None
     assert layer.editable is False
     assert layer.mode == "pan_zoom"
     assert not layer.selected_data
+
+
+@pytest.mark.parametrize("serializer", ["model_dump", "dict"])
+def test_text_snapshot_restores_serialized_labels_without_aliasing(serializer):
+    labels = {"string": ["Original"], "color": "yellow", "size": 11}
+
+    def serialize():
+        return labels
+
+    def deprecated_dict():
+        raise AssertionError("model_dump must take precedence over dict")
+
+    text_model = SimpleNamespace(dict=deprecated_dict)
+    setattr(text_model, serializer, serialize)
+    layer = _FakeShapesLayer()
+    layer.text = text_model
+    snapshot = ViewerIntegration._snapshot_curated_shapes(layer)
+    labels["string"][0] = "Mutated"
+    layer.text = {"string": ["Partial"]}
+    ViewerIntegration._restore_curated_shapes(layer, snapshot)
+    assert layer.text == {"string": ["Original"], "color": "yellow", "size": 11}

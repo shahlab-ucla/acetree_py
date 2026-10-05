@@ -20,7 +20,8 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = [
-    "napari[all]>=0.5,<0.7",
+    "napari[all]>=0.5,<0.7; python_version < '3.14'",
+    "napari[all]>=0.7.1,<0.8; python_version >= '3.14'",
     "qtpy>=2.3",
 ]
 dev = [
