@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("qtpy.QtWidgets")
 
 napari = pytest.importorskip("napari")
+from pytestqt.exceptions import TimeoutError as QtTimeoutError
 from qtpy.QtCore import QPoint, Qt
 from qtpy.QtWidgets import QApplication, QDockWidget
 
@@ -47,6 +48,7 @@ def _workspace_app():
 
 
 def _reachable(scroll, widget):
+    QApplication.processEvents()
     scroll.ensureWidgetVisible(widget)
     QApplication.processEvents()
     top_left = widget.mapTo(scroll.viewport(), QPoint(0, 0))
@@ -55,6 +57,27 @@ def _reachable(scroll, widget):
         and top_left.x() + widget.width() <= scroll.viewport().width()
         and top_left.y() + widget.height() <= scroll.viewport().height()
     )
+
+
+def _assert_reachable(qtbot, scroll, widget, screenshot):
+    # Word wrapping and native scrollbars can queue another layout pass.
+    # Wait for that geometry to settle while retaining full-widget visibility.
+    try:
+        qtbot.waitUntil(lambda: _reachable(scroll, widget), timeout=3000)
+    except QtTimeoutError:
+        scroll.window().grab().save(str(screenshot))
+        top_left = widget.mapTo(scroll.viewport(), QPoint(0, 0))
+        pytest.fail(
+            f"{widget.text()!r} is clipped: top-left=({top_left.x()}, {top_left.y()}), "
+            f"widget={widget.width()}x{widget.height()}, "
+            f"viewport={scroll.viewport().width()}x{scroll.viewport().height()}, "
+            f"content={scroll.widget().width()}x{scroll.widget().height()}, "
+            f"content minimum={scroll.widget().minimumSizeHint().width()}x"
+            f"{scroll.widget().minimumSizeHint().height()}, "
+            f"scroll ranges=({scroll.horizontalScrollBar().maximum()}, "
+            f"{scroll.verticalScrollBar().maximum()}); screenshot={screenshot}",
+            pytrace=False,
+        )
 
 
 def test_compact_workspace_preserves_selection_actions_menus_and_windows(qtbot, monkeypatch, tmp_path):
@@ -90,7 +113,8 @@ def test_compact_workspace_preserves_selection_actions_menus_and_windows(qtbot, 
         assert objects._btn_measure.isEnabled()
         assert objects._btn_plot.isVisibleTo(window)
         assert "Membrane #1" in workspace._context.text()
-        assert _reachable(objects._scroll_area, objects._btn_delete)
+        _assert_reachable(qtbot, objects._scroll_area, objects._btn_delete,
+                          tmp_path / "workspace-objects-clipped.png")
         objects._scroll_area.verticalScrollBar().setValue(0)
         docks = {dock.windowTitle(): dock for dock in window.findChildren(QDockWidget)}
         assert not docks["layer controls"].isVisible()
@@ -110,7 +134,8 @@ def test_compact_workspace_preserves_selection_actions_menus_and_windows(qtbot, 
         app._tracking_menu_actions["show_panel"].trigger()
         assert docks["Workflow"].isVisible()
         assert workspace._tabs.tabText(workspace._tabs.currentIndex()) == "Tracking"
-        assert _reachable(workspace._tracking_scroll, app._edit_panel._btn_apply_axes)
+        _assert_reachable(qtbot, workspace._tracking_scroll, app._edit_panel._btn_apply_axes,
+                          tmp_path / "workspace-tracking-clipped.png")
         app._edit_panel._btn_track.click()
         assert app._placement_mode and "Manual track" in workspace._context.text()
         app._exit_all_modes()
@@ -119,7 +144,8 @@ def test_compact_workspace_preserves_selection_actions_menus_and_windows(qtbot, 
         assert workspace._tabs.tabText(workspace._tabs.currentIndex()) == "Objects"
 
         workspace.show_tab("Nuclei")
-        assert _reachable(app._edit_panel._scroll_area, app._edit_panel._btn_record)
+        _assert_reachable(qtbot, app._edit_panel._scroll_area, app._edit_panel._btn_record,
+                          tmp_path / "workspace-nuclei-clipped.png")
         app._edit_panel._scroll_area.verticalScrollBar().setValue(0)
         assert workspace._measure_nuclei.isVisibleTo(window)
         workspace._plot_expression.click()
