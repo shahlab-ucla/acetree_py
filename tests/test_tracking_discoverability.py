@@ -13,6 +13,7 @@ from collections import Counter
 from types import SimpleNamespace
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 pytest.importorskip("qtpy")
@@ -214,7 +215,8 @@ def test_cli_identifies_alpha_build_and_documents_starrynite_presets():
 
     create_help = runner.invoke(cli_app, ["create", "--help"])
     assert create_help.exit_code == 0
-    assert "--tracking" in create_help.output
-    assert "starrynite" in create_help.output.lower()
-    assert "--starrynite-preset" in create_help.output
-    assert "dispim_singleview" in create_help.output
+    help_text = unstyle(create_help.output)
+    assert "--tracking" in help_text
+    assert "starrynite" in help_text.lower()
+    assert "--starrynite-preset" in help_text
+    assert "dispim_singleview" in help_text

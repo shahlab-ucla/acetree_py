@@ -576,9 +576,10 @@ def test_force_recompute_is_atomic_and_nonforce_reuses_snapshot(tmp_path: Path):
         )
     assert repository.snapshot_recomputed_cache(xml_path) is first
 
+    reads_before_recompute = list(provider.all_channel_calls)
     replacement = repository.prepare_recomputed_cache(xml_path, force=True)
     assert replacement is not first
-    assert replacement.measured_at != first.measured_at
+    assert provider.all_channel_calls == reads_before_recompute + first_calls
     assert repository.snapshot_recomputed_cache(xml_path) is replacement
 
 
