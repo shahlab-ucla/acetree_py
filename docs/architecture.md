@@ -1047,7 +1047,10 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = [
-    "napari[all]>=0.5,<0.7; python_version < '3.14'",
+    # The actual metadata also separates Intel macOS optional dependencies.
+    "napari[all]>=0.5,<0.7; python_version < '3.14' and (platform_system != 'Darwin' or platform_machine != 'x86_64')",
+    "napari[pyqt5,optional-base,optional-numba,bermuda]>=0.5,<0.7; python_version < '3.14' and platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    "numba>=0.62.1,<0.63; platform_system == 'Darwin' and platform_machine == 'x86_64' and python_version < '3.14'",
     "napari[all]>=0.7.1,<0.8; python_version >= '3.14'",
     "qtpy>=2.3",
 ]

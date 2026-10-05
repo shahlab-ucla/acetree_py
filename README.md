@@ -77,7 +77,10 @@ python -m pip install "acetree-py[gui] @ git+https://github.com/shahlab-ucla/ace
 Python 3.10-3.13 retains napari `>=0.5,<0.7`. Python 3.14 selects napari
 `>=0.7.1,<0.8`, whose default GUI installation uses PyQt6. Python 3.10 and
 3.11 remain supported; dependency resolution selects compatible scientific
-packages without raising their minimums globally.
+packages without raising their minimums globally. Intel Mac installations use
+the compatible Numba 0.62.x series and omit the optional triangle package,
+whose Intel wheels do not cover the supported Python range; napari retains
+its other triangulation backends.
 
 On Intel Macs, use Python 3.10-3.13 for the GUI. The guarded installers reject
 GUI/all installs on Intel Mac Python 3.14 before installing dependencies;

@@ -30,3 +30,10 @@ Planning review was static, not proof of runtime compatibility. Validation resul
 - Baseline reproduction: a fresh Python 3.14.8 environment using the old napari <0.7 GUI range selected napari 0.6.6 and attempted to build triangle 20200424; installation failed because no compatible binary was selected and Microsoft C++ build tools were required.
 - Implementation gate: 33 focused installer/overlay tests passed on the existing Python 3.12 environment. The source-text dependency assertion was subsequently removed in favor of actual fresh wheel resolution in the compatibility matrix.
 - Independent GPT-6.1 Sol review found no actionable issues in the initial changes or validator; fresh runtime and CI evidence remains required.
+
+## First runtime results
+
+- Fresh Windows Python 3.14.8: wheel/core/GUI installation, pip checks, CLI, native OpenGL, and all 13 required GUI workflows passed. Full suite: **1936 passed, 8 skipped, 19 deselected** in 216.34 seconds. napari 0.7.1 / PyQt6 6.11.0 (Qt runtime 6.11.2), NumPy 2.5.3, SciPy 1.18.1. No inherited workspace dependencies.
+- Fresh Windows Python 3.11.17 and 3.10.22 also passed wheel/core/GUI installation, pip checks, CLI, native OpenGL, and all 13 required GUI workflows; full results follow.
+- First remote matrix run: https://github.com/shahlab-ucla/acetree_py/actions/runs/37351723882 . Apple Silicon Python 3.11 passed. Failures exposed missing XCB libraries on Linux, unavailable hosted Windows OpenGL, Intel Mac optional dependencies requiring unsupported source builds, and a macOS scroll-visibility check requiring geometry diagnostics. These failures are not treated as successful validation.
+- Intel Mac Python 3.10-3.13 now keeps napari below 0.7 but selects its optional extras without triangle and restricts Numba to 0.62.x, the last series with Intel Mac wheels. Other platforms retain their original extras. The macOS GUI test retains strict full-widget visibility and adds bounded layout settling and screenshot/geometry diagnostics.
