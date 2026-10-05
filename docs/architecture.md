@@ -1046,7 +1046,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["napari[all]>=0.5,<0.7", "qtpy>=2.3"]
+gui = [
+    "napari[all]>=0.5,<0.7; python_version < '3.14'",
+    "napari[all]>=0.7.1,<0.8; python_version >= '3.14'",
+    "qtpy>=2.3",
+]
 dev = ["pytest>=7.0", "pytest-qt>=4.2", "ruff>=0.1"]
 
 [project.scripts]
@@ -1055,9 +1059,15 @@ acetree-py = "acetree_py.__main__:app"
 
 These commands install the current checkout. For alpha v2, use the `alpha-v2`
 worktree and guarded installer in the
-[Installation guide](../README.md#installation). The branch-pinned clone applies
-once the alpha branch is published. Manual installs are
+[Installation guide](../README.md#installation). The branch is published on GitHub.
+Manual installs are
 `python -m pip install -e .` (core), `python -m pip install -e ".[gui]"` (with
 GUI), or `python -m pip install -e ".[all]"` (everything).
 
-**napari version note:** The GUI uses napari's `Window.add_dock_widget()` and `Window._dock_widgets` APIs for panel management. These were tested against napari 0.5.x–0.6.x. The upper bound (`<0.7`) guards against breaking changes to these internal APIs.
+**napari version note:** The GUI uses napari's dock and layer APIs. Older
+Python installations retain napari below 0.7; Python 3.14 selects the bounded
+0.7.x line. Text snapshots support both Pydantic serialization APIs. Installer
+preflight rejects the unsupported Intel Mac/Python 3.14 GUI combination without
+restricting core-only installation. The compatibility workflow validates fresh
+wheel installations and real GUI execution; see the
+[compatibility checklist](alpha-v2/PYTHON_COMPATIBILITY.md) for results.

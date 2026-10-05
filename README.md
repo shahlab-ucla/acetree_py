@@ -13,9 +13,8 @@ with corrected measurements.
 ## Installation
 
 Requires **Python 3.10+** and Git. Alpha v2 is developed on `alpha-v2`,
-starting from `subcellular-measurements`. Install from the alpha worktree
-when testing local changes. The remote commands below apply once that branch
-has been published.
+starting from `subcellular-measurements`. The branch is published on GitHub.
+Install from the alpha worktree when testing local changes.
 
 ### Source install (recommended for testing)
 
@@ -41,7 +40,9 @@ sh scripts/install_tracking_integration.sh
 Pass `-Variant core` / `--variant core` for the CLI-only install, or
 `-Variant all` / `--variant all` to include development tools. The equivalent
 manual commands are below. If the Python executable is not named `python`, pass
-it explicitly (for example, `-Python py` or `--python /path/to/python3`).
+it explicitly (for example, `-Python C:\path\to\venv\Scripts\python.exe`
+or `--python /path/to/venv/bin/python`). Use a fresh virtual environment when
+changing Python versions or Qt bindings.
 
 ```bash
 # Core (CLI only, no GUI)
@@ -65,19 +66,30 @@ requirement (not an unqualified PyPI install):
 python -m pip install "acetree-py[gui] @ git+https://github.com/shahlab-ucla/acetree_py.git@alpha-v2"
 ```
 
-### Tested versions
+### Python and GUI compatibility
 
-| Package    | Tested | Required            |
-|------------|--------|---------------------|
-| Python     | 3.12   | >= 3.10             |
-| napari     | 0.6.6  | >= 0.5, < 0.7      |
-| numpy      | 2.3    | >= 1.24             |
-| scipy      | 1.16   | >= 1.10             |
-| matplotlib | 3.10   | >= 3.7              |
-| qtpy       | 2.4    | >= 2.3              |
-| tifffile   | 2026.3 | >= 2023.1           |
+| Platform | Standard CPython GUI support |
+|----------|------------------------------|
+| Windows and Linux | 3.10-3.14 |
+| Apple Silicon macOS | 3.10-3.14 |
+| Intel macOS | 3.10-3.13 |
 
-**napari version note:** The GUI supports napari 0.5.x–0.6.x and uses some internal dock APIs. This alpha was validated with napari 0.6.6. The upper bound (`<0.7`) guards against potential breaking changes.
+Python 3.10-3.13 retains napari `>=0.5,<0.7`. Python 3.14 selects napari
+`>=0.7.1,<0.8`, whose default GUI installation uses PyQt6. Python 3.10 and
+3.11 remain supported; dependency resolution selects compatible scientific
+packages without raising their minimums globally.
+
+On Intel Macs, use Python 3.10-3.13 for the GUI. The guarded installers reject
+GUI/all installs on Intel Mac Python 3.14 before installing dependencies;
+core-only installation remains available. Free-threaded Python (`3.14t`) is
+not included in this compatibility guarantee. Manual pip installation uses
+the same dependency markers but does not run the installer preflight.
+
+The [Python compatibility checklist and evidence](docs/alpha-v2/PYTHON_COMPATIBILITY.md)
+records exact tested versions, platform results, and any outstanding limits.
+GitHub Actions validates fresh wheel installs, the default Qt backend, and
+separate PySide6 environments. The bounded napari ranges protect the dock
+and layer APIs used by this alpha.
 
 ## Usage
 

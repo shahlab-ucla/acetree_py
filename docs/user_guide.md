@@ -9,8 +9,8 @@ For automatic-versus-forced names and the complete correction contract, see [Nam
 ## 1. Installation
 
 Alpha v2 is developed on `alpha-v2`, starting from `subcellular-measurements`.
-Install directly from your local alpha worktree. Once the alpha branch has been
-published, select it explicitly when cloning:
+Install directly from your local alpha worktree, or select the published
+branch explicitly when cloning:
 
 ```bash
 git clone --branch alpha-v2 --single-branch https://github.com/shahlab-ucla/acetree_py.git
@@ -32,7 +32,9 @@ sh scripts/install_tracking_integration.sh
 The scripts accept `core`, `gui` (the default), or `all` through
 `-Variant` on PowerShell and `--variant` on macOS/Linux. To install manually
 from the checked-out branch instead, use the commands below. If needed, select
-the interpreter with `-Python py` or `--python /path/to/python3`.
+the interpreter with `-Python C:\path\to\venv\Scripts\python.exe` or
+`--python /path/to/venv/bin/python`. Use a fresh virtual environment when
+changing Python versions or Qt bindings.
 
 ```bash
 # Core (CLI only, no GUI)
@@ -48,9 +50,17 @@ python -m pip install -e ".[all]"
 python -m acetree_py --version
 ```
 
-**Requirements:** Python 3.10+, Git, numpy, scipy, tifffile, typer, matplotlib. GUI additionally requires napari (0.5–0.6.x) and qtpy.
+**Requirements:** Standard CPython 3.10-3.14, Git, numpy, scipy, scikit-image,
+tifffile, typer, and matplotlib. GUI additionally requires qtpy and napari:
+Python 3.10-3.13 uses napari 0.5-0.6.x; Python 3.14 uses napari 0.7.1-0.7.x.
 
-**Tested versions:** napari 0.6.6, numpy 2.3, scipy 1.16, matplotlib 3.10, qtpy 2.4, Python 3.12.
+Windows, Linux, and Apple Silicon Macs support the GUI through Python 3.14.
+Intel Macs use Python 3.10-3.13 for the GUI; the installers explain this limit
+before attempting a GUI/all install. Core-only installation remains available.
+Free-threaded Python is outside this support policy.
+
+See the [compatibility evidence](alpha-v2/PYTHON_COMPATIBILITY.md) for exact
+runtime versions and validation results.
 
 ---
 
