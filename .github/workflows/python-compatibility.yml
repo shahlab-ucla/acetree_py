@@ -1,0 +1,83 @@
+name: Python compatibility
+
+on:
+  push:
+    branches: [alpha-v2]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel-and-gui:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }} / ${{ matrix.qt }} / ${{ matrix.suite }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, python: '3.10', qt: default, suite: full, architecture: x64}
+          - {os: ubuntu-24.04, python: '3.11', qt: default, suite: full, architecture: x64}
+          - {os: ubuntu-24.04, python: '3.12', qt: default, suite: smoke, architecture: x64}
+          - {os: ubuntu-24.04, python: '3.13', qt: default, suite: smoke, architecture: x64}
+          - {os: ubuntu-24.04, python: '3.14', qt: default, suite: full, architecture: x64}
+          - {os: windows-2022, python: '3.10', qt: default, suite: full, architecture: x64}
+          - {os: windows-2022, python: '3.11', qt: default, suite: full, architecture: x64}
+          - {os: windows-2022, python: '3.14', qt: default, suite: full, architecture: x64}
+          - {os: windows-2022, python: '3.11', qt: pyside6, suite: smoke, architecture: x64}
+          - {os: windows-2022, python: '3.14', qt: pyside6, suite: smoke, architecture: x64}
+          # Standard macos-15 is Apple Silicon; use the explicit Intel label.
+          - {os: macos-15, python: '3.10', qt: default, suite: smoke, architecture: arm64}
+          - {os: macos-15, python: '3.11', qt: default, suite: smoke, architecture: arm64}
+          - {os: macos-15, python: '3.14', qt: default, suite: smoke, architecture: arm64}
+          - {os: macos-15-intel, python: '3.10', qt: default, suite: smoke, architecture: x64}
+          - {os: macos-15-intel, python: '3.11', qt: default, suite: smoke, architecture: x64}
+          - {os: macos-15-intel, python: '3.13', qt: default, suite: smoke, architecture: x64}
+          # Intel macOS Python 3.14 GUI and free-threaded Python are outside support.
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.architecture }}
+      - name: Install X11 and Mesa for Linux OpenGL
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth libgl1-mesa-dri libegl1 libopengl0 libxcb-cursor0 libxcb-xinerama0 libxkbcommon-x11-0
+      - name: Validate Linux wheel, CLI, OpenGL and tests
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: >-
+          xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24 +extension GLX'
+          python scripts/validate_python_compatibility.py
+          --workspace "${{ runner.temp }}/acetree-compatibility"
+          --suite "${{ matrix.suite }}" --qt "${{ matrix.qt }}"
+          --expected-architecture "${{ matrix.architecture }}"
+      - name: Validate native wheel, CLI, OpenGL and tests
+        if: runner.os != 'Linux'
+        run: >-
+          python scripts/validate_python_compatibility.py
+          --workspace "${{ runner.temp }}/acetree-compatibility"
+          --suite "${{ matrix.suite }}" --qt "${{ matrix.qt }}"
+          --expected-architecture "${{ matrix.architecture }}"
+      - name: Retain runtime, dependency versions, logs and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-${{ matrix.os }}-py${{ matrix.python }}-${{ matrix.qt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/acetree-compatibility/*.txt
+            ${{ runner.temp }}/acetree-compatibility/*.log
+            ${{ runner.temp }}/acetree-compatibility/*.xml
+            ${{ runner.temp }}/acetree-compatibility/*.png
+            ${{ runner.temp }}/acetree-compatibility/pytest-*-tmp/**/*.png
+            ${{ runner.temp }}/acetree-compatibility/dist/*.whl
