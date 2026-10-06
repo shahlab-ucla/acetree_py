@@ -165,3 +165,13 @@ The final combined real-window workflow passed at **1280x720**, including all th
 The wheel `acetree_py-0.2.0-py3-none-any.whl` built successfully (3,543,408 bytes). Installation into a fresh temporary target outside the checkout passed; all six preset files and required model/runtime resources were included, `validate_bundled_assets()` returned no missing assets, and `python -m acetree_py --version` reported `AceTree-Py 0.2.0 (alpha v2)`. No branch publication was performed.
 
 Final production F/E9 lint remains **32 baseline, 32 alpha, zero introduced**. Memory/navigation evidence is recorded above, including its measurement boundaries. Git ancestry confirms alpha-v2 descends from the audited subcellular-measurements commit. The source branch and its untracked reports/graph artifacts remain unchanged.
+
+## FP32 TIFF display correction (d223c5f)
+
+Main and detached 3D viewers now share contrast controls with floating-point numeric values and data-scaled sliders. Auto uses finite 1st/99th percentiles; Reset uses the finite float data range or integer dtype range. Layer limits and visibility synchronize back into the controls. Original pixel values and image colormaps are preserved.
+
+Four focused cases cover actual FP32 TIFF loading with normalized, negative/fractional, and above-uint16 ranges, plus nonfinite/constant data and changed frames. Both panels exercise numeric edits, sliders, Auto, Reset, and napari-originated limit changes. A native green/magenta rendering was visually inspected.
+
+[Cross-platform CI](https://github.com/shahlab-ucla/acetree_py/actions/runs/37489907449): all 16 configurations passed at d223c5f. All configurations ran 18 required GUI cases with no skips. Full suites on Python 3.10/3.11/3.14: Linux **1947 passed, 2 skipped, 19 deselected** per version; Windows **1941 passed, 8 skipped, 19 deselected** per version. The existing external-dataset, Windows POSIX, and MATLAB exclusions remain unchanged.
+
+Local validation: Python 3.14 full suite **1941 passed**; final affected-widget checks **48 passed**. Python 3.11 affected GUI checks **74 passed**. An unchanged standalone Objects font-metrics check failed locally, including in isolation; its checks passed in the clean cross-platform CI environments. No Objects layout change was included in this patch.
