@@ -252,6 +252,7 @@ def main() -> None:
                   '--basetemp', str(workspace / 'pytest-gui-tmp')]
         report = workspace / 'gui-required.xml'
         run('gui-required', [*common, 'tests/test_workflow_workspace.py',
+                             'tests/test_float_contrast.py',
                              'tests/test_measurement_jobs.py',
                              'tests/test_tracking_napari_smoke.py',
                              f'--junitxml={report}'], timeout=300)

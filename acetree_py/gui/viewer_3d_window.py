@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 try:
     from qtpy.QtCore import QTimer, Qt
     from qtpy.QtWidgets import (
-        QCheckBox,
         QComboBox,
         QGroupBox,
         QHBoxLayout,
@@ -189,18 +188,11 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
         self._contrast_layout = QVBoxLayout(self._contrast_group)
         self._contrast_layout.setContentsMargins(4, 4, 4, 4)
         self._contrast_layout.setSpacing(2)
-        self._channel_widgets: list[dict] = []
-        side.addWidget(self._contrast_group)
+        from .contrast_tools import ContrastTools
 
-        # Auto/Reset all
-        btn_row = QHBoxLayout()
-        btn_auto = QPushButton("Auto All")
-        btn_auto.clicked.connect(self._auto_all_contrast)
-        btn_reset = QPushButton("Reset All")
-        btn_reset.clicked.connect(self._reset_all_contrast)
-        btn_row.addWidget(btn_auto)
-        btn_row.addWidget(btn_reset)
-        side.addLayout(btn_row)
+        self._contrast_tools = ContrastTools(self)
+        self._contrast_layout.addWidget(self._contrast_tools)
+        side.addWidget(self._contrast_group)
 
         side.addStretch()
 
@@ -296,139 +288,13 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
                 self._image_layers.append(layer)
 
     def _rebuild_channel_controls(self) -> None:
-        """Build per-channel contrast/visibility controls."""
-        # Clear existing
-        for w in self._channel_widgets:
-            w["group"].setParent(None)
-            w["group"].deleteLater()
-        self._channel_widgets.clear()
-
-        n_ch = len(self._image_layers)
-        max_val = 65535
-
-        for ch in range(n_ch):
-            grp = QGroupBox(f"Ch{ch + 1}" if n_ch > 1 else "Image")
-            grp_layout = QVBoxLayout(grp)
-            grp_layout.setSpacing(2)
-            grp_layout.setContentsMargins(2, 2, 2, 2)
-
-            widgets: dict = {"group": grp}
-
-            if n_ch > 1:
-                chk = QCheckBox("Visible")
-                chk.setChecked(True)
-                ch_idx = ch
-                chk.toggled.connect(
-                    lambda vis, c=ch_idx: self._on_ch_visible(c, vis)
-                )
-                grp_layout.addWidget(chk)
-                widgets["chk"] = chk
-
-            # Min
-            min_row = QHBoxLayout()
-            min_label = QLabel("&Min:")
-            min_sl = QSlider(Qt.Horizontal)
-            min_sl.setAccessibleName(f"Channel {ch + 1} contrast minimum slider")
-            min_sl.setRange(0, max_val)
-            min_sp = QSpinBox()
-            min_sp.setAccessibleName(f"Channel {ch + 1} contrast minimum")
-            min_label.setBuddy(min_sp)
-            min_sp.setRange(0, max_val)
-            min_sl.valueChanged.connect(
-                lambda v, c=ch: self._on_contrast_min(c, v)
-            )
-            min_sp.valueChanged.connect(min_sl.setValue)
-            min_row.addWidget(min_label)
-            min_row.addWidget(min_sl, stretch=1)
-            min_row.addWidget(min_sp)
-            grp_layout.addLayout(min_row)
-            widgets["min_sl"] = min_sl
-            widgets["min_sp"] = min_sp
-
-            # Max
-            max_row = QHBoxLayout()
-            max_label = QLabel("Ma&x:")
-            max_sl = QSlider(Qt.Horizontal)
-            max_sl.setAccessibleName(f"Channel {ch + 1} contrast maximum slider")
-            max_sl.setRange(0, max_val)
-            max_sl.setValue(max_val)
-            max_sp = QSpinBox()
-            max_sp.setAccessibleName(f"Channel {ch + 1} contrast maximum")
-            max_label.setBuddy(max_sp)
-            max_sp.setRange(0, max_val)
-            max_sp.setValue(max_val)
-            max_sl.valueChanged.connect(
-                lambda v, c=ch: self._on_contrast_max(c, v)
-            )
-            max_sp.valueChanged.connect(max_sl.setValue)
-            max_row.addWidget(max_label)
-            max_row.addWidget(max_sl, stretch=1)
-            max_row.addWidget(max_sp)
-            grp_layout.addLayout(max_row)
-            widgets["max_sl"] = max_sl
-            widgets["max_sp"] = max_sp
-
-            self._contrast_layout.addWidget(grp)
-            self._channel_widgets.append(widgets)
-
-    # ── Contrast handlers ──
-
-    def _on_ch_visible(self, ch: int, visible: bool) -> None:
-        if ch < len(self._image_layers):
-            self._image_layers[ch].visible = visible
-
-    def _on_contrast_min(self, ch: int, value: int) -> None:
-        w = self._channel_widgets[ch]
-        w["min_sp"].blockSignals(True)
-        w["min_sp"].setValue(value)
-        w["min_sp"].blockSignals(False)
-        self._apply_contrast(ch)
-
-    def _on_contrast_max(self, ch: int, value: int) -> None:
-        w = self._channel_widgets[ch]
-        w["max_sp"].blockSignals(True)
-        w["max_sp"].setValue(value)
-        w["max_sp"].blockSignals(False)
-        self._apply_contrast(ch)
-
-    def _apply_contrast(self, ch: int) -> None:
-        if ch >= len(self._image_layers):
-            return
-        w = self._channel_widgets[ch]
-        lo = w["min_sl"].value()
-        hi = w["max_sl"].value()
-        if hi <= lo:
-            hi = lo + 1
-        try:
-            self._image_layers[ch].contrast_limits = (lo, hi)
-        except Exception:
-            pass
+        self._contrast_tools.refresh()
 
     def _auto_all_contrast(self) -> None:
-        for ch in range(len(self._image_layers)):
-            data = self._image_layers[ch].data
-            if data is None or data.size == 0:
-                continue
-            lo = int(np.percentile(data, 1))
-            hi = int(np.percentile(data, 99))
-            if hi <= lo:
-                hi = lo + 1
-            w = self._channel_widgets[ch]
-            w["min_sl"].blockSignals(True)
-            w["max_sl"].blockSignals(True)
-            w["min_sl"].setValue(lo)
-            w["max_sl"].setValue(hi)
-            w["min_sl"].blockSignals(False)
-            w["max_sl"].blockSignals(False)
-            w["min_sp"].setValue(lo)
-            w["max_sp"].setValue(hi)
-            self._apply_contrast(ch)
+        self._contrast_tools._auto_all()
 
     def _reset_all_contrast(self) -> None:
-        for ch in range(len(self._channel_widgets)):
-            w = self._channel_widgets[ch]
-            w["min_sl"].setValue(0)
-            w["max_sl"].setValue(65535)
+        self._contrast_tools._reset_all()
 
     # ── Color preset ──
 
@@ -509,6 +375,8 @@ class Viewer3DWindow(QWidget):  # type: ignore[misc]
         self._time_slider.blockSignals(False)
 
         self._load_stacks(cur_time)
+        if getattr(self, "_contrast_tools", None) is not None:
+            self._contrast_tools.refresh()
         self._update_points(cur_time)
         self._update_tracking_preview()
         detector_updater = getattr(self, "_update_detector_preview", None)

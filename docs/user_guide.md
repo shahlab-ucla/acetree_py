@@ -608,10 +608,12 @@ The Edit Panel provides a **Color Mode** toggle at the top:
 The channels section of **Browse & Channels** on the left provides per-channel controls. For multi-channel data (e.g. split-channel dual-color images), each channel gets its own control group:
 
 - **Visible checkbox**: Toggle channel visibility (multi-channel only)
-- **Min/Max sliders**: Drag to adjust the display range
-- **Auto**: Automatically compute optimal contrast from the current image data (1st/99th percentile)
-- **Reset**: Reset to full dynamic range (0–65535)
+- **Min/Max sliders and numeric fields**: Adjust the display range, including fractional and negative values for floating-point images
+- **Auto**: Use the current image's 1st/99th percentiles, ignoring NaN and infinite pixels
+- **Reset**: Restore the integer dtype range (for example, 0–65535 for uint16), or the finite data range for floating-point images
 - **Auto All / Reset All**: Apply to all channels at once
+
+FP32 TIFFs from preprocessing workflows retain their original values; contrast changes affect display only. The main viewer and detached 3D window use the same controls. Their numeric fields reflect the layer's current limits, including changes made through napari. Constant-valued float images receive a small nonzero display range.
 
 For single-channel data, a simplified layout without the visibility checkbox is shown.
 
